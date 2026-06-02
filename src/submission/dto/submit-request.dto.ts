@@ -10,6 +10,16 @@ export class SubmitRequestDto {
   @IsInt()
   readonly problemId: number;
 
+  @ApiProperty({ required: false })
+  @IsInt()
+  @IsOptional()
+  readonly contestId?: number;
+
+  @ApiProperty({ required: false })
+  @IsInt()
+  @IsOptional()
+  readonly contestProblemIndex?: number;
+
   @ApiProperty()
   @IsObject()
   readonly content: unknown;

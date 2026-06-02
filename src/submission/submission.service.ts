@@ -327,7 +327,9 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     submitter: UserEntity,
     problem: ProblemEntity,
     content: SubmissionContent,
-    uploadInfo: FileUploadInfoDto
+    uploadInfo: FileUploadInfoDto,
+    contestId?: number,
+    contestProblemIndex?: number
   ): Promise<
     [
       errors: ValidationError[],
@@ -376,6 +378,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       submission.status = SubmissionStatus.Pending;
       submission.submitTime = new Date();
       submission.problemId = problem.id;
+      submission.contestId = contestId || null;
+      submission.contestProblemIndex = contestProblemIndex || null;
       submission.submitterId = submitter.id;
       await transactionalEntityManager.save(submission);
 
@@ -409,6 +413,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     return {
       id: submission.id,
       isPublic: submission.isPublic,
+      contestId: submission.contestId,
+      contestProblemIndex: submission.contestProblemIndex,
       codeLanguage: submission.codeLanguage,
       answerSize: submission.answerSize,
       score: submission.score,

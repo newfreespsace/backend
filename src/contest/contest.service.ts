@@ -290,15 +290,12 @@ export class ContestService {
   }
 
   async onSubmissionFinished(submission: SubmissionEntity): Promise<void> {
-    const contests = await this.contestRepository
-      .createQueryBuilder("contest")
-      .where("contest.startTime <= :submitTime", { submitTime: submission.submitTime })
-      .andWhere("contest.endTime >= :submitTime", { submitTime: submission.submitTime })
-      .getMany();
+    if (!submission.contestId) return;
 
-    for (const contest of contests.filter(contest => contest.problemIds.includes(submission.problemId))) {
-      await this.updatePlayerScore(contest, submission); // eslint-disable-line no-await-in-loop
-    }
+    const contest = await this.findContestById(submission.contestId);
+    if (!contest || contest.problemIds[submission.contestProblemIndex - 1] !== submission.problemId) return;
+
+    await this.updatePlayerScore(contest, submission);
   }
 
   private async updatePlayerScore(contest: ContestEntity, submission: SubmissionEntity): Promise<void> {

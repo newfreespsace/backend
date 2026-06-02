@@ -70,6 +70,13 @@ export class SubmissionEntity {
   @Index()
   problemId: number;
 
+  @Column({ type: "integer", nullable: true })
+  @Index()
+  contestId: number;
+
+  @Column({ type: "integer", nullable: true })
+  contestProblemIndex: number;
+
   @ManyToOne(() => UserEntity)
   @JoinColumn()
   submitter: Promise<UserEntity>;

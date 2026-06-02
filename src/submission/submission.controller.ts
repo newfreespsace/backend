@@ -1,4 +1,4 @@
-import { Controller, Post, Body, BadRequestException } from "@nestjs/common";
+import { Controller, Post, Body, BadRequestException, Inject, forwardRef } from "@nestjs/common";
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Recaptcha } from "@nestlab/google-recaptcha";
@@ -13,6 +13,7 @@ import { ProblemEntity } from "@/problem/problem.entity";
 import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { MinioSignFor, FileService } from "@/file/file.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
+import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 
 import { SubmissionStatus } from "./submission-status.enum";
 import { SubmissionStatisticsService } from "./submission-statistics.service";
@@ -65,7 +66,9 @@ export class SubmissionController {
     private readonly submissionProgressService: SubmissionProgressService,
     private readonly submissionStatisticsService: SubmissionStatisticsService,
     private readonly auditService: AuditService,
-    private readonly fileService: FileService
+    private readonly fileService: FileService,
+    @Inject(forwardRef(() => ContestService))
+    private readonly contestService: ContestService
   ) {}
 
   @Recaptcha()
@@ -87,11 +90,24 @@ export class SubmissionController {
           error: SubmitResponseError.NO_SUCH_PROBLEM
         };
 
-      // TODO: add "submit" permission
-      if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)))
-        return {
-          error: SubmitResponseError.PERMISSION_DENIED
-        };
+      if (request.contestId != null) {
+        const contest = await this.contestService.findContestById(request.contestId);
+        if (!contest) return { error: SubmitResponseError.NO_SUCH_CONTEST };
+
+        if (!(await this.contestService.userHasPermission(currentUser, contest, ContestPermissionType.View)))
+          return { error: SubmitResponseError.PERMISSION_DENIED };
+
+        if (!request.contestProblemIndex || contest.problemIds[request.contestProblemIndex - 1] !== problem.id)
+          return { error: SubmitResponseError.NO_SUCH_PROBLEM };
+
+        if (!this.contestService.isRunning(contest)) return { error: SubmitResponseError.CONTEST_NOT_RUNNING };
+      } else {
+        // TODO: add "submit" permission
+        if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)))
+          return {
+            error: SubmitResponseError.PERMISSION_DENIED
+          };
+      }
 
       const [, submittable] = await this.problemService.getProblemJudgeInfo(problem);
       if (!submittable)
@@ -103,7 +119,9 @@ export class SubmissionController {
         currentUser,
         problem,
         request.content,
-        request.uploadInfo
+        request.uploadInfo,
+        request.contestId,
+        request.contestProblemIndex
       );
 
       if (validationError && validationError.length > 0) throw new BadRequestException(validationError);
@@ -312,6 +330,8 @@ export class SubmissionController {
       meta: {
         id: submission.id,
         isPublic: submission.isPublic,
+        contestId: submission.contestId,
+        contestProblemIndex: submission.contestProblemIndex,
         codeLanguage: submission.codeLanguage,
         answerSize: submission.answerSize,
         score: submission.score,

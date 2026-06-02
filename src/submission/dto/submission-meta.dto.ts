@@ -16,6 +16,12 @@ export class SubmissionBasicMetaDto {
   isPublic: boolean;
 
   @ApiProperty()
+  contestId?: number;
+
+  @ApiProperty()
+  contestProblemIndex?: number;
+
+  @ApiProperty()
   codeLanguage: string;
 
   @ApiProperty()
@@ -38,6 +44,12 @@ export class SubmissionBasicMetaDto {
 }
 
 export class SubmissionMetaDto extends SubmissionBasicMetaDto {
+  @ApiProperty()
+  contestId?: number;
+
+  @ApiProperty()
+  contestProblemIndex?: number;
+
   @ApiProperty()
   problem: ProblemMetaDto;
 
