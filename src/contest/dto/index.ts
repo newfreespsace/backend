@@ -9,3 +9,5 @@ export * from "./save-contest-request.dto";
 export * from "./save-contest-response.dto";
 export * from "./get-contest-ranklist-request.dto";
 export * from "./get-contest-ranklist-response.dto";
+export * from "./get-contest-problem-request.dto";
+export * from "./get-contest-problem-response.dto";

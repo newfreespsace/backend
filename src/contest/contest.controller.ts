@@ -1,7 +1,12 @@
-import { Body, Controller, Post } from "@nestjs/common";
+import { Body, Controller, Inject, Post, forwardRef } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
+import { Locale } from "@/common/locale.type";
+import { DiscussionService } from "@/discussion/discussion.service";
+import { ProblemService } from "@/problem/problem.service";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
+import { SubmissionService } from "@/submission/submission.service";
 import { UserEntity } from "@/user/user.entity";
 import { UserService } from "@/user/user.service";
 
@@ -18,13 +23,27 @@ import {
   QueryContestsResponseError,
   SaveContestRequestDto,
   SaveContestResponseDto,
+  GetContestProblemRequestDto,
+  GetContestProblemResponseDto,
+  GetContestProblemResponseError,
   SaveContestResponseError
 } from "./dto";
 
 @ApiTags("Contest")
 @Controller("contest")
 export class ContestController {
-  constructor(private readonly contestService: ContestService, private readonly userService: UserService) {}
+  constructor(
+    @Inject(forwardRef(() => ContestService))
+    private readonly contestService: ContestService,
+    @Inject(forwardRef(() => UserService))
+    private readonly userService: UserService,
+    @Inject(forwardRef(() => ProblemService))
+    private readonly problemService: ProblemService,
+    @Inject(forwardRef(() => SubmissionService))
+    private readonly submissionService: SubmissionService,
+    @Inject(forwardRef(() => DiscussionService))
+    private readonly discussionService: DiscussionService
+  ) {}
 
   @Post("queryContests")
   @ApiBearerAuth()
@@ -125,6 +144,92 @@ export class ContestController {
       meta: this.contestService.getContestMeta(contest),
       problems: await this.contestService.getContestProblems(contest, request.locale, currentUser, false),
       rows: await this.contestService.getRanklistRows(contest, currentUser)
+    };
+  }
+
+  @Post("getContestProblem")
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Get problem in contest." })
+  async getContestProblem(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: GetContestProblemRequestDto
+  ): Promise<GetContestProblemResponseDto> {
+    const contestId = request.contestId;
+    const pid = request.pid;
+
+    const contest = await this.contestService.findContestById(contestId);
+    if (!contest) return { error: GetContestProblemResponseError.NO_SUCH_CONTEST };
+
+    if (!(await this.contestService.userHasPermission(currentUser, contest, ContestPermissionType.View))) {
+      return { error: GetContestProblemResponseError.PERMISSION_DENIED };
+    }
+
+    const problemId = contest.problemIds[pid - 1];
+    if (!problemId) return { error: GetContestProblemResponseError.NO_SUCH_PROBLEM };
+
+    const isManager = await this.contestService.userHasPermission(currentUser, contest, ContestPermissionType.Manage);
+
+    const unveiled = this.contestService.isUnveiled(contest, currentUser);
+
+    if (!unveiled) {
+      return { error: GetContestProblemResponseError.CONTEST_NOT_STARTED };
+    }
+
+    const problem = await this.problemService.findProblemById(problemId);
+    if (!problem) return { error: GetContestProblemResponseError.NO_SUCH_PROBLEM };
+
+    const locale: Locale = request.locale;
+    const resultLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
+    const [judgeInfo, submittable] = await this.problemService.getProblemPreprocessedJudgeInfo(problem);
+    const [lastSubmission, lastAcceptedSubmission] = currentUser
+      ? await Promise.all([
+          this.submissionService
+            .getUserLatestSubmissionByProblems(currentUser, [problem], false)
+            .then(map => map.get(problem.id)),
+          this.submissionService
+            .getUserLatestSubmissionByProblems(currentUser, [problem], true)
+            .then(map => map.get(problem.id))
+        ])
+      : [null, null];
+    const effectiveLastAcceptedSubmission =
+      lastSubmission && lastSubmission.status === SubmissionStatus.Accepted ? lastSubmission : lastAcceptedSubmission;
+
+    return {
+      contest: this.contestService.getContestMeta(contest),
+      pid,
+      problem: {
+        meta: await this.problemService.getProblemMeta(problem, true),
+        tagsOfLocale: await this.problemService
+          .getProblemTagsByProblem(problem)
+          .then(problemTags =>
+            Promise.all(problemTags.map(problemTag => this.problemService.getProblemTagLocalized(problemTag, locale)))
+          ),
+        localizedContentsOfLocale: {
+          locale: resultLocale,
+          title: await this.problemService.getProblemLocalizedTitle(problem, resultLocale),
+          contentSections: await this.problemService.getProblemLocalizedContent(problem, resultLocale)
+        },
+        samples: await this.problemService.getProblemSamples(problem),
+        judgeInfo,
+        submittable,
+        discussionCount: await this.discussionService.getDiscussionCountOfProblem(problem),
+        permissionOfCurrentUser: await this.problemService.getUserPermissions(currentUser, problem),
+        lastSubmission: currentUser
+          ? {
+              lastSubmission: lastSubmission && (await this.submissionService.getSubmissionBasicMeta(lastSubmission)),
+              lastAcceptedSubmission:
+                effectiveLastAcceptedSubmission &&
+                (await this.submissionService.getSubmissionBasicMeta(effectiveLastAcceptedSubmission)),
+              lastSubmissionContent:
+                lastSubmission && (await this.submissionService.getSubmissionDetail(lastSubmission)).content
+            }
+          : {}
+      },
+      permissions: {
+        manageContest: isManager,
+        running: this.contestService.isRunning(contest),
+        ended: this.contestService.isEnded(contest)
+      }
     };
   }
 }
