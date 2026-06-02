@@ -24,6 +24,17 @@ export class QuerySubmissionRequestDto {
   problemDisplayId: number;
 
   @ApiProperty()
+  @IsInt()
+  @IsOptional()
+  contestId: number;
+
+  @ApiProperty()
+  @IsPositive()
+  @IsInt()
+  @IsOptional()
+  contestProblemIndex: number;
+
+  @ApiProperty()
   @IsUsername()
   @IsOptional()
   submitter: string;

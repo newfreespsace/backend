@@ -14,6 +14,7 @@ import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { MinioSignFor, FileService } from "@/file/file.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
 import { ContestPermissionType, ContestService } from "@/contest/contest.service";
+import { ContestEntity } from "@/contest/contest.entity";
 
 import { SubmissionStatus } from "./submission-status.enum";
 import { SubmissionStatisticsService } from "./submission-statistics.service";
@@ -163,6 +164,20 @@ export class SubmissionController {
         };
     }
 
+    let filterContest: ContestEntity = null;
+    if (request.contestId) {
+      filterContest = await this.contestService.findContestById(request.contestId);
+      if (!filterContest)
+        return {
+          error: QuerySubmissionResponseError.NO_SUCH_CONTEST
+        };
+
+      if (request.contestProblemIndex && !filterContest.problemIds[request.contestProblemIndex - 1])
+        return {
+          error: QuerySubmissionResponseError.NO_SUCH_PROBLEM
+        };
+    }
+
     let filterSubmitter: UserEntity = null;
     if (request.submitter) {
       filterSubmitter = await this.userService.findUserByUsername(request.submitter);
@@ -180,15 +195,25 @@ export class SubmissionController {
       hasManageProblemPrivilege ||
       (filterProblem &&
         (await this.problemService.userHasPermission(currentUser, filterProblem, ProblemPermissionType.View)));
+    const hasViewContestPermission =
+      filterContest &&
+      (await this.contestService.userHasPermission(currentUser, filterContest, ContestPermissionType.View));
+    if (filterContest && !hasViewContestPermission)
+      return {
+        error: QuerySubmissionResponseError.PERMISSION_DENIED
+      };
+
     const isSubmissionsOwned = filterSubmitter && currentUser && filterSubmitter.id === currentUser.id;
     const queryResult = await this.submissionService.querySubmissions(
       filterProblem ? filterProblem.id : null,
+      filterContest ? filterContest.id : null,
+      filterContest ? request.contestProblemIndex : null,
       filterSubmitter ? filterSubmitter.id : null,
       request.codeLanguage,
       request.status,
       request.minId,
       request.maxId,
-      !(hasManageProblemPrivilege || hasViewProblemPermission || isSubmissionsOwned),
+      !(hasManageProblemPrivilege || hasViewProblemPermission || hasViewContestPermission || isSubmissionsOwned),
       request.takeCount > this.configService.config.queryLimit.submissions
         ? this.configService.config.queryLimit.submissions
         : request.takeCount
@@ -208,6 +233,8 @@ export class SubmissionController {
         submissionMetas[i] = {
           id: submission.id,
           isPublic: submission.isPublic,
+          contestId: submission.contestId,
+          contestProblemIndex: submission.contestProblemIndex,
           codeLanguage: submission.codeLanguage,
           answerSize: submission.answerSize,
           score: submission.score,

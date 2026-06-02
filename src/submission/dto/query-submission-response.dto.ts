@@ -4,7 +4,9 @@ import { SubmissionMetaDto } from "./submission-meta.dto";
 
 export enum QuerySubmissionResponseError {
   NO_SUCH_PROBLEM = "NO_SUCH_PROBLEM",
-  NO_SUCH_USER = "NO_SUCH_USER"
+  NO_SUCH_USER = "NO_SUCH_USER",
+  NO_SUCH_CONTEST = "NO_SUCH_CONTEST",
+  PERMISSION_DENIED = "PERMISSION_DENIED"
 }
 
 export class QuerySubmissionResponseDto {
