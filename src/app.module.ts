@@ -26,6 +26,9 @@ import { MigrationModule } from "./migration/migration.module";
 import { EventReportModule } from "./event-report/event-report.module";
 import { HomepageModule } from "./homepage/homepage.module";
 import { MetricsModule } from "./metrics/metrics.module";
+import { ContestModule } from "./contest/contest.module";
+
+import { RequestLogMiddleware } from "./request-log.middleware";
 
 @Module({
   imports: [
@@ -44,6 +47,7 @@ import { MetricsModule } from "./metrics/metrics.module";
     forwardRef(() => SubmissionModule),
     forwardRef(() => JudgeModule),
     forwardRef(() => DiscussionModule),
+    forwardRef(() => ContestModule),
     forwardRef(() => EventReportModule),
     forwardRef(() => HomepageModule),
     forwardRef(() => MigrationModule),
@@ -59,6 +63,10 @@ export class AppModule implements NestModule {
       method: RequestMethod.ALL
     });
     consumer.apply(MetricsMiddleware).forRoutes({
+      path: "*",
+      method: RequestMethod.ALL
+    });
+    consumer.apply(RequestLogMiddleware).forRoutes({
       path: "*",
       method: RequestMethod.ALL
     });

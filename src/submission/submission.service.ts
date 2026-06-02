@@ -30,6 +30,7 @@ import { MinioSignFor, FileService } from "@/file/file.service";
 import { ConfigService } from "@/config/config.service";
 import { FileEntity } from "@/file/file.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
+import { ContestService } from "@/contest/contest.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
 
@@ -133,6 +134,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => UserPrivilegeService))
     private readonly userPrivilegeService: UserPrivilegeService,
+    @Inject(forwardRef(() => ContestService))
+    private readonly contestService: ContestService,
     private readonly metricsService: MetricsService
   ) {
     this.judgeQueueService.registerTaskType(JudgeTaskType.Submission, this);
@@ -695,6 +698,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
 
     await this.onSubmissionUpdated(oldSubmission, submission);
+    await this.contestService.onSubmissionFinished(submission);
   }
 
   /**
