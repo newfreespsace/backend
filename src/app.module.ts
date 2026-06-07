@@ -29,6 +29,9 @@ import { MetricsModule } from "./metrics/metrics.module";
 import { ContestModule } from "./contest/contest.module";
 
 import { RequestLogMiddleware } from "./request-log.middleware";
+import { TrainingController } from "./training/training.controller";
+import { TrainingService } from "./training/training.service";
+import { TrainingModule } from "./training/training.module";
 
 @Module({
   imports: [
@@ -51,10 +54,11 @@ import { RequestLogMiddleware } from "./request-log.middleware";
     forwardRef(() => EventReportModule),
     forwardRef(() => HomepageModule),
     forwardRef(() => MigrationModule),
-    forwardRef(() => MetricsModule)
+    forwardRef(() => MetricsModule),
+    TrainingModule
   ],
-  controllers: [AppController],
-  providers: [AppService, ErrorFilter, RecaptchaFilter]
+  controllers: [AppController, TrainingController],
+  providers: [AppService, ErrorFilter, RecaptchaFilter, TrainingService]
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
