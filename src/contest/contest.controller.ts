@@ -155,8 +155,7 @@ export class ContestController {
     @CurrentUser() currentUser: UserEntity,
     @Body() request: GetContestProblemRequestDto
   ): Promise<GetContestProblemResponseDto> {
-    const contestId = request.contestId;
-    const pid = request.pid;
+    const { contestId, pid } = request;
 
     const contest = await this.contestService.findContestById(contestId);
     if (!contest) return { error: GetContestProblemResponseError.NO_SUCH_CONTEST };
@@ -179,7 +178,7 @@ export class ContestController {
     const problem = await this.problemService.findProblemById(problemId);
     if (!problem) return { error: GetContestProblemResponseError.NO_SUCH_PROBLEM };
 
-    const locale: Locale = request.locale;
+    const { locale } = request;
     const resultLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
     const [judgeInfo, submittable] = await this.problemService.getProblemPreprocessedJudgeInfo(problem);
     const [lastSubmission, lastAcceptedSubmission] = currentUser
