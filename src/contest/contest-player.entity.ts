@@ -1,16 +1,19 @@
 import { Entity, PrimaryGeneratedColumn, Index, ManyToOne, Column, JoinColumn } from "typeorm";
 
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { UserEntity } from "@/user/user.entity";
 
 import { ContestEntity } from "./contest.entity";
 
 export interface ContestPlayerScoreDetail {
   score?: number;
+  status?: SubmissionStatus;
   submissionId?: number;
   submissions?: Record<
     string,
     {
       submissionId: number;
+      status: SubmissionStatus;
       score?: number;
       accepted?: boolean;
       compiled?: boolean;

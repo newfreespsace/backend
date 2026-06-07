@@ -214,11 +214,12 @@ export class ContestService {
           result.accepted = detail.accepted;
           result.unacceptedCount = detail.unacceptedCount;
           result.status =
-            detail.accepted || (contest.type !== ContestType.ACM && detail.score === 100)
+            detail.status ||
+            (detail.accepted || (contest.type !== ContestType.ACM && detail.score === 100)
               ? SubmissionStatus.Accepted
               : detail.score != null
               ? SubmissionStatus.PartiallyCorrect
-              : null;
+              : null);
         }
 
         if (includeStatistics) result.statistics = this.getProblemStatistics(contest, problem, players);
@@ -259,8 +260,8 @@ export class ContestService {
     const rows = await Promise.all(
       players.map(async player => {
         const scoreDetails = this.cloneScoreDetails(player.scoreDetails);
-        let score = player.score;
-        let timeSpent = player.timeSpent;
+
+        let { score, timeSpent } = player;
 
         if (contest.type !== ContestType.ACM) {
           score = 0;
@@ -368,6 +369,7 @@ export class ContestService {
     detail.submissions = detail.submissions || {};
     detail.submissions[submission.id] = {
       submissionId: submission.id,
+      status: submission.status,
       score: submission.score,
       accepted: submission.status === SubmissionStatus.Accepted,
       compiled: submission.score != null,
@@ -389,6 +391,7 @@ export class ContestService {
       return result;
     }, null);
     detail.submissionId = best.submissionId;
+    detail.status = best.status;
     detail.score = best.score || 0;
   }
 
@@ -397,22 +400,29 @@ export class ContestService {
     const latest = submissions[submissions.length - 1];
     detail.submissionId = latest.submissionId;
     detail.score = latest.score || 0;
+    detail.status = latest.status;
   }
 
   private updateAcmDetail(detail: ContestPlayerScoreDetail): void {
     const submissions = Object.values(detail.submissions).sort((a, b) => this.compareSubmissionSummary(a, b));
     detail.accepted = false;
     detail.unacceptedCount = 0;
-    detail.submissionId = submissions[submissions.length - 1].submissionId;
+
+    const latest = submissions[submissions.length - 1];
+    detail.submissionId = latest.submissionId;
+    detail.status = latest.status;
+
     for (const item of submissions) {
       if (item.accepted) {
         detail.accepted = true;
         detail.acceptedTime = item.time;
         detail.submissionId = item.submissionId;
+        detail.status = item.status;
         break;
       }
       if (item.compiled) detail.unacceptedCount++;
     }
+
     detail.score = detail.accepted ? 1 : 0;
   }
 

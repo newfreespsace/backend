@@ -11,6 +11,7 @@ import { UserEntity } from "@/user/user.entity";
 import { UserService } from "@/user/user.service";
 
 import { ContestPermissionType, ContestService } from "./contest.service";
+
 import {
   GetContestRanklistRequestDto,
   GetContestRanklistResponseDto,
