@@ -1,7 +1,7 @@
 import { Inject, Injectable, forwardRef } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 
-import { Repository } from "typeorm";
+import { In, Not, Repository } from "typeorm";
 
 import { Locale } from "@/common/locale.type";
 import { ProblemEntity } from "@/problem/problem.entity";
@@ -14,6 +14,7 @@ import { UserService } from "@/user/user.service";
 
 import { ContestEntity, ContestType } from "./contest.entity";
 import { ContestPlayerEntity, ContestPlayerScoreDetail } from "./contest-player.entity";
+
 import { ContestMetaDto, ContestProblemDto, ContestRanklistRowDto, SaveContestRequestDto } from "./dto";
 
 export enum ContestPermissionType {
@@ -31,6 +32,8 @@ export class ContestService {
     private readonly contestRepository: Repository<ContestEntity>,
     @InjectRepository(ContestPlayerEntity)
     private readonly contestPlayerRepository: Repository<ContestPlayerEntity>,
+    @InjectRepository(SubmissionEntity)
+    private readonly submissionRepository: Repository<SubmissionEntity>,
     @Inject(forwardRef(() => ProblemService))
     private readonly problemService: ProblemService,
     @Inject(forwardRef(() => UserService))
@@ -210,11 +213,12 @@ export class ContestService {
           result.submissionId = detail.submissionId;
           result.accepted = detail.accepted;
           result.unacceptedCount = detail.unacceptedCount;
-          result.status = detail.accepted
-            ? SubmissionStatus.Accepted
-            : detail.score != null
-            ? SubmissionStatus.PartiallyCorrect
-            : null;
+          result.status =
+            detail.accepted || (contest.type !== ContestType.ACM && detail.score === 100)
+              ? SubmissionStatus.Accepted
+              : detail.score != null
+              ? SubmissionStatus.PartiallyCorrect
+              : null;
         }
 
         if (includeStatistics) result.statistics = this.getProblemStatistics(contest, problem, players);
@@ -254,7 +258,7 @@ export class ContestService {
     const players = await this.contestPlayerRepository.findBy({ contestId: contest.id });
     const rows = await Promise.all(
       players.map(async player => {
-        const scoreDetails = { ...player.scoreDetails };
+        const scoreDetails = this.cloneScoreDetails(player.scoreDetails);
         let score = player.score;
         let timeSpent = player.timeSpent;
 
@@ -262,10 +266,10 @@ export class ContestService {
           score = 0;
           let latest = 0;
           for (const [problemId, detail] of Object.entries(scoreDetails)) {
-            const weightedScore = Math.round((detail.score || 0) * (contest.rankingParams?.[problemId] || 1));
+            const weightedScore = Math.round((detail.score || 0) * this.getRankingMultiplier(contest, problemId));
             detail.weightedScore = weightedScore;
             score += weightedScore;
-            const time = new Date(detail.submissions?.[detail.submissionId]?.time || 0).getTime();
+            const time = this.getElapsedSeconds(contest, detail.submissions?.[detail.submissionId]?.time);
             latest = Math.max(latest, time);
           }
           timeSpent = latest;
@@ -290,27 +294,72 @@ export class ContestService {
   }
 
   async onSubmissionFinished(submission: SubmissionEntity): Promise<void> {
-    if (!submission.contestId) return;
-
-    const contest = await this.findContestById(submission.contestId);
-    if (!contest || contest.problemIds[submission.contestProblemIndex - 1] !== submission.problemId) return;
-
-    await this.updatePlayerScore(contest, submission);
+    await this.onSubmissionUpdated(null, submission);
   }
 
-  private async updatePlayerScore(contest: ContestEntity, submission: SubmissionEntity): Promise<void> {
+  async onSubmissionUpdated(
+    oldSubmission: SubmissionEntity | null,
+    submission: SubmissionEntity | null
+  ): Promise<void> {
+    const relatedSubmission = submission || oldSubmission;
+    if (!relatedSubmission?.contestId) return;
+
+    const contest = await this.findContestById(relatedSubmission.contestId);
+    if (!contest) return;
+
+    await this.rebuildPlayerScore(contest, relatedSubmission.submitterId);
+  }
+
+  private async rebuildPlayerScore(contest: ContestEntity, userId: number): Promise<void> {
+    const submissions = await this.submissionRepository.find({
+      where: {
+        contestId: contest.id,
+        submitterId: userId,
+        status: Not(In([SubmissionStatus.Pending, SubmissionStatus.Canceled]))
+      },
+      order: {
+        submitTime: "ASC",
+        id: "ASC"
+      }
+    });
+    const validSubmissions = submissions.filter(
+      submission => contest.problemIds[submission.contestProblemIndex - 1] === submission.problemId
+    );
+
     let player = await this.contestPlayerRepository.findOneBy({
       contestId: contest.id,
-      userId: submission.submitterId
+      userId
     });
+
+    if (validSubmissions.length === 0) {
+      if (player) await this.contestPlayerRepository.remove(player);
+      return;
+    }
+
     if (!player) {
       player = new ContestPlayerEntity();
       player.contestId = contest.id;
-      player.userId = submission.submitterId;
-      player.score = 0;
-      player.timeSpent = 0;
-      player.scoreDetails = {};
+      player.userId = userId;
     }
+
+    player.score = 0;
+    player.timeSpent = 0;
+    player.scoreDetails = {};
+
+    for (const submission of validSubmissions) {
+      this.applySubmissionToPlayer(contest, player, submission);
+    }
+
+    this.recalculatePlayerSummary(contest, player);
+    await this.contestPlayerRepository.save(player);
+  }
+
+  private applySubmissionToPlayer(
+    contest: ContestEntity,
+    player: ContestPlayerEntity,
+    submission: SubmissionEntity
+  ): void {
+    if (!submission.contestId) return;
 
     const problemId = String(submission.problemId);
     const detail: ContestPlayerScoreDetail = player.scoreDetails[problemId] || {
@@ -326,18 +375,14 @@ export class ContestService {
     };
 
     if (contest.type === ContestType.IOI) this.updateIoiDetail(detail);
-    else if (contest.type === ContestType.NOI) this.updateNoiDetail(detail, submission);
+    else if (contest.type === ContestType.NOI) this.updateNoiDetail(detail);
     else this.updateAcmDetail(detail);
 
     player.scoreDetails[problemId] = detail;
-    this.recalculatePlayerSummary(contest, player);
-    await this.contestPlayerRepository.save(player);
   }
 
   private updateIoiDetail(detail: ContestPlayerScoreDetail): void {
-    const submissions = Object.values(detail.submissions).sort(
-      (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
-    );
+    const submissions = Object.values(detail.submissions).sort((a, b) => this.compareSubmissionSummary(a, b));
     const best = submissions.reduce((result, item) => {
       if (!result) return item;
       if ((item.score || 0) >= (result.score || 0) && (result.score || 0) < 100) return item;
@@ -347,16 +392,15 @@ export class ContestService {
     detail.score = best.score || 0;
   }
 
-  private updateNoiDetail(detail: ContestPlayerScoreDetail, submission: SubmissionEntity): void {
-    if (detail.submissionId && detail.submissionId > submission.id) return;
-    detail.submissionId = submission.id;
-    detail.score = submission.score || 0;
+  private updateNoiDetail(detail: ContestPlayerScoreDetail): void {
+    const submissions = Object.values(detail.submissions).sort((a, b) => this.compareSubmissionSummary(a, b));
+    const latest = submissions[submissions.length - 1];
+    detail.submissionId = latest.submissionId;
+    detail.score = latest.score || 0;
   }
 
   private updateAcmDetail(detail: ContestPlayerScoreDetail): void {
-    const submissions = Object.values(detail.submissions).sort(
-      (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
-    );
+    const submissions = Object.values(detail.submissions).sort((a, b) => this.compareSubmissionSummary(a, b));
     detail.accepted = false;
     detail.unacceptedCount = 0;
     detail.submissionId = submissions[submissions.length - 1].submissionId;
@@ -384,12 +428,46 @@ export class ContestService {
             (detail.unacceptedCount || 0) * 20 * 60;
         }
       } else {
-        player.score += Math.round((detail.score || 0) * (contest.rankingParams?.[problemId] || 1));
+        player.score += Math.round((detail.score || 0) * this.getRankingMultiplier(contest, problemId));
         player.timeSpent = Math.max(
           player.timeSpent,
-          new Date(detail.submissions?.[detail.submissionId]?.time || 0).getTime()
+          this.getElapsedSeconds(contest, detail.submissions?.[detail.submissionId]?.time)
         );
       }
     }
+  }
+
+  private getElapsedSeconds(contest: ContestEntity, time?: string): number {
+    if (!time) return 0;
+    const elapsed = Math.floor((new Date(time).getTime() - contest.startTime.getTime()) / 1000);
+    return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
+  }
+
+  private compareSubmissionSummary(
+    a: NonNullable<ContestPlayerScoreDetail["submissions"]>[string],
+    b: NonNullable<ContestPlayerScoreDetail["submissions"]>[string]
+  ): number {
+    const timeDiff = new Date(a.time).getTime() - new Date(b.time).getTime();
+    if (timeDiff !== 0) return timeDiff;
+    return a.submissionId - b.submissionId;
+  }
+
+  private getRankingMultiplier(contest: ContestEntity, problemId: string): number {
+    const multiplier = Number((contest.rankingParams || {})[problemId]);
+    return Number.isFinite(multiplier) ? multiplier : 1;
+  }
+
+  private cloneScoreDetails(
+    scoreDetails: Record<string, ContestPlayerScoreDetail>
+  ): Record<string, ContestPlayerScoreDetail> {
+    return Object.fromEntries(
+      Object.entries(scoreDetails || {}).map(([problemId, detail]) => [
+        problemId,
+        {
+          ...detail,
+          submissions: detail.submissions ? { ...detail.submissions } : undefined
+        }
+      ])
+    );
   }
 }

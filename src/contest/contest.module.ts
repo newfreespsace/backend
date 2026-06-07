@@ -3,6 +3,7 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 
 import { DiscussionModule } from "@/discussion/discussion.module";
 import { ProblemModule } from "@/problem/problem.module";
+import { SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionModule } from "@/submission/submission.module";
 import { UserModule } from "@/user/user.module";
 
@@ -13,8 +14,7 @@ import { ContestService } from "./contest.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ContestEntity]),
-    TypeOrmModule.forFeature([ContestPlayerEntity]),
+    TypeOrmModule.forFeature([ContestEntity, ContestPlayerEntity, SubmissionEntity]),
     forwardRef(() => DiscussionModule),
     forwardRef(() => ProblemModule),
     forwardRef(() => SubmissionModule),
