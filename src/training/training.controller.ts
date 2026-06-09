@@ -1,7 +1,10 @@
 import { Body, Controller, Post } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CreateTrainingDto } from "./dto/create-training.dto";
+import { GetTrainingRequestDto } from "./dto/get-training-request.dot";
+import { QueryTrainingSetResponseDto } from "./dto/query-training-set-response.dto";
+import { TrainingMetaDto } from "./dto/training-meta.dto";
 import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingService } from "./training.service";
 
@@ -11,33 +14,35 @@ export class TrainingController {
   constructor(private readonly trainingService: TrainingService) {}
 
   @Post("queryTrainingSet")
-  queryTrainingSet() {
-    const trainings = this.trainingService.queryTrainingSet();
-    return trainings;
+  @ApiOperation({ summary: "Query Trainings in Training set" })
+  async queryTrainingSet(): Promise<QueryTrainingSetResponseDto> {
+    return await this.trainingService.queryTrainingSet();
   }
 
   @Post("createTraining")
   createTraining(
     @Body()
     request: CreateTrainingDto
-  ) {
+  ): Promise<TrainingMetaDto> {
     const training = this.trainingService.createTraining(request);
     return training;
   }
 
-  @Post("getTraining")
-  getTraining(
+  @Post("getTrainingById")
+  getTrainingById(
     @Body()
-    request: any
-  ): string {
-    return `this action returns training ${request.id}!`;
+    request: GetTrainingRequestDto
+  ) {
+    const { id } = request;
+    const training = this.trainingService.getTrainingById(id);
+    return training;
   }
 
   @Post("updateTraining")
   updateTraining(
     @Body()
     request: UpdateTrainingDto
-  ) {
+  ): Promise<TrainingMetaDto> {
     const { id } = request;
     const training = this.trainingService.updateTraining(id, request);
     return training;
