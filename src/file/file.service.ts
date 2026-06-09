@@ -152,7 +152,7 @@ export class FileService implements OnModuleInit {
         /* eslint-disable no-await-in-loop */
         if (typeof streamOrBufferOrFile === "string")
           await this.minioClient.fPutObject(this.bucket, uuid, streamOrBufferOrFile, {});
-        else await this.minioClient.putObject(this.bucket, uuid, streamOrBufferOrFile, {});
+        else await this.minioClient.putObject(this.bucket, uuid, streamOrBufferOrFile);
         /* eslint-enable no-await-in-loop */
       } catch (e) {
         if (i === retryCount - 1) throw e;
