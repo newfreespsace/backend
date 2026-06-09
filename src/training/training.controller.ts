@@ -5,7 +5,7 @@ import { CreateTrainingDto } from "./dto/create-training.dto";
 import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingService } from "./training.service";
 
-@ApiTags("training")
+@ApiTags("Training")
 @Controller("training")
 export class TrainingController {
   constructor(private readonly trainingService: TrainingService) {}

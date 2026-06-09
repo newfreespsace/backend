@@ -11,7 +11,7 @@ import { UpdateSectionDto } from "./dto/update-section.dto";
 import { AddProblemToSectionDto } from "./dto/add-problem-to-section.dto";
 import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
 
-@ApiTags("training")
+@ApiTags("Training")
 @Controller("training/chapter/section")
 export class SectionController {
   constructor(private readonly sectionService: SectionService) {}

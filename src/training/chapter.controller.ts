@@ -6,7 +6,7 @@ import { CreateChapterDto } from "./dto/create-chapter.dto";
 import { QueryChapterByTrainingIdDto } from "./dto/query-chapter.dto";
 import { UpdateChapterDto } from "./dto/update-chapter.dto";
 
-@ApiTags("training")
+@ApiTags("Training")
 @Controller("training/chapter")
 export class ChapterController {
   constructor(private readonly chapterService: ChapterService) {}
