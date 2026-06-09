@@ -1,10 +1,12 @@
 import { Body, Controller, Post } from "@nestjs/common";
+import { ApiTags } from "@nestjs/swagger";
 
 import { ChapterService } from "./chapter.service";
 import { CreateChapterDto } from "./dto/create-chapter.dto";
 import { QueryChapterByTrainingIdDto } from "./dto/query-chapter.dto";
 import { UpdateChapterDto } from "./dto/update-chapter.dto";
 
+@ApiTags("training")
 @Controller("training/chapter")
 export class ChapterController {
   constructor(private readonly chapterService: ChapterService) {}
