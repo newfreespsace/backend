@@ -3,7 +3,9 @@ import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
 
-import { SubmissionStatus } from "@/submission/submission-status.enum";
+import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
+import { ProblemEntity } from "@/problem/problem.entity";
+import { SubmissionService } from "@/submission/submission.service";
 import { UserEntity } from "@/user/user.entity";
 
 import { SectionProblemEntity } from "./entities/section_problem.entity";
@@ -19,7 +21,9 @@ type ProgressScope = "section" | "chapter" | "training";
 export class TrainingProgressService {
   constructor(
     @InjectRepository(SectionProblemEntity)
-    private readonly sectionProblemRepository: Repository<SectionProblemEntity>
+    private readonly sectionProblemRepository: Repository<SectionProblemEntity>,
+    private readonly problemService: ProblemService,
+    private readonly submissionService: SubmissionService
   ) {}
 
   async getTrainingProgressByIds(user: UserEntity, trainingIds: number[]): Promise<Map<number, TrainingProgress>> {
@@ -54,41 +58,47 @@ export class TrainingProgressService {
       .innerJoin("sectionProblem.section", "section")
       .innerJoin("section.chapter", "chapter")
       .select(groupColumn, "id")
-      .addSelect("COUNT(DISTINCT sectionProblem.id)", "problemCount")
-      .groupBy(groupColumn);
-
-    if (user) {
-      queryBuilder
-        .leftJoin(
-          "submission",
-          "submission",
-          [
-            "submission.problemId = sectionProblem.problemId",
-            "submission.submitterId = :submitterId",
-            "submission.status = :status"
-          ].join(" AND "),
-          { submitterId: user.id, status: SubmissionStatus.Accepted }
-        )
-        .addSelect(
-          "COUNT(DISTINCT CASE WHEN submission.id IS NOT NULL THEN sectionProblem.id ELSE NULL END)",
-          "acceptedProblemCount"
-        );
-    } else {
-      queryBuilder.addSelect("0", "acceptedProblemCount");
-    }
+      .addSelect("sectionProblem.problemId", "problemId");
 
     if (scope === "section") queryBuilder.where("sectionProblem.sectionId IN (:...ids)", { ids: uniqueIds });
     else if (scope === "chapter") queryBuilder.where("section.chapterId IN (:...ids)", { ids: uniqueIds });
     else queryBuilder.where("chapter.trainingId IN (:...ids)", { ids: uniqueIds });
 
-    const rows: { id: string; problemCount: string; acceptedProblemCount: string }[] = await queryBuilder.getRawMany();
+    const rows: { id: string; problemId: string }[] = await queryBuilder.getRawMany();
+    const problemsById = await this.getVisibleProblemsById(
+      user,
+      rows.map(row => Number(row.problemId))
+    );
+    const acceptedSubmissions =
+      user && problemsById.size > 0
+        ? await this.submissionService.getUserLatestSubmissionByProblems(user, Array.from(problemsById.values()), true)
+        : new Map();
+
     for (const row of rows) {
-      result.set(Number(row.id), {
-        problemCount: Number(row.problemCount),
-        acceptedProblemCount: Number(row.acceptedProblemCount)
-      });
+      const id = Number(row.id);
+      const problemId = Number(row.problemId);
+      if (!problemsById.has(problemId)) continue;
+
+      const progress = result.get(id);
+      progress.problemCount++;
+      if (acceptedSubmissions.has(problemId)) progress.acceptedProblemCount++;
     }
 
     return result;
+  }
+
+  private async getVisibleProblemsById(user: UserEntity, problemIds: number[]): Promise<Map<number, ProblemEntity>> {
+    const uniqueProblemIds = Array.from(new Set(problemIds));
+    const problems = await this.problemService.findProblemsByExistingIds(uniqueProblemIds);
+    const visibleProblems = await Promise.all(
+      problems.map(async problem => {
+        if (!problem) return null;
+        return (await this.problemService.userHasPermission(user, problem, ProblemPermissionType.View))
+          ? problem
+          : null;
+      })
+    );
+
+    return new Map(visibleProblems.filter(problem => problem).map(problem => [problem.id, problem]));
   }
 }

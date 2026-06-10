@@ -95,7 +95,6 @@ export class SectionService {
 
     const section = await this.sectionRepository.findOneBy({ id });
     if (!section) throw new NotFoundException(`section ${id} not found`);
-    const progress = await this.trainingProgressService.getSectionProgressByIds(currentUser, [section.id]);
 
     const sectionProblems = await section.problems;
     sectionProblems.sort((a, b) => a.sortOrder - b.sortOrder);
@@ -108,13 +107,14 @@ export class SectionService {
 
     const visibleProblems = problems.filter((_, index) => visibleProblemFlags[index]);
 
-    const [acceptedSubmissions, nonAcceptedSubmissions] =
-      !titleOnly && currentUser
-        ? await Promise.all([
-            this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems, true),
-            this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems)
-          ])
-        : [new Map(), new Map()];
+    const [acceptedSubmissions, nonAcceptedSubmissions] = currentUser
+      ? await Promise.all([
+          this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems, true),
+          !titleOnly
+            ? this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems)
+            : new Map()
+        ])
+      : [new Map(), new Map()];
 
     const result = await Promise.all(
       visibleProblems.map(async problem => {
@@ -139,7 +139,8 @@ export class SectionService {
     );
     return {
       ...toSectionMetaDto(section),
-      ...progress.get(section.id),
+      problemCount: visibleProblems.length,
+      acceptedProblemCount: visibleProblems.filter(problem => acceptedSubmissions.has(problem.id)).length,
       problems: result
     };
   }
