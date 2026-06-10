@@ -8,6 +8,7 @@ export class CreateTrainingDto {
   @IsOptional()
   description?: string;
 
+  @Type(() => Number)
   @IsNumber()
   sortOrder: number;
 }

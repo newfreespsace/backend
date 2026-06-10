@@ -8,8 +8,10 @@ import { SectionService } from "./section.service";
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { QuerySectionByChapterIdDto } from "./dto/query-section.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
-import { AddProblemToSectionDto } from "./dto/add-problem-to-section.dto";
 import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
+import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto";
+import { SetSectionProblemsDto } from "./dto/set-section-problems.dto";
+import { SetSectionProblemsResponseDto } from "./dto/set-section-problems-response.dto";
 
 @ApiTags("Training")
 @Controller("training/chapter/section")
@@ -45,13 +47,13 @@ export class SectionController {
     return section;
   }
 
-  @Post("addProblemToSection")
-  addProblemToSection(
-    @Body()
-    request: AddProblemToSectionDto
-  ) {
-    return this.sectionService.addProblemToSection(request);
-  }
+  // @Post("addProblemToSection")
+  // addProblemToSection(
+  //   @Body()
+  //   request: AddProblemToSectionDto
+  // ): Promise<AddProblemToSectionResponseDto> {
+  //   return this.sectionService.addProblemToSection(request);
+  // }
 
   @Post("getSectionById")
   getSectionById(
@@ -59,8 +61,16 @@ export class SectionController {
     currentUser: UserEntity,
     @Body()
     request: GetSectionByIdDto
-  ) {
+  ): Promise<GetSectionByIdResponseDto> {
     const section = this.sectionService.getSectionById(currentUser, request);
     return section;
+  }
+
+  @Post("setSectionProblems")
+  setSectionProblems(
+    @Body()
+    request: SetSectionProblemsDto
+  ): Promise<SetSectionProblemsResponseDto> {
+    return this.sectionService.setSectionProblems(request);
   }
 }

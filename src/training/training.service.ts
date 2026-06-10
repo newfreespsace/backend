@@ -51,6 +51,7 @@ export class TrainingService {
     if (!training) throw new NotFoundException(`training ${id} not found`);
 
     const chapters = await training.chapters;
+    chapters.sort((a, b) => a.sortOrder - b.sortOrder);
 
     return { ...toTrainingMetaDto(training), chapters: chapters.map(chapter => ({ ...toChapterMetaDto(chapter) })) };
   }

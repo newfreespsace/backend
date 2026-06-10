@@ -14,6 +14,7 @@ export class UpdateTrainingDto {
   @IsOptional()
   description?: string;
 
+  @Type(() => Number)
   @IsNumber()
   @IsOptional()
   sortOrder?: number;

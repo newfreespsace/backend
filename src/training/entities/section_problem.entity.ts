@@ -6,6 +6,7 @@ import { SectionEntity } from "./section.entity";
 
 @Entity("section_problem")
 @Index(["sectionId", "problemId"], { unique: true })
+@Index(["sectionId", "sortOrder"], { unique: true })
 export class SectionProblemEntity {
   @PrimaryGeneratedColumn()
   id: number;

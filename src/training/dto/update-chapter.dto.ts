@@ -1,6 +1,8 @@
+import { Type } from "class-transformer";
 import { IsNumber, IsOptional, IsString } from "class-validator";
 
 export class UpdateChapterDto {
+  @Type(() => Number)
   @IsNumber()
   id: number;
 
@@ -12,10 +14,12 @@ export class UpdateChapterDto {
   @IsOptional()
   description?: string;
 
+  @Type(() => Number)
   @IsNumber()
   @IsOptional()
   sortOrder?: number;
 
+  @Type(() => Number)
   @IsNumber()
   @IsOptional()
   trainingId?: number;

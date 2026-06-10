@@ -2,7 +2,7 @@ import { Column, Entity, OneToMany, PrimaryGeneratedColumn } from "typeorm";
 
 import { ChapterEntity } from "./chapter.entity";
 
-@Entity("entity") // 没有 @Entity()，TypeORM 只会把它当成一个普通 class，不会生成表结构元数据
+@Entity("training") // 没有 @Entity()，TypeORM 只会把它当成一个普通 class，不会生成表结构元数据
 export class TrainingEntity {
   @PrimaryGeneratedColumn()
   id: number;

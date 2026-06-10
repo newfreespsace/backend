@@ -1,9 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
+import { Type } from "class-transformer";
+
 export class SectionMetaDto {
+  @Type(() => Number)
   @ApiProperty()
   id: number;
 
+  @Type(() => Number)
   @ApiProperty()
   chapterId: number;
 
@@ -13,14 +17,17 @@ export class SectionMetaDto {
   @ApiPropertyOptional()
   description?: string;
 
+  @Type(() => Number)
   @ApiProperty()
   sortOrder: number;
 }
 
 export class ChapterMetaDto {
+  @Type(() => Number)
   @ApiProperty()
   id: number;
 
+  @Type(() => Number)
   @ApiProperty()
   trainingId: number;
 
@@ -30,6 +37,7 @@ export class ChapterMetaDto {
   @ApiPropertyOptional()
   description?: string;
 
+  @Type(() => Number)
   @ApiProperty()
   sortOrder: number;
 
@@ -38,6 +46,7 @@ export class ChapterMetaDto {
 }
 
 export class TrainingMetaDto {
+  @Type(() => Number)
   @ApiProperty()
   id: number;
 
@@ -47,6 +56,7 @@ export class TrainingMetaDto {
   @ApiPropertyOptional()
   description?: string;
 
+  @Type(() => Number)
   @ApiProperty()
   sortOrder: number;
 
