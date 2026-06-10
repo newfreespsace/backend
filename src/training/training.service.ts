@@ -55,4 +55,11 @@ export class TrainingService {
 
     return { ...toTrainingMetaDto(training), chapters: chapters.map(chapter => ({ ...toChapterMetaDto(chapter) })) };
   }
+
+  async delTrainingById(id: number): Promise<void> {
+    const result = await this.trainingRepository.delete(id);
+    if (result.affected === 0) {
+      throw new NotFoundException(`training ${id} not found`);
+    }
+  }
 }

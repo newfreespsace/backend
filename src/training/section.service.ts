@@ -41,7 +41,8 @@ export class SectionService {
     const chapter = await this.chapterRepository.findOneBy({ id: chapterId });
     if (!chapter) throw new NotFoundException(`chapter ${chapterId} not found`);
     const section = this.sectionRepository.create(createSectionDto);
-    return await this.sectionRepository.save(section);
+    const savedSection = await this.sectionRepository.save(section);
+    return { ...toSectionMetaDto(savedSection) };
   }
 
   async updateSection(id: number, updateSectionDto: UpdateSectionDto): Promise<SectionMetaDto> {
@@ -56,7 +57,8 @@ export class SectionService {
       ...updateSectionDto
     });
     if (!section) throw new NotFoundException(`section ${id} not found`);
-    return await this.sectionRepository.save(section);
+    const updateSection = await this.sectionRepository.save(section);
+    return { ...toSectionMetaDto(updateSection) };
   }
 
   // async addProblemToSection(addProblemFileRequestDto: AddProblemToSectionDto): Promise<AddProblemToSectionResponseDto> {

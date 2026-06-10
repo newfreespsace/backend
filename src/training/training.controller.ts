@@ -2,6 +2,7 @@ import { Body, Controller, Post } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CreateTrainingDto } from "./dto/create-training.dto";
+import { DeleteChapterByIdRequestDto } from "./dto/delete-chapter-by-id-request.dto";
 import { GetTrainingRequestDto } from "./dto/get-training-request.dto";
 import { QueryTrainingSetResponseDto } from "./dto/query-training-set-response.dto";
 import { TrainingMetaDto } from "./dto/training-meta.dto";
@@ -46,5 +47,13 @@ export class TrainingController {
     const { id } = request;
     const training = this.trainingService.updateTraining(id, request);
     return training;
+  }
+
+  @Post("delTrainingById")
+  delTrainingById(
+    @Body()
+    request: DeleteChapterByIdRequestDto
+  ) {
+    this.trainingService.delTrainingById(request.id);
   }
 }

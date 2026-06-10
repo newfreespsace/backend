@@ -46,7 +46,7 @@ export class ChapterController {
   getChapterById(
     @Body()
     request: GetChapterByIdDto
-  ) {
+  ): Promise<ChapterMetaDto> {
     const { id } = request;
     const chapter = this.chapterService.getChapterById(id);
     return chapter;
