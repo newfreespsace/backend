@@ -5,6 +5,7 @@ import { Repository } from "typeorm";
 
 import { ProblemService, ProblemPermissionType } from "@/problem/problem.service";
 import { UserEntity } from "@/user/user.entity";
+import { SubmissionService } from "@/submission/submission.service";
 
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
@@ -28,7 +29,8 @@ export class SectionService {
     @InjectRepository(SectionProblemEntity)
     private readonly sectionProblemRepository: Repository<SectionProblemEntity>,
 
-    private readonly problemService: ProblemService
+    private readonly problemService: ProblemService,
+    private readonly submissionService: SubmissionService
   ) {}
 
   async querySectionSetByChapterId(chapterId: number): Promise<SectionMetaDto[]> {
@@ -99,12 +101,21 @@ export class SectionService {
 
     const visibleProblems = problems.filter((_, index) => visibleProblemFlags[index]);
 
+    const [acceptedSubmissions, nonAcceptedSubmissions] =
+      !titleOnly && currentUser
+        ? await Promise.all([
+            this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems, true),
+            this.submissionService.getUserLatestSubmissionByProblems(currentUser, visibleProblems)
+          ])
+        : [new Map(), new Map()];
+
     const result = await Promise.all(
       visibleProblems.map(async problem => {
         const titleLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
 
         const title = await this.problemService.getProblemLocalizedTitle(problem, titleLocale);
         const problemTags = !titleOnly && (await this.problemService.getProblemTagsByProblem(problem));
+        const submission = acceptedSubmissions.get(problem.id) || nonAcceptedSubmissions.get(problem.id);
 
         return {
           meta: await this.problemService.getProblemMeta(problem, true),
@@ -114,7 +125,8 @@ export class SectionService {
             (await Promise.all(
               problemTags.map(problemTag => this.problemService.getProblemTagLocalized(problemTag, locale))
             )),
-          resultLocale: titleLocale
+          resultLocale: titleLocale,
+          submission: submission && (await this.submissionService.getSubmissionBasicMeta(submission))
         };
       })
     );
