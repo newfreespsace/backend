@@ -8,7 +8,9 @@ export function toTrainingMetaDto(training: TrainingEntity): TrainingMetaDto {
     id: training.id,
     title: training.title,
     description: training.description,
-    sortOrder: training.sortOrder
+    sortOrder: training.sortOrder,
+    problemCount: 0,
+    acceptedProblemCount: 0
   };
 }
 
@@ -18,7 +20,9 @@ export function toChapterMetaDto(chapter: ChapterEntity): ChapterMetaDto {
     trainingId: chapter.trainingId,
     title: chapter.title,
     description: chapter.description,
-    sortOrder: chapter.sortOrder
+    sortOrder: chapter.sortOrder,
+    problemCount: 0,
+    acceptedProblemCount: 0
   };
 }
 
@@ -28,6 +32,8 @@ export function toSectionMetaDto(section: SectionEntity): SectionMetaDto {
     chapterId: section.chapterId,
     title: section.title,
     description: section.description,
-    sortOrder: section.sortOrder
+    sortOrder: section.sortOrder,
+    problemCount: 0,
+    acceptedProblemCount: 0
   };
 }

@@ -1,5 +1,8 @@
 import { Body, Controller, Post } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiOkResponse, ApiTags } from "@nestjs/swagger";
+
+import { CurrentUser } from "@/common/user.decorator";
+import { UserEntity } from "@/user/user.entity";
 
 import { ChapterService } from "./chapter.service";
 import { CreateChapterDto } from "./dto/create-chapter.dto";
@@ -14,12 +17,15 @@ export class ChapterController {
   constructor(private readonly chapterService: ChapterService) {}
 
   @Post("queryChapterSetByTrainingId")
+  @ApiOkResponse({ type: ChapterMetaDto, isArray: true })
   queryChapterSetByTrainingId(
+    @CurrentUser()
+    currentUser: UserEntity,
     @Body()
     request: QueryChapterByTrainingIdDto
   ): Promise<ChapterMetaDto[]> {
     const { trainingId } = request;
-    const chapters = this.chapterService.queryChapterSetByTrainingId(trainingId);
+    const chapters = this.chapterService.queryChapterSetByTrainingId(trainingId, currentUser);
     return chapters;
   }
 
@@ -44,11 +50,13 @@ export class ChapterController {
 
   @Post("getChapterById")
   getChapterById(
+    @CurrentUser()
+    currentUser: UserEntity,
     @Body()
     request: GetChapterByIdDto
   ): Promise<ChapterMetaDto> {
     const { id } = request;
-    const chapter = this.chapterService.getChapterById(id);
+    const chapter = this.chapterService.getChapterById(id, currentUser);
     return chapter;
   }
 }

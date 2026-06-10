@@ -1,6 +1,9 @@
 import { Body, Controller, Post } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 
+import { CurrentUser } from "@/common/user.decorator";
+import { UserEntity } from "@/user/user.entity";
+
 import { CreateTrainingDto } from "./dto/create-training.dto";
 import { DeleteChapterByIdRequestDto } from "./dto/delete-chapter-by-id-request.dto";
 import { GetTrainingRequestDto } from "./dto/get-training-request.dto";
@@ -16,8 +19,11 @@ export class TrainingController {
 
   @Post("queryTrainingSet")
   @ApiOperation({ summary: "Query Trainings in Training set" })
-  async queryTrainingSet(): Promise<QueryTrainingSetResponseDto> {
-    return await this.trainingService.queryTrainingSet();
+  async queryTrainingSet(
+    @CurrentUser()
+    currentUser: UserEntity
+  ): Promise<QueryTrainingSetResponseDto> {
+    return await this.trainingService.queryTrainingSet(currentUser);
   }
 
   @Post("createTraining")
@@ -31,11 +37,13 @@ export class TrainingController {
 
   @Post("getTrainingById")
   getTrainingById(
+    @CurrentUser()
+    currentUser: UserEntity,
     @Body()
     request: GetTrainingRequestDto
   ): Promise<TrainingMetaDto> {
     const { id } = request;
-    const training = this.trainingService.getTrainingById(id);
+    const training = this.trainingService.getTrainingById(id, currentUser);
     return training;
   }
 

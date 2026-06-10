@@ -20,6 +20,14 @@ export class SectionMetaDto {
   @Type(() => Number)
   @ApiProperty()
   sortOrder: number;
+
+  @Type(() => Number)
+  @ApiProperty()
+  problemCount: number;
+
+  @Type(() => Number)
+  @ApiProperty()
+  acceptedProblemCount: number;
 }
 
 export class ChapterMetaDto {
@@ -41,6 +49,14 @@ export class ChapterMetaDto {
   @ApiProperty()
   sortOrder: number;
 
+  @Type(() => Number)
+  @ApiProperty()
+  problemCount: number;
+
+  @Type(() => Number)
+  @ApiProperty()
+  acceptedProblemCount: number;
+
   @ApiPropertyOptional({ type: [SectionMetaDto] })
   sections?: SectionMetaDto[];
 }
@@ -59,6 +75,14 @@ export class TrainingMetaDto {
   @Type(() => Number)
   @ApiProperty()
   sortOrder: number;
+
+  @Type(() => Number)
+  @ApiProperty()
+  problemCount: number;
+
+  @Type(() => Number)
+  @ApiProperty()
+  acceptedProblemCount: number;
 
   @ApiPropertyOptional({ type: [ChapterMetaDto] })
   chapters?: ChapterMetaDto[];

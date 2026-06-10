@@ -18,6 +18,7 @@ import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto"
 import { SetSectionProblemsDto } from "./dto/set-section-problems.dto";
 import { SetSectionProblemsResponseDto } from "./dto/set-section-problems-response.dto";
 import { ChapterEntity } from "./entities/chapter.entity";
+import { TrainingProgressService } from "./training-progress.service";
 
 @Injectable()
 export class SectionService {
@@ -30,12 +31,17 @@ export class SectionService {
     private readonly sectionProblemRepository: Repository<SectionProblemEntity>,
 
     private readonly problemService: ProblemService,
-    private readonly submissionService: SubmissionService
+    private readonly submissionService: SubmissionService,
+    private readonly trainingProgressService: TrainingProgressService
   ) {}
 
-  async querySectionSetByChapterId(chapterId: number): Promise<SectionMetaDto[]> {
+  async querySectionSetByChapterId(chapterId: number, currentUser: UserEntity): Promise<SectionMetaDto[]> {
     const sections = await this.sectionRepository.find({ where: { chapterId }, order: { sortOrder: "ASC" } });
-    return sections.map(section => ({ ...toSectionMetaDto(section) }));
+    const progress = await this.trainingProgressService.getSectionProgressByIds(
+      currentUser,
+      sections.map(section => section.id)
+    );
+    return sections.map(section => ({ ...toSectionMetaDto(section), ...progress.get(section.id) }));
   }
 
   async createSection(createSectionDto: CreateSectionDto): Promise<SectionMetaDto> {
@@ -89,6 +95,7 @@ export class SectionService {
 
     const section = await this.sectionRepository.findOneBy({ id });
     if (!section) throw new NotFoundException(`section ${id} not found`);
+    const progress = await this.trainingProgressService.getSectionProgressByIds(currentUser, [section.id]);
 
     const sectionProblems = await section.problems;
     sectionProblems.sort((a, b) => a.sortOrder - b.sortOrder);
@@ -132,6 +139,7 @@ export class SectionService {
     );
     return {
       ...toSectionMetaDto(section),
+      ...progress.get(section.id),
       problems: result
     };
   }

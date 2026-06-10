@@ -14,6 +14,7 @@ import { SectionEntity } from "./entities/section.entity";
 import { SectionController } from "./section.controller";
 import { SectionService } from "./section.service";
 import { SectionProblemEntity } from "./entities/section_problem.entity";
+import { TrainingProgressService } from "./training-progress.service";
 
 @Module({
   imports: [
@@ -22,6 +23,6 @@ import { SectionProblemEntity } from "./entities/section_problem.entity";
     SubmissionModule
   ],
   controllers: [TrainingController, ChapterController, SectionController],
-  providers: [TrainingService, ChapterService, SectionService]
+  providers: [TrainingService, ChapterService, SectionService, TrainingProgressService]
 })
 export class TrainingModule {}

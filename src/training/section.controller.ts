@@ -1,5 +1,5 @@
 import { Body, Controller, Post } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiOkResponse, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
@@ -12,6 +12,7 @@ import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
 import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto";
 import { SetSectionProblemsDto } from "./dto/set-section-problems.dto";
 import { SetSectionProblemsResponseDto } from "./dto/set-section-problems-response.dto";
+import { SectionMetaDto } from "./dto/training-meta.dto";
 
 @ApiTags("Training")
 @Controller("training/chapter/section")
@@ -19,12 +20,15 @@ export class SectionController {
   constructor(private readonly sectionService: SectionService) {}
 
   @Post("querySectionSetByChapterId")
+  @ApiOkResponse({ type: SectionMetaDto, isArray: true })
   querySectionSetByChapterId(
+    @CurrentUser()
+    currentUser: UserEntity,
     @Body()
     request: QuerySectionByChapterIdDto
-  ) {
+  ): Promise<SectionMetaDto[]> {
     const { chapterId } = request;
-    const sections = this.sectionService.querySectionSetByChapterId(chapterId);
+    const sections = this.sectionService.querySectionSetByChapterId(chapterId, currentUser);
     return sections;
   }
 

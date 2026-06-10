@@ -9,6 +9,8 @@ import { UpdateChapterDto } from "./dto/update-chapter.dto";
 import { ChapterEntity } from "./entities/chapter.entity";
 import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toSectionMetaDto } from "./training.mapper";
+import { TrainingProgressService } from "./training-progress.service";
+import { UserEntity } from "@/user/user.entity";
 
 @Injectable()
 export class ChapterService {
@@ -17,12 +19,17 @@ export class ChapterService {
     private readonly chapterRepository: Repository<ChapterEntity>,
 
     @InjectRepository(TrainingEntity)
-    private readonly trainingRepository: Repository<TrainingEntity>
+    private readonly trainingRepository: Repository<TrainingEntity>,
+    private readonly trainingProgressService: TrainingProgressService
   ) {}
 
-  async queryChapterSetByTrainingId(trainingId: number): Promise<ChapterMetaDto[]> {
+  async queryChapterSetByTrainingId(trainingId: number, currentUser: UserEntity): Promise<ChapterMetaDto[]> {
     const chapters = await this.chapterRepository.find({ where: { trainingId }, order: { sortOrder: "ASC" } });
-    return chapters.map(chapter => ({ ...toChapterMetaDto(chapter) }));
+    const progress = await this.trainingProgressService.getChapterProgressByIds(
+      currentUser,
+      chapters.map(chapter => chapter.id)
+    );
+    return chapters.map(chapter => ({ ...toChapterMetaDto(chapter), ...progress.get(chapter.id) }));
   }
 
   async createChapter(createChapterDto: CreateChapterDto): Promise<ChapterMetaDto> {
@@ -52,14 +59,22 @@ export class ChapterService {
     return { ...toChapterMetaDto(updatedChapter) };
   }
 
-  async getChapterById(id: number): Promise<ChapterMetaDto> {
+  async getChapterById(id: number, currentUser: UserEntity): Promise<ChapterMetaDto> {
     const chapter = await this.chapterRepository.findOneBy({ id });
     if (!chapter) throw new NotFoundException(`chapter ${id} not found`);
     const sections = await chapter.sections;
     sections.sort((a, b) => a.sortOrder - b.sortOrder);
+    const [chapterProgress, sectionProgress] = await Promise.all([
+      this.trainingProgressService.getChapterProgressByIds(currentUser, [chapter.id]),
+      this.trainingProgressService.getSectionProgressByIds(
+        currentUser,
+        sections.map(section => section.id)
+      )
+    ]);
     return {
       ...toChapterMetaDto(chapter),
-      sections: sections.map(section => toSectionMetaDto(section))
+      ...chapterProgress.get(chapter.id),
+      sections: sections.map(section => ({ ...toSectionMetaDto(section), ...sectionProgress.get(section.id) }))
     };
   }
 }

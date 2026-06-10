@@ -10,19 +10,27 @@ import { TrainingMetaDto } from "./dto/training-meta.dto";
 import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toTrainingMetaDto } from "./training.mapper";
+import { TrainingProgressService } from "./training-progress.service";
+import { UserEntity } from "@/user/user.entity";
 
 @Injectable()
 export class TrainingService {
   constructor(
     @InjectRepository(TrainingEntity)
-    private readonly trainingRepository: Repository<TrainingEntity>
+    private readonly trainingRepository: Repository<TrainingEntity>,
+    private readonly trainingProgressService: TrainingProgressService
   ) {}
 
-  async queryTrainingSet(): Promise<QueryTrainingSetResponseDto> {
+  async queryTrainingSet(currentUser: UserEntity): Promise<QueryTrainingSetResponseDto> {
     const trainings = await this.trainingRepository.find({ order: { sortOrder: "ASC" } });
+    const progress = await this.trainingProgressService.getTrainingProgressByIds(
+      currentUser,
+      trainings.map(training => training.id)
+    );
     return {
       result: trainings.map(training => ({
-        ...toTrainingMetaDto(training)
+        ...toTrainingMetaDto(training),
+        ...progress.get(training.id)
       })),
       count: trainings.length
     };
@@ -46,14 +54,25 @@ export class TrainingService {
     return { ...toTrainingMetaDto(updatedTraining) };
   }
 
-  async getTrainingById(id: number): Promise<TrainingMetaDto> {
+  async getTrainingById(id: number, currentUser: UserEntity): Promise<TrainingMetaDto> {
     const training = await this.trainingRepository.findOneBy({ id });
     if (!training) throw new NotFoundException(`training ${id} not found`);
 
     const chapters = await training.chapters;
     chapters.sort((a, b) => a.sortOrder - b.sortOrder);
+    const [trainingProgress, chapterProgress] = await Promise.all([
+      this.trainingProgressService.getTrainingProgressByIds(currentUser, [training.id]),
+      this.trainingProgressService.getChapterProgressByIds(
+        currentUser,
+        chapters.map(chapter => chapter.id)
+      )
+    ]);
 
-    return { ...toTrainingMetaDto(training), chapters: chapters.map(chapter => ({ ...toChapterMetaDto(chapter) })) };
+    return {
+      ...toTrainingMetaDto(training),
+      ...trainingProgress.get(training.id),
+      chapters: chapters.map(chapter => ({ ...toChapterMetaDto(chapter), ...chapterProgress.get(chapter.id) }))
+    };
   }
 
   async delTrainingById(id: number): Promise<void> {
