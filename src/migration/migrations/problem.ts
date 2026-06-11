@@ -590,15 +590,22 @@ export const migrationProblem: MigrationInterface = {
                         return;
                       }
                       const { size } = stat;
-                      const stream = fs.createReadStream(fullPath);
-                      const promise = new Promise<ProblemFileEntity>((resolve, reject) => {
-                        stream.on("error", reject);
-                        migrateFile(file, size, stream, ProblemFileType.TestData, transactionalEntityManager)
-                          .then(resolve)
-                          .catch(reject);
-                      });
-                      const result = await promise;
-                      return result;
+                      // const stream = fs.createReadStream(fullPath);
+                      // const promise = new Promise<ProblemFileEntity>((resolve, reject) => {
+                      //   stream.on("error", reject);
+                      //   migrateFile(file, size, stream, ProblemFileType.TestData, transactionalEntityManager)
+                      //     .then(resolve)
+                      //     .catch(reject);
+                      // });
+                      // const result = await promise;
+                      // return result;
+                      return await migrateFile(
+                        file,
+                        size,
+                        fullPath,
+                        ProblemFileType.TestData,
+                        transactionalEntityManager
+                      );
                     })
                   )
               );
