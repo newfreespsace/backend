@@ -1,5 +1,9 @@
 # configuration file
 config.yaml
+docker-compose.yaml
+docker-compose.yml
+**/docker-compose.yaml
+**/docker-compose.yml
 
 # compiled output
 /dist
