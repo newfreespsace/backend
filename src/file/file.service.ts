@@ -105,7 +105,7 @@ export class FileService implements OnModuleInit {
       accessKey: config.accessKey,
       secretKey: config.secretKey,
       region: "ap-chengdu",
-      pathStyle: false
+      pathStyle: config.pathStyle ?? false
     };
 
     this.minioClient = new MinioClient({

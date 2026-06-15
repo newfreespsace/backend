@@ -108,6 +108,9 @@ class ServicesConfigMinio {
 
   @IsString()
   readonly bucket: string;
+
+  @IsBoolean()
+  readonly pathStyle: boolean;
 }
 
 class ServicesConfigMail {
