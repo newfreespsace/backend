@@ -109,6 +109,7 @@ class ServicesConfigMinio {
   @IsString()
   readonly bucket: string;
 
+  @IsOptional()
   @IsBoolean()
   readonly pathStyle: boolean;
 }
