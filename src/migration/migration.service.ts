@@ -78,11 +78,11 @@ export class MigrationService {
     tableName: string,
     orderByColumn: string,
     onRecord: (record: T) => Promise<void>,
-    maxConcurrency = 1000
+    maxConcurrency = 20
   ): Promise<void> {
     Logger.log(`Started processing table "${tableName}"`);
 
-    const pageSize = Math.max(1000, maxConcurrency);
+    const pageSize = Math.max(1, maxConcurrency);
     const { count } = (await this.oldDatabase.query(`SELECT COUNT(*) AS \`count\` FROM \`${tableName}\``))[0];
     let processedCount = 0;
 

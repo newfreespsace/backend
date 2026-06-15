@@ -4,4 +4,4 @@ database:
   username: syzoj
   password: syzoj
   database: syzoj
-uploads: /home/lee/remote-ubuntu
+uploads: /home/lee/loj/data

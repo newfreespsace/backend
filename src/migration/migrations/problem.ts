@@ -171,6 +171,16 @@ export function getLanguageAndOptions(
           m: "x32"
         }
       };
+    case "cpp14-O2":
+      return {
+        language: CodeLanguage.Cpp,
+        compileAndRunOptions: <CompileAndRunOptionsCpp>{
+          compiler: "g++",
+          std: "c++17",
+          O: "2",
+          m: "x32"
+        }
+      };
     case "cpp-noilinux":
       return {
         language: CodeLanguage.Cpp,
@@ -578,37 +588,26 @@ export const migrationProblem: MigrationInterface = {
                 throw e;
               }
 
-              return await entityManager.transaction(
-                "READ COMMITTED",
-                async transactionalEntityManager =>
-                  await Promise.all(
-                    dataFiles.map(async file => {
-                      const fullPath = path.join(oldDataDirectory, file);
-                      const stat = await fs.promises.stat(fullPath);
-                      if (!stat.isFile()) {
-                        Logger.warn(`Ignoring non-file file ${fullPath} of problem ${displayProblem(oldProblem)}`);
-                        return;
-                      }
-                      const { size } = stat;
-                      // const stream = fs.createReadStream(fullPath);
-                      // const promise = new Promise<ProblemFileEntity>((resolve, reject) => {
-                      //   stream.on("error", reject);
-                      //   migrateFile(file, size, stream, ProblemFileType.TestData, transactionalEntityManager)
-                      //     .then(resolve)
-                      //     .catch(reject);
-                      // });
-                      // const result = await promise;
-                      // return result;
-                      return await migrateFile(
-                        file,
-                        size,
-                        fullPath,
-                        ProblemFileType.TestData,
-                        transactionalEntityManager
-                      );
-                    })
-                  )
-              );
+              return await entityManager.transaction("READ COMMITTED", async transactionalEntityManager => {
+                const results: ProblemFileEntity[] = [];
+                for (const file of dataFiles) {
+                  const fullPath = path.join(oldDataDirectory, file);
+                  const stat = await fs.promises.stat(fullPath);
+                  if (!stat.isFile()) {
+                    Logger.warn(`Ignoring non-file file ${fullPath} of problem ${displayProblem(oldProblem)}`);
+                    continue;
+                  }
+                  const result = await migrateFile(
+                    file,
+                    stat.size,
+                    fullPath,
+                    ProblemFileType.TestData,
+                    transactionalEntityManager
+                  );
+                  if (result) results.push(result);
+                }
+                return results;
+              });
             } catch (e) {
               Logger.error(`Failed to migrate testdata files for problem ${displayProblem(oldProblem)}, ${e}`);
               return [];
@@ -638,21 +637,19 @@ export const migrationProblem: MigrationInterface = {
               await entityManager.transaction("READ COMMITTED", async transactionalEntityManager => {
                 await (await unzipper.Open.file(additionalFile)).extract({ path: tempDirectory });
                 const files = await fs.promises.readdir(tempDirectory);
-                await Promise.all(
-                  files.map(async file => {
-                    const fullPath = path.join(tempDirectory, file);
-                    const stat = await fs.promises.lstat(fullPath);
-                    if (stat.isFile()) {
-                      await migrateFile(
-                        file,
-                        stat.size,
-                        fullPath,
-                        ProblemFileType.AdditionalFile,
-                        transactionalEntityManager
-                      );
-                    }
-                  })
-                );
+                for (const file of files) {
+                  const fullPath = path.join(tempDirectory, file);
+                  const stat = await fs.promises.lstat(fullPath);
+                  if (stat.isFile()) {
+                    await migrateFile(
+                      file,
+                      stat.size,
+                      fullPath,
+                      ProblemFileType.AdditionalFile,
+                      transactionalEntityManager
+                    );
+                  }
+                }
               });
             } catch (e) {
               Logger.error(`Failed to migrate additional files for problem ${displayProblem(oldProblem)}, ${e}`);

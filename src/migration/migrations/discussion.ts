@@ -46,7 +46,7 @@ export const migrationDiscussion: MigrationInterface = {
 
         if (oldArticle.is_notice) annoucementIds.push(oldArticle.id);
       },
-      1000
+      20
     );
 
     annoucementIds.sort((a, b) => b - a);
@@ -80,7 +80,7 @@ export const migrationDiscussion: MigrationInterface = {
           Logger.error(`Failed to migrate discussion reply #${oldArticleComment.id}, ${e}`);
         }
       },
-      1000
+      20
     );
 
     Logger.log("Calculating discussion reply count");
