@@ -101,10 +101,11 @@ export class FileService implements OnModuleInit {
     private readonly configService: ConfigService
   ) {
     const config = this.configService.config.services.minio;
-    const commonOptions: Pick<ClientOptions, "accessKey" | "secretKey" | "region"> = {
+    const commonOptions: Pick<ClientOptions, "accessKey" | "secretKey" | "region" | "pathStyle"> = {
       accessKey: config.accessKey,
       secretKey: config.secretKey,
-      region: "us-east-1"
+      region: "ap-chengdu",
+      pathStyle: false
     };
 
     this.minioClient = new MinioClient({
