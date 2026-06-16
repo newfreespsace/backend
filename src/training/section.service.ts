@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
@@ -7,6 +7,7 @@ import { GroupService } from "@/group/group.service";
 import { ProblemService, ProblemPermissionType } from "@/problem/problem.service";
 import { UserEntity } from "@/user/user.entity";
 import { UserService } from "@/user/user.service";
+import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
 import { SubmissionService } from "@/submission/submission.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
@@ -44,7 +45,8 @@ export class SectionService {
     private readonly submissionService: SubmissionService,
     private readonly trainingProgressService: TrainingProgressService,
     private readonly groupService: GroupService,
-    private readonly userService: UserService
+    private readonly userService: UserService,
+    private readonly userPrivilegeService: UserPrivilegeService
   ) {}
 
   async querySectionSetByChapterId(chapterId: number, currentUser: UserEntity): Promise<SectionMetaDto[]> {
@@ -236,13 +238,23 @@ export class SectionService {
     const section = await this.sectionRepository.findOneBy({ id: sectionId });
     if (!section) throw new NotFoundException(`section ${sectionId} not found`);
 
-    const group = await this.groupService.findGroupById(groupId);
-    if (!group) throw new NotFoundException(`group ${groupId} not found`);
+    if (!currentUser) throw new ForbiddenException("permission denied");
+
+    const canManageTraining = await this.userPrivilegeService.userHasPrivilege(
+      currentUser,
+      UserPrivilegeType.ManageProblem
+    );
+    if (groupId && !canManageTraining) throw new ForbiddenException("permission denied");
+
+    const groups = groupId
+      ? [await this.groupService.findGroupById(groupId)]
+      : (await this.groupService.getUserJoinedGroups(currentUser))[0];
+    if (groupId && !groups[0]) throw new NotFoundException(`group ${groupId} not found`);
 
     const sectionProblems = await section.problems;
     const problemIds = sectionProblems.map(sectionProblem => sectionProblem.problemId);
-    const memberships = await this.groupService.getGroupMemberList(group);
-    const userIds = memberships.map(membership => membership.userId);
+    const membershipsList = await Promise.all(groups.map(group => this.groupService.getGroupMemberList(group)));
+    const userIds = Array.from(new Set(membershipsList.flat().map(membership => membership.userId)));
 
     const acceptedProblemIdsByUserId = new Map<number, Set<number>>();
     if (problemIds.length > 0 && userIds.length > 0) {
@@ -298,6 +310,8 @@ export class SectionService {
     return {
       sectionId,
       groupId,
+      groups: await Promise.all(groups.map(group => this.groupService.getGroupMeta(group))),
+      memberCount: userIds.length,
       problemCount: problemIds.length,
       result: items
     };

@@ -138,7 +138,6 @@ export class SectionController {
     @Body()
     request: QuerySectionGroupRanklistDto
   ): Promise<QuerySectionGroupRanklistResponseDto> {
-    await this.checkManageTrainingPermission(currentUser);
     return await this.sectionService.querySectionGroupRanklist(currentUser, request);
   }
 }

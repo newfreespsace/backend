@@ -1,7 +1,8 @@
 import { ApiProperty } from "@nestjs/swagger";
 import { Type } from "class-transformer";
-import { IsInt } from "class-validator";
+import { IsInt, IsOptional } from "class-validator";
 
+import { GroupMetaDto } from "@/group/dto";
 import { UserMetaDto } from "@/user/dto";
 
 export class QuerySectionGroupRanklistDto {
@@ -10,8 +11,9 @@ export class QuerySectionGroupRanklistDto {
   sectionId: number;
 
   @Type(() => Number)
+  @IsOptional()
   @IsInt()
-  groupId: number;
+  groupId?: number;
 }
 
 export class SectionGroupRanklistItemDto {
@@ -33,7 +35,13 @@ export class QuerySectionGroupRanklistResponseDto {
   sectionId: number;
 
   @ApiProperty()
-  groupId: number;
+  groupId?: number;
+
+  @ApiProperty({ type: [GroupMetaDto] })
+  groups: GroupMetaDto[];
+
+  @ApiProperty()
+  memberCount: number;
 
   @ApiProperty()
   problemCount: number;
