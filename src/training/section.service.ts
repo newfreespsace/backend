@@ -182,4 +182,36 @@ export class SectionService {
 
     return { success: true };
   }
+
+  async delSectionById(id: number): Promise<void> {
+    const result = await this.sectionRepository.delete(id);
+    if (result.affected === 0) {
+      throw new NotFoundException(`section ${id} not found`);
+    }
+  }
+
+  async reorderSections(chapterId: number, items: { id: number; sortOrder: number }[]): Promise<void> {
+    const ids = items.map(item => item.id);
+    const sortOrders = items.map(item => item.sortOrder);
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException("duplicate id");
+    }
+    if (new Set(sortOrders).size !== sortOrders.length) {
+      throw new BadRequestException("duplicate sortOrder");
+    }
+
+    const chapter = await this.chapterRepository.findOneBy({ id: chapterId });
+    if (!chapter) throw new NotFoundException(`chapter ${chapterId} not found`);
+
+    const sections = items.length ? await this.sectionRepository.findByIds(ids) : [];
+    if (sections.length !== items.length || sections.some(section => section.chapterId !== chapterId)) {
+      throw new NotFoundException("some sections not found");
+    }
+
+    await this.sectionRepository.manager.transaction(async manager => {
+      await Promise.all(
+        items.map(item => manager.update(SectionEntity, { id: item.id }, { sortOrder: item.sortOrder }))
+      );
+    });
+  }
 }

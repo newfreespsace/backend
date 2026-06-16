@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 
 import { InjectRepository } from "@nestjs/typeorm";
 
@@ -12,6 +12,11 @@ import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toTrainingMetaDto } from "./training.mapper";
 import { TrainingProgressService } from "./training-progress.service";
 import { UserEntity } from "@/user/user.entity";
+
+interface ReorderItem {
+  id: number;
+  sortOrder: number;
+}
 
 @Injectable()
 export class TrainingService {
@@ -79,6 +84,31 @@ export class TrainingService {
     const result = await this.trainingRepository.delete(id);
     if (result.affected === 0) {
       throw new NotFoundException(`training ${id} not found`);
+    }
+  }
+
+  async reorderTrainings(items: ReorderItem[]): Promise<void> {
+    this.validateReorderItems(items);
+    const existingTrainings = await this.trainingRepository.findByIds(items.map(item => item.id));
+    if (existingTrainings.length !== items.length) {
+      throw new NotFoundException("some trainings not found");
+    }
+
+    await this.trainingRepository.manager.transaction(async manager => {
+      await Promise.all(
+        items.map(item => manager.update(TrainingEntity, { id: item.id }, { sortOrder: item.sortOrder }))
+      );
+    });
+  }
+
+  private validateReorderItems(items: ReorderItem[]): void {
+    const ids = items.map(item => item.id);
+    const sortOrders = items.map(item => item.sortOrder);
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException("duplicate id");
+    }
+    if (new Set(sortOrders).size !== sortOrders.length) {
+      throw new BadRequestException("duplicate sortOrder");
     }
   }
 }

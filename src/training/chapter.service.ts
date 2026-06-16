@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
@@ -11,6 +11,11 @@ import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toSectionMetaDto } from "./training.mapper";
 import { TrainingProgressService } from "./training-progress.service";
 import { UserEntity } from "@/user/user.entity";
+
+interface ReorderItem {
+  id: number;
+  sortOrder: number;
+}
 
 @Injectable()
 export class ChapterService {
@@ -76,5 +81,40 @@ export class ChapterService {
       ...chapterProgress.get(chapter.id),
       sections: sections.map(section => ({ ...toSectionMetaDto(section), ...sectionProgress.get(section.id) }))
     };
+  }
+
+  async delChapterById(id: number): Promise<void> {
+    const result = await this.chapterRepository.delete(id);
+    if (result.affected === 0) {
+      throw new NotFoundException(`chapter ${id} not found`);
+    }
+  }
+
+  async reorderChapters(trainingId: number, items: ReorderItem[]): Promise<void> {
+    this.validateReorderItems(items);
+    const training = await this.trainingRepository.findOneBy({ id: trainingId });
+    if (!training) throw new NotFoundException(`training ${trainingId} not found`);
+
+    const chapters = items.length ? await this.chapterRepository.findByIds(items.map(item => item.id)) : [];
+    if (chapters.length !== items.length || chapters.some(chapter => chapter.trainingId !== trainingId)) {
+      throw new NotFoundException("some chapters not found");
+    }
+
+    await this.chapterRepository.manager.transaction(async manager => {
+      await Promise.all(
+        items.map(item => manager.update(ChapterEntity, { id: item.id }, { sortOrder: item.sortOrder }))
+      );
+    });
+  }
+
+  private validateReorderItems(items: ReorderItem[]): void {
+    const ids = items.map(item => item.id);
+    const sortOrders = items.map(item => item.sortOrder);
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException("duplicate id");
+    }
+    if (new Set(sortOrders).size !== sortOrders.length) {
+      throw new BadRequestException("duplicate sortOrder");
+    }
   }
 }
