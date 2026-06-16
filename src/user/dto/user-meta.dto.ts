@@ -35,4 +35,7 @@ export class UserMetaDto {
 
   @ApiProperty()
   registrationTime: Date;
+
+  @ApiProperty({ nullable: true })
+  currentTrainingId?: number | null;
 }

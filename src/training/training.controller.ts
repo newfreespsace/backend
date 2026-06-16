@@ -13,6 +13,8 @@ import { ReorderTrainingsDto } from "./dto/reorder-items.dto";
 import { TrainingMetaDto } from "./dto/training-meta.dto";
 import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingService } from "./training.service";
+import { SetCurrentTrainingDto } from "./dto/set-current-training.dto";
+import { SetCurrentTrainingResponseDto } from "./dto/set-current-training-response.dto";
 
 @ApiTags("Training")
 @Controller("training")
@@ -98,5 +100,17 @@ export class TrainingController {
   ): Promise<void> {
     await this.checkManageTrainingPermission(currentUser);
     await this.trainingService.reorderTrainings(request.items);
+  }
+
+  @Post("setCurrentTraining")
+  @ApiBearerAuth()
+  async setCurrentTraining(
+    @CurrentUser()
+    currentUser: UserEntity,
+    @Body()
+    request: SetCurrentTrainingDto
+  ): Promise<SetCurrentTrainingResponseDto> {
+    if (!currentUser) throw new ForbiddenException("permission denied");
+    return await this.trainingService.setCurrentTraining(currentUser, request.trainingId);
   }
 }

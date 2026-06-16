@@ -1,17 +1,18 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-
 import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
 
+import { UserEntity } from "@/user/user.entity";
+
 import { CreateTrainingDto } from "./dto/create-training.dto";
 import { QueryTrainingSetResponseDto } from "./dto/query-training-set-response.dto";
+import { SetCurrentTrainingResponseDto } from "./dto/set-current-training-response.dto";
 import { TrainingMetaDto } from "./dto/training-meta.dto";
 import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toTrainingMetaDto } from "./training.mapper";
 import { TrainingProgressService } from "./training-progress.service";
-import { UserEntity } from "@/user/user.entity";
 
 interface ReorderItem {
   id: number;
@@ -23,6 +24,10 @@ export class TrainingService {
   constructor(
     @InjectRepository(TrainingEntity)
     private readonly trainingRepository: Repository<TrainingEntity>,
+
+    @InjectRepository(UserEntity)
+    private readonly userRepository: Repository<UserEntity>,
+
     private readonly trainingProgressService: TrainingProgressService
   ) {}
 
@@ -110,5 +115,22 @@ export class TrainingService {
     if (new Set(sortOrders).size !== sortOrders.length) {
       throw new BadRequestException("duplicate sortOrder");
     }
+  }
+
+  async setCurrentTraining(
+    currentUser: UserEntity,
+    trainingId?: number | null
+  ): Promise<SetCurrentTrainingResponseDto> {
+    if (trainingId !== undefined && trainingId !== null) {
+      const training = await this.trainingRepository.findOneBy({ id: trainingId });
+      if (!training) throw new NotFoundException(`training ${trainingId} not found`);
+    }
+
+    const currentTrainingId = trainingId ?? null;
+
+    await this.userRepository.update(currentUser.id, { currentTrainingId });
+
+    currentUser.currentTrainingId = currentTrainingId;
+    return { success: true, currentTrainingId };
   }
 }

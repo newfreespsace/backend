@@ -1,5 +1,6 @@
-import { Entity, PrimaryGeneratedColumn, Column, OneToOne, Index } from "typeorm";
+import { Entity, PrimaryGeneratedColumn, Column, OneToOne, Index, JoinColumn, ManyToOne } from "typeorm";
 
+import { TrainingEntity } from "@/training/entities/training.entity";
 import { UserAuthEntity } from "@/auth/user-auth.entity";
 
 @Entity("user")
@@ -52,4 +53,12 @@ export class UserEntity {
 
   @OneToOne(() => UserAuthEntity, userAuth => userAuth.user)
   userAuth: Promise<UserAuthEntity>;
+
+  @Column({ nullable: true })
+  @Index()
+  currentTrainingId?: number | null;
+
+  @ManyToOne(() => TrainingEntity, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "currentTrainingId" })
+  currentTraining?: Promise<TrainingEntity>;
 }

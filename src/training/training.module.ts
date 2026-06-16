@@ -7,6 +7,8 @@ import { SubmissionEntity } from "@/submission/submission.entity";
 import { UserModule } from "@/user/user.module";
 import { GroupModule } from "@/group/group.module";
 
+import { UserEntity } from "@/user/user.entity";
+
 import { TrainingController } from "./training.controller";
 import { TrainingService } from "./training.service";
 import { TrainingEntity } from "./entities/training.entity";
@@ -21,7 +23,14 @@ import { TrainingProgressService } from "./training-progress.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TrainingEntity, ChapterEntity, SectionEntity, SectionProblemEntity, SubmissionEntity]),
+    TypeOrmModule.forFeature([
+      TrainingEntity,
+      ChapterEntity,
+      SectionEntity,
+      SectionProblemEntity,
+      SubmissionEntity,
+      UserEntity
+    ]),
     ProblemModule,
     SubmissionModule,
     UserModule,

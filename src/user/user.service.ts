@@ -140,7 +140,8 @@ export class UserService {
       acceptedProblemCount: user.acceptedProblemCount,
       submissionCount: user.submissionCount,
       rating: user.rating,
-      registrationTime: user.registrationTime
+      registrationTime: user.registrationTime,
+      currentTrainingId: user.currentTrainingId
     };
   }
 
