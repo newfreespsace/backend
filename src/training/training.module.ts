@@ -3,7 +3,9 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 
 import { ProblemModule } from "@/problem/problem.module";
 import { SubmissionModule } from "@/submission/submission.module";
+import { SubmissionEntity } from "@/submission/submission.entity";
 import { UserModule } from "@/user/user.module";
+import { GroupModule } from "@/group/group.module";
 
 import { TrainingController } from "./training.controller";
 import { TrainingService } from "./training.service";
@@ -19,10 +21,11 @@ import { TrainingProgressService } from "./training-progress.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TrainingEntity, ChapterEntity, SectionEntity, SectionProblemEntity]),
+    TypeOrmModule.forFeature([TrainingEntity, ChapterEntity, SectionEntity, SectionProblemEntity, SubmissionEntity]),
     ProblemModule,
     SubmissionModule,
-    UserModule
+    UserModule,
+    GroupModule
   ],
   controllers: [TrainingController, ChapterController, SectionController],
   providers: [TrainingService, ChapterService, SectionService, TrainingProgressService]

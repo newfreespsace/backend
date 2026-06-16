@@ -9,6 +9,10 @@ import { SectionService } from "./section.service";
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { DeleteByIdRequestDto } from "./dto/delete-by-id-request.dto";
 import { QuerySectionByChapterIdDto } from "./dto/query-section.dto";
+import {
+  QuerySectionGroupRanklistDto,
+  QuerySectionGroupRanklistResponseDto
+} from "./dto/query-section-group-ranklist.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
 import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
 import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto";
@@ -124,5 +128,17 @@ export class SectionController {
   ): Promise<void> {
     await this.checkManageTrainingPermission(currentUser);
     await this.sectionService.reorderSections(request.chapterId, request.items);
+  }
+
+  @Post("querySectionGroupRanklist")
+  @ApiBearerAuth()
+  async querySectionGroupRanklist(
+    @CurrentUser()
+    currentUser: UserEntity,
+    @Body()
+    request: QuerySectionGroupRanklistDto
+  ): Promise<QuerySectionGroupRanklistResponseDto> {
+    await this.checkManageTrainingPermission(currentUser);
+    return await this.sectionService.querySectionGroupRanklist(currentUser, request);
   }
 }

@@ -3,9 +3,13 @@ import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
 
+import { GroupService } from "@/group/group.service";
 import { ProblemService, ProblemPermissionType } from "@/problem/problem.service";
 import { UserEntity } from "@/user/user.entity";
+import { UserService } from "@/user/user.service";
 import { SubmissionService } from "@/submission/submission.service";
+import { SubmissionEntity } from "@/submission/submission.entity";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
@@ -17,6 +21,10 @@ import { toSectionMetaDto } from "./training.mapper";
 import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto";
 import { SetSectionProblemsDto } from "./dto/set-section-problems.dto";
 import { SetSectionProblemsResponseDto } from "./dto/set-section-problems-response.dto";
+import {
+  QuerySectionGroupRanklistDto,
+  QuerySectionGroupRanklistResponseDto
+} from "./dto/query-section-group-ranklist.dto";
 import { ChapterEntity } from "./entities/chapter.entity";
 import { TrainingProgressService } from "./training-progress.service";
 
@@ -29,10 +37,14 @@ export class SectionService {
     private readonly sectionRepository: Repository<SectionEntity>,
     @InjectRepository(SectionProblemEntity)
     private readonly sectionProblemRepository: Repository<SectionProblemEntity>,
+    @InjectRepository(SubmissionEntity)
+    private readonly submissionRepository: Repository<SubmissionEntity>,
 
     private readonly problemService: ProblemService,
     private readonly submissionService: SubmissionService,
-    private readonly trainingProgressService: TrainingProgressService
+    private readonly trainingProgressService: TrainingProgressService,
+    private readonly groupService: GroupService,
+    private readonly userService: UserService
   ) {}
 
   async querySectionSetByChapterId(chapterId: number, currentUser: UserEntity): Promise<SectionMetaDto[]> {
@@ -213,5 +225,81 @@ export class SectionService {
         items.map(item => manager.update(SectionEntity, { id: item.id }, { sortOrder: item.sortOrder }))
       );
     });
+  }
+
+  async querySectionGroupRanklist(
+    currentUser: UserEntity,
+    request: QuerySectionGroupRanklistDto
+  ): Promise<QuerySectionGroupRanklistResponseDto> {
+    const { sectionId, groupId } = request;
+
+    const section = await this.sectionRepository.findOneBy({ id: sectionId });
+    if (!section) throw new NotFoundException(`section ${sectionId} not found`);
+
+    const group = await this.groupService.findGroupById(groupId);
+    if (!group) throw new NotFoundException(`group ${groupId} not found`);
+
+    const sectionProblems = await section.problems;
+    const problemIds = sectionProblems.map(sectionProblem => sectionProblem.problemId);
+    const memberships = await this.groupService.getGroupMemberList(group);
+    const userIds = memberships.map(membership => membership.userId);
+
+    const acceptedProblemIdsByUserId = new Map<number, Set<number>>();
+    if (problemIds.length > 0 && userIds.length > 0) {
+      const rows: { userId: string; problemId: string }[] = await this.submissionRepository
+        .createQueryBuilder("submission")
+        .select("submission.submitterId", "userId")
+        .addSelect("submission.problemId", "problemId")
+        .where("submission.submitterId IN (:...userIds)", { userIds })
+        .andWhere("submission.problemId IN (:...problemIds)", { problemIds })
+        .andWhere("submission.status = :status", { status: SubmissionStatus.Accepted })
+        .distinct(true)
+        .getRawMany();
+
+      rows.forEach(row => {
+        const userId = Number(row.userId);
+        const problemId = Number(row.problemId);
+        if (!acceptedProblemIdsByUserId.has(userId)) acceptedProblemIdsByUserId.set(userId, new Set<number>());
+        acceptedProblemIdsByUserId.get(userId).add(problemId);
+      });
+    }
+
+    const users = await this.userService.findUsersByExistingIds(userIds);
+    const items = await Promise.all(
+      users.map(async user => {
+        const acceptedProblemIds = Array.from(acceptedProblemIdsByUserId.get(user.id) || []);
+        return {
+          rank: 0,
+          user: await this.userService.getUserMeta(user, currentUser),
+          acceptedProblemCount: acceptedProblemIds.length,
+          acceptedProblemIds
+        };
+      })
+    );
+
+    items.sort(
+      (a, b) =>
+        b.acceptedProblemCount - a.acceptedProblemCount ||
+        a.user.username.localeCompare(b.user.username) ||
+        a.user.id - b.user.id
+    );
+
+    let previousAcceptedProblemCount: number = null;
+    let previousRank = 0;
+    items.forEach((item, index) => {
+      if (item.acceptedProblemCount === previousAcceptedProblemCount) item.rank = previousRank;
+      else {
+        item.rank = index + 1;
+        previousRank = item.rank;
+        previousAcceptedProblemCount = item.acceptedProblemCount;
+      }
+    });
+
+    return {
+      sectionId,
+      groupId,
+      problemCount: problemIds.length,
+      result: items
+    };
   }
 }
