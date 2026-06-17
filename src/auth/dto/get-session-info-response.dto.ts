@@ -5,6 +5,7 @@ import { UserPrivilegeType } from "@/user/user-privilege.service";
 import { PreferenceConfig } from "@/config/config.schema";
 
 import { UserMetaDto, UserPreferenceDto } from "@/user/dto";
+import { ContestMetaDto } from "@/contest/dto";
 
 export class ServerVersionDto {
   @ApiProperty()
@@ -26,6 +27,9 @@ export class GetSessionInfoResponseDto {
 
   @ApiProperty()
   userPreference?: UserPreferenceDto;
+
+  @ApiProperty({ type: [ContestMetaDto] })
+  activeGroupContests?: ContestMetaDto[];
 
   @ApiProperty()
   serverPreference: PreferenceConfig;

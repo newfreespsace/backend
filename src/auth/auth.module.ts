@@ -8,6 +8,7 @@ import { MailModule } from "@/mail/mail.module";
 import { AuditModule } from "@/audit/audit.module";
 import { MigrationModule } from "@/migration/migration.module";
 import { SiteSettingModule } from "@/site-setting/site-setting.module";
+import { ContestModule } from "@/contest/contest.module";
 
 import { UserAuthEntity } from "./user-auth.entity";
 import { AuthService } from "./auth.service";
@@ -25,7 +26,8 @@ import { AuthIpLocationService } from "./auth-ip-location.service";
     forwardRef(() => MailModule),
     forwardRef(() => AuditModule),
     forwardRef(() => MigrationModule),
-    forwardRef(() => SiteSettingModule)
+    forwardRef(() => SiteSettingModule),
+    forwardRef(() => ContestModule)
   ],
   providers: [AuthService, AuthEmailVerificationCodeService, AuthSessionService, AuthIpLocationService],
   controllers: [AuthController],

@@ -108,6 +108,41 @@ export class ContestService {
     return !!user && (user.isAdmin || contest.holderId === user.id || contest.adminIds.includes(user.id));
   }
 
+  private isPrivilegedContestUserSync(user: UserEntity, contest: ContestEntity): boolean {
+    return !!user && (user.isAdmin || contest.holderId === user.id || contest.adminIds.includes(user.id));
+  }
+
+  async getActiveGroupContestsForUser(user: UserEntity): Promise<ContestEntity[]> {
+    if (!user) return [];
+    const groupIds = await this.groupService.getGroupIdsByUserId(user.id);
+    if (groupIds.length === 0) return [];
+
+    const now = new Date();
+    return await this.contestRepository
+      .find({
+        where: {
+          groupId: In(groupIds)
+        },
+        order: {
+          startTime: "ASC",
+          id: "ASC"
+        }
+      })
+      .then(contests => contests.filter(contest => this.isRunning(contest, now)));
+  }
+
+  async getContestAccessRestriction(user: UserEntity): Promise<ContestEntity[]> {
+    if (!user) return [];
+    if (user.isAdmin || (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageProblem))) {
+      return [];
+    }
+
+    const activeGroupContests = await this.getActiveGroupContestsForUser(user);
+    if (activeGroupContests.length === 0) return [];
+    if (activeGroupContests.some(contest => this.isPrivilegedContestUserSync(user, contest))) return [];
+    return activeGroupContests;
+  }
+
   private isVisibleInListSync(user: UserEntity, contest: ContestEntity, groupIds: number[]): boolean {
     if (this.isManagerSync(user, contest)) return true;
     if (contest.groupId) return !!user && groupIds.includes(contest.groupId);

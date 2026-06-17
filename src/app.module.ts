@@ -1,4 +1,5 @@
 import { Module, forwardRef, NestModule, MiddlewareConsumer, RequestMethod } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
 
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
@@ -31,6 +32,7 @@ import { SiteSettingModule } from "./site-setting/site-setting.module";
 
 import { RequestLogMiddleware } from "./request-log.middleware";
 import { TrainingModule } from "./training/training.module";
+import { ContestAccessGuard } from "./contest/contest-access.guard";
 
 @Module({
   imports: [
@@ -58,7 +60,15 @@ import { TrainingModule } from "./training/training.module";
     TrainingModule
   ],
   controllers: [AppController],
-  providers: [AppService, ErrorFilter, RecaptchaFilter]
+  providers: [
+    AppService,
+    ErrorFilter,
+    RecaptchaFilter,
+    {
+      provide: APP_GUARD,
+      useClass: ContestAccessGuard
+    }
+  ]
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {

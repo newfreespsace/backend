@@ -56,6 +56,19 @@ export class ContestController {
     @CurrentUser() currentUser: UserEntity,
     @Body() request: QueryContestsRequestDto
   ): Promise<QueryContestsResponseDto> {
+    const restrictedContests = await this.contestService.getContestAccessRestriction(currentUser);
+    if (restrictedContests.length > 0) {
+      const contests = restrictedContests.slice(request.skipCount, request.skipCount + request.takeCount);
+      return {
+        count: restrictedContests.length,
+        result: contests.map(contest => this.contestService.getContestMeta(contest)),
+        permissions: {
+          createContest: false,
+          filterNonpublic: false
+        }
+      };
+    }
+
     const [contests, count] = await this.contestService.queryContests(
       currentUser,
       request.skipCount,

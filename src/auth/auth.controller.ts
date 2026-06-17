@@ -16,6 +16,7 @@ import { UserMigrationService } from "@/migration/user-migration.service";
 import { UserMigrationInfoEntity } from "@/migration/user-migration-info.entity";
 import { delay, DELAY_FOR_SECURITY } from "@/common/delay";
 import { SiteSettingService } from "@/site-setting/site-setting.service";
+import { ContestService } from "@/contest/contest.service";
 
 import { AuthEmailVerificationCodeService, EmailVerificationCodeType } from "./auth-email-verification-code.service";
 import { AuthSessionService } from "./auth-session.service";
@@ -65,7 +66,8 @@ export class AuthController {
     private readonly authIpLocationService: AuthIpLocationService,
     private readonly auditService: AuditService,
     private readonly userMigrationService: UserMigrationService,
-    private readonly siteSettingService: SiteSettingService
+    private readonly siteSettingService: SiteSettingService,
+    private readonly contestService: ContestService
   ) {}
 
   @Get("getSessionInfo")
@@ -89,6 +91,9 @@ export class AuthController {
       result.joinedGroupsCount = await this.groupService.getUserJoinedGroupsCount(user);
       result.userPrivileges = await this.userPrivilegeService.getUserPrivileges(user.id);
       result.userPreference = await this.userService.getUserPreference(user);
+      result.activeGroupContests = (await this.contestService.getContestAccessRestriction(user)).map(contest =>
+        this.contestService.getContestMeta(contest)
+      );
     }
 
     if (request.jsonp)

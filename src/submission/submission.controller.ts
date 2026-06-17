@@ -203,6 +203,18 @@ export class SubmissionController {
         error: QuerySubmissionResponseError.PERMISSION_DENIED
       };
 
+    const restrictedContests = await this.contestService.getContestAccessRestriction(currentUser);
+    const lockedContest =
+      filterContest && restrictedContests.some(restrictedContest => restrictedContest.id === filterContest.id);
+    if (lockedContest) {
+      if (filterSubmitter && filterSubmitter.id !== currentUser.id) {
+        return {
+          error: QuerySubmissionResponseError.PERMISSION_DENIED
+        };
+      }
+      filterSubmitter = currentUser;
+    }
+
     const isSubmissionsOwned = filterSubmitter && currentUser && filterSubmitter.id === currentUser.id;
     const queryResult = await this.submissionService.querySubmissions(
       filterProblem ? filterProblem.id : null,
@@ -295,6 +307,17 @@ export class SubmissionController {
       this.problemService.findProblemById(submission.problemId),
       this.userPrivilegeService.userHasPrivilege(currentUser, UserPrivilegeType.ManageProblem)
     ]);
+
+    const restrictedContests = await this.contestService.getContestAccessRestriction(currentUser);
+    if (
+      restrictedContests.length > 0 &&
+      (!submission.contestId ||
+        submission.submitterId !== currentUser.id ||
+        !restrictedContests.some(contest => contest.id === submission.contestId))
+    )
+      return {
+        error: GetSubmissionDetailResponseError.PERMISSION_DENIED
+      };
 
     if (
       !(await this.submissionService.userHasPermission(
@@ -398,6 +421,17 @@ export class SubmissionController {
     if (!submission)
       return {
         error: DownloadSubmissionFileResponseError.NO_SUCH_SUBMISSION
+      };
+
+    const restrictedContests = await this.contestService.getContestAccessRestriction(currentUser);
+    if (
+      restrictedContests.length > 0 &&
+      (!submission.contestId ||
+        submission.submitterId !== currentUser.id ||
+        !restrictedContests.some(contest => contest.id === submission.contestId))
+    )
+      return {
+        error: DownloadSubmissionFileResponseError.PERMISSION_DENIED
       };
 
     if (!(await this.submissionService.userHasPermission(currentUser, submission, SubmissionPermissionType.View)))
