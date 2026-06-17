@@ -338,6 +338,10 @@ export class FileService implements OnModuleInit {
     else return url;
   }
 
+  async getFileStream(uuid: string): Promise<Readable> {
+    return await this.minioClient.getObject(this.bucket, uuid);
+  }
+
   async runMaintainceTasks(): Promise<void> {
     // Delete unused files
     const stream = this.minioClient.listObjectsV2(this.bucket);

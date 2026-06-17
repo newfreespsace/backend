@@ -25,6 +25,8 @@ export class ContestAccessGuard implements CanActivate {
 
     if (path === "auth/getSessionInfo" || path === "auth/logout") return true;
 
+    if (path.startsWith("gallery/image/")) return true;
+
     if (path === "contest/queryContests") return true;
 
     if (path === "contest/getContest" || path === "contest/getContestProblem") {

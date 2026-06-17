@@ -29,6 +29,7 @@ import { HomepageModule } from "./homepage/homepage.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { ContestModule } from "./contest/contest.module";
 import { SiteSettingModule } from "./site-setting/site-setting.module";
+import { GalleryModule } from "./gallery/gallery.module";
 
 import { RequestLogMiddleware } from "./request-log.middleware";
 import { TrainingModule } from "./training/training.module";
@@ -57,6 +58,7 @@ import { ContestAccessGuard } from "./contest/contest-access.guard";
     forwardRef(() => MigrationModule),
     forwardRef(() => MetricsModule),
     forwardRef(() => SiteSettingModule),
+    forwardRef(() => GalleryModule),
     TrainingModule
   ],
   controllers: [AppController],

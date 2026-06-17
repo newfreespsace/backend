@@ -456,6 +456,26 @@ class ResourceLimitConfig {
   @IsInt()
   @Min(0)
   readonly submissionFileSize: number;
+
+  @IsInt()
+  @Min(0)
+  readonly galleryBaseSize: number;
+
+  @IsInt()
+  @Min(0)
+  readonly gallerySizePerAcceptedProblem: number;
+
+  @IsInt()
+  @Min(0)
+  readonly galleryMaxSize: number;
+
+  @IsInt()
+  @Min(0)
+  readonly galleryImageMaxSize: number;
+
+  @IsInt()
+  @Min(0)
+  readonly galleryImageMaxCount: number;
 }
 
 class QueryLimitConfig {
