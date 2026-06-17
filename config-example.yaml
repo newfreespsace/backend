@@ -93,6 +93,7 @@ preference:
 resourceLimit:
   problemTestdataFiles: 40
   problemTestdataSize: 134217728
+  problemTestdataDailyDownloadFiles: 20
   problemAdditionalFileFiles: 40
   problemAdditionalFileSize: 134217728
   problemSamplesToRun: 10

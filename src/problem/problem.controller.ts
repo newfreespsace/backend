@@ -1,12 +1,15 @@
-import { Controller, Post, Body } from "@nestjs/common";
+import { Controller, Post, Body, Req } from "@nestjs/common";
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Recaptcha } from "@nestlab/google-recaptcha";
+import { Request } from "express";
+import { Redis } from "ioredis";
 
 import { ConfigService } from "@/config/config.service";
 import { UserService } from "@/user/user.service";
 import { GroupService } from "@/group/group.service";
 import { MinioSignFor, FileService } from "@/file/file.service";
+import { RedisService } from "@/redis/redis.service";
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 import { GroupEntity } from "@/group/group.entity";
@@ -82,9 +85,26 @@ import {
   ChangeProblemTypeResponseError
 } from "./dto";
 
+const REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD = "problem-testdata-daily-download:%s:%s";
+
+function getLocalDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function getSecondsUntilTomorrow(date = new Date()): number {
+  const tomorrow = new Date(date);
+  tomorrow.setHours(24, 0, 0, 0);
+  return Math.max(1, Math.ceil((+tomorrow - +date) / 1000));
+}
+
 @ApiTags("Problem")
 @Controller("problem")
 export class ProblemController {
+  private readonly redis: Redis;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly problemService: ProblemService,
@@ -94,8 +114,30 @@ export class ProblemController {
     private readonly fileService: FileService,
     private readonly submissionService: SubmissionService,
     private readonly auditService: AuditService,
-    private readonly discussionService: DiscussionService
-  ) {}
+    private readonly discussionService: DiscussionService,
+    private readonly redisService: RedisService
+  ) {
+    this.redis = this.redisService.getClient();
+  }
+
+  private async consumeProblemTestdataDailyDownloadQuota(
+    quotaIdentifier: string,
+    downloadCount: number
+  ): Promise<boolean> {
+    if (downloadCount <= 0) return true;
+
+    const limit = this.configService.config.resourceLimit.problemTestdataDailyDownloadFiles;
+    const key = REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD.format(quotaIdentifier, getLocalDateKey());
+    const used = await this.redis.incrby(key, downloadCount);
+    if (used === downloadCount) await this.redis.expire(key, getSecondsUntilTomorrow());
+
+    if (used > limit) {
+      await this.redis.decrby(key, downloadCount);
+      return false;
+    }
+
+    return true;
+  }
 
   @Post("queryProblemSet")
   @ApiBearerAuth()
@@ -761,7 +803,8 @@ export class ProblemController {
   })
   async downloadProblemFiles(
     @CurrentUser() currentUser: UserEntity,
-    @Body() request: DownloadProblemFilesRequestDto
+    @Body() request: DownloadProblemFilesRequestDto,
+    @Req() httpRequest: Request
   ): Promise<DownloadProblemFilesResponseDto> {
     const problem = await this.problemService.findProblemById(request.problemId);
     if (!problem)
@@ -778,6 +821,18 @@ export class ProblemController {
     const downloadList = problemFiles.filter(
       problemFile => request.filenameList.length === 0 || request.filenameList.includes(problemFile.filename)
     );
+
+    const quotaExempt = await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.Modify);
+    if (request.type === ProblemFileType.TestData && !quotaExempt) {
+      const quotaIdentifier = currentUser
+        ? `user:${currentUser.id}`
+        : `ip:${httpRequest.ip || httpRequest.socket.remoteAddress || "unknown"}`;
+      const quotaConsumed = await this.consumeProblemTestdataDailyDownloadQuota(quotaIdentifier, downloadList.length);
+      if (!quotaConsumed)
+        return {
+          error: DownloadProblemFilesResponseError.PERMISSION_DENIED
+        };
+    }
 
     return {
       downloadInfo: await Promise.all(

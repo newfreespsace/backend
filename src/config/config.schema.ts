@@ -431,6 +431,10 @@ class ResourceLimitConfig {
 
   @IsInt()
   @Min(0)
+  readonly problemTestdataDailyDownloadFiles: number;
+
+  @IsInt()
+  @Min(0)
   readonly problemAdditionalFileFiles: number;
 
   @IsInt()
