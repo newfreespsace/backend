@@ -1,5 +1,6 @@
 import { ApiProperty } from "@nestjs/swagger";
 
+import { GroupMetaDto } from "@/group/dto";
 import { UserMetaDto } from "@/user/dto";
 
 import { ContestMetaDto } from "./contest-meta.dto";
@@ -19,6 +20,9 @@ export class GetContestResponseDto {
 
   @ApiProperty({ type: UserMetaDto })
   holder?: UserMetaDto;
+
+  @ApiProperty({ type: GroupMetaDto })
+  group?: GroupMetaDto;
 
   @ApiProperty({ type: [UserMetaDto] })
   admins?: UserMetaDto[];

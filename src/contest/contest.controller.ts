@@ -4,6 +4,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { CurrentUser } from "@/common/user.decorator";
 import { Locale } from "@/common/locale.type";
 import { DiscussionService } from "@/discussion/discussion.service";
+import { GroupService } from "@/group/group.service";
 import { ProblemService } from "@/problem/problem.service";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { SubmissionService } from "@/submission/submission.service";
@@ -43,7 +44,9 @@ export class ContestController {
     @Inject(forwardRef(() => SubmissionService))
     private readonly submissionService: SubmissionService,
     @Inject(forwardRef(() => DiscussionService))
-    private readonly discussionService: DiscussionService
+    private readonly discussionService: DiscussionService,
+    @Inject(forwardRef(() => GroupService))
+    private readonly groupService: GroupService
   ) {}
 
   @Post("queryContests")
@@ -97,8 +100,9 @@ export class ContestController {
     );
     const unveiled = this.contestService.isUnveiled(contest, currentUser);
 
-    const [holder, admins, problems] = await Promise.all([
+    const [holder, group, admins, problems] = await Promise.all([
       this.userService.findUserById(contest.holderId),
+      contest.groupId ? this.groupService.findGroupById(contest.groupId) : null,
       this.userService.findUsersByExistingIds(contest.adminIds),
       unveiled ? this.contestService.getContestProblems(contest, request.locale, currentUser, viewStatistics) : []
     ]);
@@ -106,6 +110,7 @@ export class ContestController {
     return {
       meta: this.contestService.getContestMeta(contest),
       holder: await this.userService.getUserMeta(holder, currentUser),
+      group: group && (await this.groupService.getGroupMeta(group)),
       admins: await Promise.all(admins.filter(Boolean).map(admin => this.userService.getUserMeta(admin, currentUser))),
       problems,
       permissions: {

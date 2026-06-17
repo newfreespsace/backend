@@ -1,5 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Index, ManyToOne, Column, JoinColumn } from "typeorm";
 
+import { GroupEntity } from "@/group/group.entity";
 import { UserEntity } from "@/user/user.entity";
 
 export enum ContestType {
@@ -39,6 +40,16 @@ export class ContestEntity {
 
   @Column({ type: "boolean" })
   hideStatistics: boolean;
+
+  @ManyToOne(() => GroupEntity, {
+    nullable: true
+  })
+  @JoinColumn()
+  group: Promise<GroupEntity>;
+
+  @Column({ nullable: true })
+  @Index()
+  groupId: number;
 
   @ManyToOne(() => UserEntity)
   @JoinColumn()

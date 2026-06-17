@@ -43,6 +43,11 @@ export class SaveContestRequestDto {
   @IsBoolean()
   hideStatistics: boolean;
 
+  @ApiProperty()
+  @IsOptional()
+  @IsInt()
+  groupId?: number;
+
   @ApiProperty({ type: [Number] })
   @IsArray()
   problemIds: number[];

@@ -4,6 +4,7 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { In, Not, Repository } from "typeorm";
 
 import { Locale } from "@/common/locale.type";
+import { GroupService } from "@/group/group.service";
 import { ProblemEntity } from "@/problem/problem.entity";
 import { ProblemService } from "@/problem/problem.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
@@ -39,7 +40,9 @@ export class ContestService {
     @Inject(forwardRef(() => UserService))
     private readonly userService: UserService,
     @Inject(forwardRef(() => UserPrivilegeService))
-    private readonly userPrivilegeService: UserPrivilegeService
+    private readonly userPrivilegeService: UserPrivilegeService,
+    @Inject(forwardRef(() => GroupService))
+    private readonly groupService: GroupService
   ) {}
 
   async findContestById(contestId: number): Promise<ContestEntity> {
@@ -53,19 +56,28 @@ export class ContestService {
     const manageContest = await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageProblem);
     const manage =
       !!user && (user.isAdmin || manageContest || contest.holderId === user.id || contest.adminIds.includes(user.id));
+    const view = await this.canViewContest(user, contest, manage);
 
     switch (type) {
       case ContestPermissionType.View:
-        return contest.isPublic || manage;
+        return view;
       case ContestPermissionType.Manage:
         return manage;
       case ContestPermissionType.ViewRanklist:
-        return manage || this.isEnded(contest) || (contest.type === ContestType.ACM && this.isRunning(contest));
+        return (
+          view && (manage || this.isEnded(contest) || (contest.type === ContestType.ACM && this.isRunning(contest)))
+        );
       case ContestPermissionType.ViewStatistics:
-        return manage || this.isEnded(contest) || !contest.hideStatistics;
+        return view && (manage || this.isEnded(contest) || !contest.hideStatistics);
       default:
         return false;
     }
+  }
+
+  private async canViewContest(user: UserEntity, contest: ContestEntity, manage: boolean): Promise<boolean> {
+    if (manage) return true;
+    if (!contest.groupId) return contest.isPublic;
+    return !!user && !!(await this.groupService.findGroupMembership(user.id, contest.groupId));
   }
 
   async queryContests(
@@ -76,6 +88,7 @@ export class ContestService {
   ): Promise<[ContestEntity[], number]> {
     const canViewNonpublic = await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageProblem);
     if (nonpublic && !canViewNonpublic) return [[], -1];
+    const groupIds = user ? await this.groupService.getGroupIdsByUserId(user.id) : [];
 
     const all = await this.contestRepository.find({
       order: {
@@ -84,13 +97,21 @@ export class ContestService {
       }
     });
     const visible = all.filter(contest =>
-      nonpublic ? !contest.isPublic : contest.isPublic || this.isManagerSync(user, contest)
+      nonpublic
+        ? !contest.isPublic
+        : this.isVisibleInListSync(user, contest, groupIds) || (canViewNonpublic && !!contest.groupId)
     );
     return [visible.slice(skipCount, skipCount + takeCount), visible.length];
   }
 
   private isManagerSync(user: UserEntity, contest: ContestEntity): boolean {
     return !!user && (user.isAdmin || contest.holderId === user.id || contest.adminIds.includes(user.id));
+  }
+
+  private isVisibleInListSync(user: UserEntity, contest: ContestEntity, groupIds: number[]): boolean {
+    if (this.isManagerSync(user, contest)) return true;
+    if (contest.groupId) return !!user && groupIds.includes(contest.groupId);
+    return contest.isPublic;
   }
 
   getContestMeta(contest: ContestEntity): ContestMetaDto {
@@ -104,6 +125,7 @@ export class ContestService {
       type: contest.type,
       isPublic: contest.isPublic,
       hideStatistics: contest.hideStatistics,
+      groupId: contest.groupId,
       holderId: contest.holderId,
       problemIds: contest.problemIds,
       adminIds: contest.adminIds,
@@ -132,6 +154,8 @@ export class ContestService {
     | "EMPTY_TITLE"
     | "INVALID_TIME_RANGE"
     | "NO_SUCH_PROBLEM"
+    | "GROUP_REQUIRED"
+    | "NO_SUCH_GROUP"
     | "NO_SUCH_USER"
     | ContestEntity
   > {
@@ -160,6 +184,10 @@ export class ContestService {
     const admins = await this.userService.findUsersByExistingIds(uniqueAdminIds);
     if (admins.some(admin => !admin)) return "NO_SUCH_USER";
 
+    const groupId = Number(request.groupId);
+    if (!Number.isSafeInteger(groupId) || groupId <= 0) return "GROUP_REQUIRED";
+    if (!(await this.groupService.groupExists(groupId))) return "NO_SUCH_GROUP";
+
     contest.title = request.title.trim();
     contest.subtitle = request.subtitle || "";
     contest.information = request.information || "";
@@ -168,6 +196,7 @@ export class ContestService {
     contest.type = request.type;
     contest.isPublic = request.isPublic;
     contest.hideStatistics = request.hideStatistics;
+    contest.groupId = groupId;
     contest.holderId = request.contestId ? contest.holderId : user.id;
     contest.problemIds = uniqueProblemIds;
     contest.adminIds = uniqueAdminIds;

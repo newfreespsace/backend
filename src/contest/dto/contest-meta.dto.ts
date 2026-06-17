@@ -31,6 +31,9 @@ export class ContestMetaDto {
   hideStatistics: boolean;
 
   @ApiProperty()
+  groupId?: number;
+
+  @ApiProperty()
   holderId: number;
 
   @ApiProperty({ type: [Number] })
