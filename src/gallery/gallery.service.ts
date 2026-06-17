@@ -21,6 +21,8 @@ type AddGalleryImageLimitError =
   | AddGalleryImageResponseError.TOTAL_SIZE_TOO_LARGE
   | AddGalleryImageResponseError.TOO_MANY_IMAGES;
 
+const GALLERY_IMAGE_OBJECT_KEY_PREFIX = "gallery-images/";
+
 @Injectable()
 export class GalleryService {
   constructor(
@@ -120,7 +122,8 @@ export class GalleryService {
         const result = await this.fileService.processUploadRequest(
           uploadInfo,
           async size => await this.checkAddImageLimit(user, size, transactionalEntityManager),
-          transactionalEntityManager
+          transactionalEntityManager,
+          { objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX }
         );
 
         if (!(result instanceof FileEntity)) return result;
@@ -151,7 +154,9 @@ export class GalleryService {
         if (!image) return false;
 
         await transactionalEntityManager.delete(GalleryImageEntity, { id: image.id, ownerId: user.id });
-        deleteFileActually = await this.fileService.deleteFile(image.uuid, transactionalEntityManager);
+        deleteFileActually = await this.fileService.deleteFile(image.uuid, transactionalEntityManager, {
+          objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX
+        });
         return true;
       });
 
@@ -175,7 +180,8 @@ export class GalleryService {
         ? await this.fileService.signDownloadLink({
             uuid: image.uuid,
             downloadFilename: image.filename,
-            signFor: MinioSignFor.UserDownload
+            signFor: MinioSignFor.UserDownload,
+            objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX
           })
         : undefined
     };
@@ -187,7 +193,9 @@ export class GalleryService {
 
     return {
       image,
-      stream: await this.fileService.getFileStream(image.uuid)
+      stream: await this.fileService.getFileStreamByObjectKey(image.uuid, {
+        objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX
+      })
     };
   }
 

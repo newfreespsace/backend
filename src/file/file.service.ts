@@ -20,6 +20,10 @@ const FILE_UPLOAD_EXPIRE_TIME = 10 * 60;
 // 20 minutes download expire time
 const FILE_DOWNLOAD_EXPIRE_TIME = 20 * 60 * 60;
 
+interface FileObjectKeyOptions {
+  objectKeyPrefix?: string;
+}
+
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent
 function encodeRFC5987ValueChars(str: string) {
   return (
@@ -203,11 +207,13 @@ export class FileService implements OnModuleInit {
   async processUploadRequest<LimitCheckErrorType extends string>(
     uploadInfo: FileUploadInfoDto,
     checkLimit: (size: number) => Promise<LimitCheckErrorType> | LimitCheckErrorType,
-    transactionalEntityManager: EntityManager
+    transactionalEntityManager: EntityManager,
+    options: FileObjectKeyOptions = {}
   ): Promise<FileEntity | SignedFileUploadRequestDto | LimitCheckErrorType | "FILE_UUID_EXISTS" | "FILE_NOT_UPLOADED"> {
+    const objectKey = this.getObjectKey(uploadInfo.uuid, options);
     const limitCheckError = await checkLimit(uploadInfo.size);
     if (limitCheckError) {
-      if (uploadInfo.uuid) this.deleteUnfinishedUploadedFile(uploadInfo.uuid);
+      if (uploadInfo.uuid) this.deleteUnfinishedUploadedFile(uploadInfo.uuid, options);
       return limitCheckError;
     }
 
@@ -219,7 +225,7 @@ export class FileService implements OnModuleInit {
 
       // Check file existance
       try {
-        await this.minioClient.statObject(this.bucket, uploadInfo.uuid);
+        await this.minioClient.statObject(this.bucket, objectKey);
       } catch (e) {
         if (e.message === "The specified key does not exist.") {
           return "FILE_NOT_UPLOADED";
@@ -239,19 +245,23 @@ export class FileService implements OnModuleInit {
     } else {
       // The client says it want to upload a file for this request
 
-      return await this.signUploadRequest(uploadInfo.size, uploadInfo.size);
+      return await this.signUploadRequest(uploadInfo.size, uploadInfo.size, options);
     }
   }
 
   /**
    * Sign a upload request for given size. The alternative MinIO endpoint for user will be used in the POST URL.
    */
-  private async signUploadRequest(minSize?: number, maxSize?: number): Promise<SignedFileUploadRequestDto> {
+  private async signUploadRequest(
+    minSize?: number,
+    maxSize?: number,
+    options: FileObjectKeyOptions = {}
+  ): Promise<SignedFileUploadRequestDto> {
     const signer = this.minioSigner[MinioSignFor.UserUpload];
     const uuid = UUID();
     const policy = signer.client.newPostPolicy();
     policy.setBucket(this.bucket);
-    policy.setKey(uuid);
+    policy.setKey(this.getObjectKey(uuid, options));
     policy.setExpires(new Date(Date.now() + FILE_UPLOAD_EXPIRE_TIME * 1000));
     if (minSize != null || maxSize != null) {
       policy.setContentLengthRange(minSize || 0, maxSize || 0);
@@ -270,20 +280,29 @@ export class FileService implements OnModuleInit {
   /**
    * @return A function to run after transaction, to delete the file(s) actually.
    */
-  async deleteFile(uuid: string | string[], transactionalEntityManager: EntityManager): Promise<() => void> {
+  async deleteFile(
+    uuid: string | string[],
+    transactionalEntityManager: EntityManager,
+    options: FileObjectKeyOptions = {}
+  ): Promise<() => void> {
     if (typeof uuid === "string") {
       await transactionalEntityManager.delete(FileEntity, { uuid });
       return () =>
-        this.minioClient.removeObject(this.bucket, uuid).catch(e => {
+        this.minioClient.removeObject(this.bucket, this.getObjectKey(uuid, options)).catch(e => {
           logger.error(`Failed to delete file ${uuid}: ${e}`);
         });
     }
     if (uuid.length > 0) {
       await transactionalEntityManager.delete(FileEntity, { uuid: In(uuid) });
       return () =>
-        this.minioClient.removeObjects(this.bucket, uuid).catch(e => {
-          logger.error(`Failed to delete file [${uuid}]: ${e}`);
-        });
+        this.minioClient
+          .removeObjects(
+            this.bucket,
+            uuid.map(fileUuid => this.getObjectKey(fileUuid, options))
+          )
+          .catch(e => {
+            logger.error(`Failed to delete file [${uuid}]: ${e}`);
+          });
     }
     return () => {
       /* do nothing */
@@ -293,8 +312,8 @@ export class FileService implements OnModuleInit {
   /**
    * Delete a user-uploaded file before calling finishUpload()
    */
-  deleteUnfinishedUploadedFile(uuid: string): void {
-    this.minioClient.removeObject(this.bucket, uuid).catch(e => {
+  deleteUnfinishedUploadedFile(uuid: string, options: FileObjectKeyOptions = {}): void {
+    this.minioClient.removeObject(this.bucket, this.getObjectKey(uuid, options)).catch(e => {
       if (e.message === "The specified key does not exist.") return;
       logger.error(`Failed to delete unfinished uploaded file ${uuid}: ${e}`);
     });
@@ -314,17 +333,19 @@ export class FileService implements OnModuleInit {
     uuid,
     downloadFilename,
     noExpire,
-    signFor
+    signFor,
+    objectKeyPrefix
   }: {
     uuid: string;
     downloadFilename?: string;
     noExpire?: boolean;
     signFor?: MinioSignFor;
+    objectKeyPrefix?: string;
   }): Promise<string> {
     const client = signFor ? this.minioSigner[signFor].client : this.minioClient;
     const url = await client.presignedGetObject(
       this.bucket,
-      uuid,
+      this.getObjectKey(uuid, { objectKeyPrefix }),
       // The maximum expire time is 7 days
       noExpire ? 24 * 60 * 60 * 7 : FILE_DOWNLOAD_EXPIRE_TIME,
       !downloadFilename
@@ -342,6 +363,10 @@ export class FileService implements OnModuleInit {
     return await this.minioClient.getObject(this.bucket, uuid);
   }
 
+  async getFileStreamByObjectKey(uuid: string, options: FileObjectKeyOptions = {}): Promise<Readable> {
+    return await this.minioClient.getObject(this.bucket, this.getObjectKey(uuid, options));
+  }
+
   async runMaintainceTasks(): Promise<void> {
     // Delete unused files
     const stream = this.minioClient.listObjectsV2(this.bucket);
@@ -352,7 +377,7 @@ export class FileService implements OnModuleInit {
         promises.push(
           (async () => {
             const uuid = object.name;
-            if (!(await this.fileRepository.countBy({ uuid }))) {
+            if (!(await this.fileRepository.countBy({ uuid: this.getFileUuidFromObjectKey(uuid) }))) {
               deleteList.push(uuid);
             }
           })()
@@ -362,5 +387,15 @@ export class FileService implements OnModuleInit {
       stream.on("error", reject);
     });
     await this.minioClient.removeObjects(this.bucket, deleteList);
+  }
+
+  private getObjectKey(uuid: string, { objectKeyPrefix }: FileObjectKeyOptions = {}): string {
+    if (!uuid) return uuid;
+    return objectKeyPrefix ? `${objectKeyPrefix}${uuid}` : uuid;
+  }
+
+  private getFileUuidFromObjectKey(objectKey: string): string {
+    if (objectKey.startsWith("gallery-images/")) return objectKey.slice("gallery-images/".length);
+    return objectKey;
   }
 }
