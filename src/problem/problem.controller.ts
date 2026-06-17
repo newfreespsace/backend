@@ -123,20 +123,33 @@ export class ProblemController {
   private async consumeProblemTestdataDailyDownloadQuota(
     quotaIdentifier: string,
     downloadCount: number
-  ): Promise<boolean> {
-    if (downloadCount <= 0) return true;
-
+  ): Promise<{ allowed: boolean; remaining: number }> {
     const limit = this.configService.config.resourceLimit.problemTestdataDailyDownloadFiles;
+    if (downloadCount <= 0) {
+      const key = REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD.format(quotaIdentifier, getLocalDateKey());
+      const used = Number((await this.redis.get(key)) || 0);
+      return {
+        allowed: true,
+        remaining: Math.max(0, limit - used)
+      };
+    }
+
     const key = REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD.format(quotaIdentifier, getLocalDateKey());
     const used = await this.redis.incrby(key, downloadCount);
     if (used === downloadCount) await this.redis.expire(key, getSecondsUntilTomorrow());
 
     if (used > limit) {
       await this.redis.decrby(key, downloadCount);
-      return false;
+      return {
+        allowed: false,
+        remaining: Math.max(0, limit - (used - downloadCount))
+      };
     }
 
-    return true;
+    return {
+      allowed: true,
+      remaining: Math.max(0, limit - used)
+    };
   }
 
   @Post("queryProblemSet")
@@ -823,18 +836,22 @@ export class ProblemController {
     );
 
     const quotaExempt = await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.Modify);
+    let remainingTestdataDownloads: number;
     if (request.type === ProblemFileType.TestData && !quotaExempt) {
       const quotaIdentifier = currentUser
         ? `user:${currentUser.id}`
         : `ip:${httpRequest.ip || httpRequest.socket.remoteAddress || "unknown"}`;
-      const quotaConsumed = await this.consumeProblemTestdataDailyDownloadQuota(quotaIdentifier, downloadList.length);
-      if (!quotaConsumed)
+      const quota = await this.consumeProblemTestdataDailyDownloadQuota(quotaIdentifier, downloadList.length);
+      remainingTestdataDownloads = quota.remaining;
+      if (!quota.allowed)
         return {
-          error: DownloadProblemFilesResponseError.PERMISSION_DENIED
+          error: DownloadProblemFilesResponseError.DAILY_DOWNLOAD_LIMIT_EXCEEDED,
+          remainingTestdataDownloads
         };
     }
 
     return {
+      remainingTestdataDownloads,
       downloadInfo: await Promise.all(
         downloadList.map(async problemFile => ({
           filename: problemFile.filename,
