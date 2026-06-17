@@ -15,6 +15,7 @@ import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { UserMigrationService } from "@/migration/user-migration.service";
 import { UserMigrationInfoEntity } from "@/migration/user-migration-info.entity";
 import { delay, DELAY_FOR_SECURITY } from "@/common/delay";
+import { SiteSettingService } from "@/site-setting/site-setting.service";
 
 import { AuthEmailVerificationCodeService, EmailVerificationCodeType } from "./auth-email-verification-code.service";
 import { AuthSessionService } from "./auth-session.service";
@@ -63,7 +64,8 @@ export class AuthController {
     private readonly authSessionService: AuthSessionService,
     private readonly authIpLocationService: AuthIpLocationService,
     private readonly auditService: AuditService,
-    private readonly userMigrationService: UserMigrationService
+    private readonly userMigrationService: UserMigrationService,
+    private readonly siteSettingService: SiteSettingService
   ) {}
 
   @Get("getSessionInfo")
@@ -75,7 +77,7 @@ export class AuthController {
     const [, user] = await this.authSessionService.accessSession(request.token);
 
     const result: GetSessionInfoResponseDto = {
-      serverPreference: this.configService.preferenceConfigToBeSentToUser,
+      serverPreference: await this.siteSettingService.getPreferenceConfigToBeSentToUser(),
       serverVersion: {
         hash: appGitRepoInfo.abbreviatedSha,
         date: appGitRepoInfo.committerDate
@@ -297,6 +299,12 @@ export class AuthController {
     if (currentUser)
       return {
         error: RegisterResponseError.ALREADY_LOGGEDIN
+      };
+
+    const preference = await this.siteSettingService.getPreference();
+    if (!preference.security.allowRegister)
+      return {
+        error: RegisterResponseError.REGISTER_DISABLED
       };
 
     const [error, user] = await this.authService.register(

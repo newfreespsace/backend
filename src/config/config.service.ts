@@ -4,13 +4,11 @@ import { validateSync } from "class-validator";
 import { plainToClass } from "class-transformer";
 import yaml from "js-yaml";
 
-import { AppConfig, PreferenceConfig } from "./config.schema";
+import { AppConfig } from "./config.schema";
 import { checkConfigRelation } from "./config-relation.decorator";
 
 export class ConfigService {
   readonly config: AppConfig;
-
-  readonly preferenceConfigToBeSentToUser: PreferenceConfig;
 
   constructor() {
     const filePath = process.env.LYRIO_CONFIG_FILE;
@@ -21,7 +19,6 @@ export class ConfigService {
     const config = yaml.load(fs.readFileSync(filePath).toString());
     this.config = this.validateInput(config);
 
-    this.preferenceConfigToBeSentToUser = this.getPreferenceConfigToBeSentToUser();
   }
 
   private validateInput(inputConfig: unknown): AppConfig {
@@ -42,12 +39,4 @@ export class ConfigService {
     return appConfig;
   }
 
-  private getPreferenceConfigToBeSentToUser(): PreferenceConfig {
-    const preference = JSON.parse(JSON.stringify(this.config.preference)) as PreferenceConfig;
-
-    // Delete some properties unnessesary to send to user to save bandwidth
-    delete preference.serverSideOnly;
-
-    return preference;
-  }
 }

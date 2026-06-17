@@ -57,6 +57,7 @@ preference:
     allowEveryoneCreateDiscussion: true
     discussionDefaultPublic: true
     discussionReplyDefaultPublic: true
+    allowRegister: true
   pagination:
     homepageUserList: 10
     homepageProblemList: 10

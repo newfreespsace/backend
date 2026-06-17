@@ -27,6 +27,7 @@ import { EventReportModule } from "./event-report/event-report.module";
 import { HomepageModule } from "./homepage/homepage.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { ContestModule } from "./contest/contest.module";
+import { SiteSettingModule } from "./site-setting/site-setting.module";
 
 import { RequestLogMiddleware } from "./request-log.middleware";
 import { TrainingModule } from "./training/training.module";
@@ -53,6 +54,7 @@ import { TrainingModule } from "./training/training.module";
     forwardRef(() => HomepageModule),
     forwardRef(() => MigrationModule),
     forwardRef(() => MetricsModule),
+    forwardRef(() => SiteSettingModule),
     TrainingModule
   ],
   controllers: [AppController],

@@ -208,6 +208,10 @@ class PreferenceConfigSecurity {
 
   @IsBoolean()
   @ApiProperty()
+  readonly allowRegister: boolean;
+
+  @IsBoolean()
+  @ApiProperty()
   readonly allowUserChangeUsername: boolean;
 
   @IsBoolean()
