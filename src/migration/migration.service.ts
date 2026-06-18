@@ -78,11 +78,17 @@ export class MigrationService {
     tableName: string,
     orderByColumn: string,
     onRecord: (record: T) => Promise<void>,
-    maxConcurrency = 20
+    maxConcurrency = 200
   ): Promise<void> {
     Logger.log(`Started processing table "${tableName}"`);
 
-    const pageSize = Math.max(1, maxConcurrency);
+    if (orderByColumn === "id") {
+      await this.queryTableByIdCursor<T & { id: number }>(tableName, record => onRecord(record), maxConcurrency);
+      Logger.log(`Finished processing table "${tableName}"`);
+      return;
+    }
+
+    const pageSize = Math.max(100, maxConcurrency);
     const { count } = (await this.oldDatabase.query(`SELECT COUNT(*) AS \`count\` FROM \`${tableName}\``))[0];
     let processedCount = 0;
 
@@ -91,6 +97,7 @@ export class MigrationService {
       const results: T[] = await this.oldDatabase.query(
         `SELECT * FROM \`${tableName}\` ORDER BY \`${orderByColumn}\` LIMIT ${i}, ${pageSize}`
       );
+
       const resultsLength = results.length;
 
       while (results.length > 0) {
@@ -105,5 +112,39 @@ export class MigrationService {
     /* eslint-enable no-await-in-loop */
 
     Logger.log(`Finished processing table "${tableName}"`);
+  }
+
+  private async queryTableByIdCursor<T extends { id: number }>(
+    tableName: string,
+    onRecord: (record: T) => Promise<void>,
+    maxConcurrency: number
+  ): Promise<void> {
+    const pageSize = Math.max(1, maxConcurrency);
+    const { count } = (await this.oldDatabase.query(`SELECT COUNT(*) AS \`count\` FROM \`${tableName}\``))[0];
+    let processedCount = 0;
+    let lastId = 0;
+
+    /* eslint-disable no-await-in-loop */
+    while (true) {
+      const results: T[] = await this.oldDatabase.query(
+        `SELECT * FROM \`${tableName}\` WHERE \`id\` > ? ORDER BY \`id\` LIMIT ${pageSize}`,
+        [lastId]
+      );
+
+      if (results.length === 0) break;
+
+      const resultsLength = results.length;
+      lastId = results[results.length - 1].id;
+
+      while (results.length > 0) {
+        const promises: Promise<void>[] = [];
+        for (let j = 0; j < maxConcurrency && results.length > 0; j++) promises.push(onRecord(results.shift()));
+        await Promise.all(promises);
+      }
+
+      processedCount += resultsLength;
+      Logger.log(`Processing table "${tableName}" ${processedCount}/${count}, last id: ${lastId}`);
+    }
+    /* eslint-enable no-await-in-loop */
   }
 }

@@ -176,7 +176,17 @@ export function getLanguageAndOptions(
         language: CodeLanguage.Cpp,
         compileAndRunOptions: <CompileAndRunOptionsCpp>{
           compiler: "g++",
-          std: "c++17",
+          std: "c++14",
+          O: "2",
+          m: "x32"
+        }
+      };
+    case "cpp14":
+      return {
+        language: CodeLanguage.Cpp,
+        compileAndRunOptions: <CompileAndRunOptionsCpp>{
+          compiler: "g++",
+          std: "c++14",
           O: "2",
           m: "x32"
         }

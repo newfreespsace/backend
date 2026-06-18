@@ -470,7 +470,7 @@ export const migrationSubmission: MigrationInterface = {
         submissionDetail.submissionId = submission.id;
         await entityManager.save(submissionDetail);
       },
-      20
+      200
     );
 
     Logger.log("Calculating submission count of users and problems");
