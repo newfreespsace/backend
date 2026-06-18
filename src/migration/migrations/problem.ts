@@ -733,7 +733,7 @@ export const migrationProblem: MigrationInterface = {
           JSON.stringify(contentSections)
         );
       },
-      1
+      4
     );
 
     await queryTablePaged<OldDatabaseProblemTagMapEntity>("problem_tag_map", "problem_id", async oldMap => {
