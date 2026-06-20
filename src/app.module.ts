@@ -6,6 +6,7 @@ import { AppService } from "./app.service";
 import { ErrorFilter } from "./error.filter";
 import { RecaptchaFilter } from "./recaptcha.filter";
 import { AuthMiddleware } from "./auth/auth.middleware";
+import { AuthRequiredMiddleware } from "./auth/auth-required.middleware";
 import { MetricsMiddleware } from "./metrics/metrics.middleware";
 
 import { SharedModule } from "./shared.module";
@@ -75,6 +76,10 @@ import { ContestAccessGuard } from "./contest/contest-access.guard";
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
     consumer.apply(AuthMiddleware).forRoutes({
+      path: "*",
+      method: RequestMethod.ALL
+    });
+    consumer.apply(AuthRequiredMiddleware).forRoutes({
       path: "*",
       method: RequestMethod.ALL
     });
