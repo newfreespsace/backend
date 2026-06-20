@@ -74,6 +74,11 @@ export class ContestService {
     }
   }
 
+  async shouldHideNoiResult(user: UserEntity, contest: ContestEntity): Promise<boolean> {
+    if (contest.type !== ContestType.NOI || !this.isRunning(contest)) return false;
+    return !(await this.userHasPermission(user, contest, ContestPermissionType.Manage));
+  }
+
   private async canViewContest(user: UserEntity, contest: ContestEntity, manage: boolean): Promise<boolean> {
     if (manage) return true;
     if (!contest.groupId) return contest.isPublic;
@@ -260,6 +265,7 @@ export class ContestService {
         })
       : null;
     const players = includeStatistics ? await this.contestPlayerRepository.findBy({ contestId: contest.id }) : [];
+    const hideNoiResult = await this.shouldHideNoiResult(user, contest);
 
     return await Promise.all(
       problems.map(async problem => {
@@ -273,17 +279,21 @@ export class ContestService {
         };
 
         if (detail) {
-          result.score = detail.score;
           result.submissionId = detail.submissionId;
-          result.accepted = detail.accepted;
-          result.unacceptedCount = detail.unacceptedCount;
-          result.status =
-            detail.status ||
-            (detail.accepted || (contest.type !== ContestType.ACM && detail.score === 100)
-              ? SubmissionStatus.Accepted
-              : detail.score != null
-              ? SubmissionStatus.PartiallyCorrect
-              : null);
+          if (hideNoiResult) {
+            result.status = "Submitted";
+          } else {
+            result.score = detail.score;
+            result.accepted = detail.accepted;
+            result.unacceptedCount = detail.unacceptedCount;
+            result.status =
+              detail.status ||
+              (detail.accepted || (contest.type !== ContestType.ACM && detail.score === 100)
+                ? SubmissionStatus.Accepted
+                : detail.score != null
+                ? SubmissionStatus.PartiallyCorrect
+                : null);
+          }
         }
 
         if (includeStatistics) result.statistics = this.getProblemStatistics(contest, problem, players);

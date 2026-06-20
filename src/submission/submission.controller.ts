@@ -16,7 +16,9 @@ import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.s
 import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 import { ContestEntity } from "@/contest/contest.entity";
 
+import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionStatus } from "./submission-status.enum";
+import { SubmissionEntity } from "./submission.entity";
 import { SubmissionStatisticsService } from "./submission-statistics.service";
 import { SubmissionProgressService } from "./submission-progress.service";
 import { SubmissionProgressGateway, SubmissionProgressSubscriptionType } from "./submission-progress.gateway";
@@ -29,6 +31,7 @@ import {
   QuerySubmissionRequestDto,
   QuerySubmissionResponseDto,
   QuerySubmissionResponseError,
+  SubmissionBasicMetaDto,
   SubmissionMetaDto,
   GetSubmissionDetailRequestDto,
   GetSubmissionDetailResponseDto,
@@ -71,6 +74,43 @@ export class SubmissionController {
     @Inject(forwardRef(() => ContestService))
     private readonly contestService: ContestService
   ) {}
+
+  private getHiddenSubmissionStatus(status: SubmissionStatus): SubmissionStatus {
+    return "Submitted" as any;
+  }
+
+  private sanitizeNoiSubmissionMeta<T extends SubmissionBasicMetaDto>(meta: T): T {
+    return {
+      ...meta,
+      score: null,
+      status: this.getHiddenSubmissionStatus(meta.status),
+      timeUsed: null,
+      memoryUsed: null
+    };
+  }
+
+  private sanitizeNoiSubmissionProgress(
+    progress: SubmissionProgress,
+    metaStatus: SubmissionStatus
+  ): SubmissionProgress {
+    if (!progress) return null;
+    return {
+      progressType: SubmissionProgressType.Finished,
+      status: this.getHiddenSubmissionStatus(metaStatus),
+      score: null
+    };
+  }
+
+  private async shouldHideNoiSubmissionResult(
+    currentUser: UserEntity,
+    submission: SubmissionEntity,
+    contest?: ContestEntity
+  ): Promise<boolean> {
+    if (!submission.contestId) return false;
+    const relatedContest = contest || (await this.contestService.findContestById(submission.contestId));
+    if (!relatedContest) return false;
+    return await this.contestService.shouldHideNoiResult(currentUser, relatedContest);
+  }
 
   @Recaptcha()
   @ApiOperation({
@@ -203,6 +243,17 @@ export class SubmissionController {
         error: QuerySubmissionResponseError.PERMISSION_DENIED
       };
 
+    const hideFilterContestResult =
+      filterContest && (await this.contestService.shouldHideNoiResult(currentUser, filterContest));
+    if (hideFilterContestResult) {
+      if (!currentUser || (filterSubmitter && filterSubmitter.id !== currentUser.id)) {
+        return {
+          error: QuerySubmissionResponseError.PERMISSION_DENIED
+        };
+      }
+      filterSubmitter = currentUser;
+    }
+
     const restrictedContests = await this.contestService.getContestAccessRestriction(currentUser);
     const lockedContest =
       filterContest && restrictedContests.some(restrictedContest => restrictedContest.id === filterContest.id);
@@ -222,7 +273,7 @@ export class SubmissionController {
       filterContest ? request.contestProblemIndex : null,
       filterSubmitter ? filterSubmitter.id : null,
       request.codeLanguage,
-      request.status,
+      hideFilterContestResult ? null : request.status,
       request.minId,
       request.maxId,
       !(hasManageProblemPrivilege || hasViewProblemPermission || hasViewContestPermission || isSubmissionsOwned),
@@ -237,12 +288,13 @@ export class SubmissionController {
       this.userService.findUsersByExistingIds(queryResult.result.map(submission => submission.submitterId))
     ]);
     const pendingSubmissionIds: number[] = [];
+    const hideResultSubmissionIds: number[] = [];
     await Promise.all(
       queryResult.result.map(async (_, i) => {
         const submission = queryResult.result[i];
         const titleLocale = problems[i].locales.includes(request.locale) ? request.locale : problems[i].locales[0];
 
-        submissionMetas[i] = {
+        const submissionMeta: SubmissionMetaDto = {
           id: submission.id,
           isPublic: submission.isPublic,
           contestId: submission.contestId,
@@ -258,6 +310,8 @@ export class SubmissionController {
           timeUsed: submission.timeUsed,
           memoryUsed: submission.memoryUsed
         };
+        const hideNoiResult = await this.shouldHideNoiSubmissionResult(currentUser, submission, filterContest);
+        submissionMetas[i] = hideNoiResult ? this.sanitizeNoiSubmissionMeta(submissionMeta) : submissionMeta;
 
         // For progress reporting
         const progress =
@@ -270,6 +324,7 @@ export class SubmissionController {
 
         if (submission.status === SubmissionStatus.Pending) {
           pendingSubmissionIds.push(submission.id);
+          if (hideNoiResult) hideResultSubmissionIds.push(submission.id);
         }
       })
     );
@@ -281,7 +336,8 @@ export class SubmissionController {
           ? null
           : this.submissionProgressGateway.encodeSubscription({
               type: SubmissionProgressSubscriptionType.Meta,
-              submissionIds: pendingSubmissionIds
+              submissionIds: pendingSubmissionIds,
+              hideResultSubmissionIds
             }),
       hasSmallerId: queryResult.hasSmallerId,
       hasLargerId: queryResult.hasLargerId
@@ -376,30 +432,38 @@ export class SubmissionController {
       )
     ]);
 
+    const meta: SubmissionMetaDto = {
+      id: submission.id,
+      isPublic: submission.isPublic,
+      contestId: submission.contestId,
+      contestProblemIndex: submission.contestProblemIndex,
+      codeLanguage: submission.codeLanguage,
+      answerSize: submission.answerSize,
+      score: submission.score,
+      status: submission.status,
+      submitTime: submission.submitTime,
+      problem: await this.problemService.getProblemMeta(problem),
+      problemTitle: await this.problemService.getProblemLocalizedTitle(problem, titleLocale),
+      submitter: await this.userService.getUserMeta(submitter, currentUser),
+      timeUsed: submission.timeUsed,
+      memoryUsed: submission.memoryUsed
+    };
+    const hideNoiResult = await this.shouldHideNoiSubmissionResult(currentUser, submission);
+    const visibleMeta = hideNoiResult ? this.sanitizeNoiSubmissionMeta(meta) : meta;
+    const visibleProgress = hideNoiResult
+      ? this.sanitizeNoiSubmissionProgress(progress || submissionDetail.result, submission.status)
+      : progress || submissionDetail.result;
+
     return {
-      meta: {
-        id: submission.id,
-        isPublic: submission.isPublic,
-        contestId: submission.contestId,
-        contestProblemIndex: submission.contestProblemIndex,
-        codeLanguage: submission.codeLanguage,
-        answerSize: submission.answerSize,
-        score: submission.score,
-        status: submission.status,
-        submitTime: submission.submitTime,
-        problem: await this.problemService.getProblemMeta(problem),
-        problemTitle: await this.problemService.getProblemLocalizedTitle(problem, titleLocale),
-        submitter: await this.userService.getUserMeta(submitter, currentUser),
-        timeUsed: submission.timeUsed,
-        memoryUsed: submission.memoryUsed
-      },
+      meta: visibleMeta,
       content: submissionDetail.content,
-      progress: progress || submissionDetail.result,
+      progress: visibleProgress,
       progressSubscriptionKey: !pending
         ? null
         : this.submissionProgressGateway.encodeSubscription({
             type: SubmissionProgressSubscriptionType.Detail,
-            submissionIds: [submission.id]
+            submissionIds: [submission.id],
+            hideResultSubmissionIds: hideNoiResult ? [submission.id] : []
           }),
       permissionRejudge,
       permissionCancel,

@@ -26,6 +26,7 @@ export enum SubmissionProgressSubscriptionType {
 export interface SubmissionProgressSubscription {
   type: SubmissionProgressSubscriptionType;
   submissionIds: number[];
+  hideResultSubmissionIds?: number[];
 }
 
 interface SubmissionProgressMessage {
@@ -66,6 +67,8 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
   // to help us calculate the delta with jsondiffpatch
   // clientId => (submissionId => message)
   private clientLastMessages: Map<string, Map<number, SubmissionProgressMessage>> = new Map();
+
+  private clientHiddenResultSubmissionIds: Map<string, Set<number>> = new Map();
 
   constructor(
     private readonly configService: ConfigService,
@@ -156,6 +159,46 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     this.rooms.delete(room);
   }
 
+  private getHiddenSubmissionStatus(status: SubmissionStatus): SubmissionStatus {
+    return "Submitted" as any;
+  }
+
+  private sanitizeMeta(meta: SubmissionBasicMetaDto): SubmissionBasicMetaDto {
+    if (!meta) return meta;
+    return {
+      ...meta,
+      score: null,
+      status: this.getHiddenSubmissionStatus(meta.status),
+      timeUsed: null,
+      memoryUsed: null
+    };
+  }
+
+  private sanitizeProgress(progress: SubmissionProgress, meta?: SubmissionBasicMetaDto): SubmissionProgress {
+    if (!progress) return progress;
+    return {
+      progressType: SubmissionProgressType.Finished,
+      status: this.getHiddenSubmissionStatus(meta?.status || progress.status),
+      score: null
+    };
+  }
+
+  private sanitizeMessageForClient(
+    clientId: string,
+    submissionId: number,
+    message: SubmissionProgressMessage
+  ): SubmissionProgressMessage {
+    if (!this.clientHiddenResultSubmissionIds.get(clientId)?.has(submissionId)) return message;
+    const resultMeta = this.sanitizeMeta(message.progressMeta?.resultMeta);
+    return {
+      progressMeta: message.progressMeta && {
+        progressType: message.progressMeta.progressType,
+        resultMeta
+      },
+      progressDetail: this.sanitizeProgress(message.progressDetail, resultMeta)
+    };
+  }
+
   // sendMessage: send a message to a client or a room of clients
   private sendMessage(to: Socket | string, submissionId: number, message: SubmissionProgressMessage) {
     // sendTo: calculate the message delta and send to a specfied client
@@ -166,9 +209,10 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
         return;
       }
 
+      const visibleMessage = this.sanitizeMessageForClient(clientId, submissionId, message);
       const lastMessage = lastMessageBySubmissionId.get(submissionId);
-      const delta = diff(lastMessage, message);
-      lastMessageBySubmissionId.set(submissionId, message);
+      const delta = diff(lastMessage, visibleMessage);
+      lastMessageBySubmissionId.set(submissionId, visibleMessage);
       if (delta) {
         this.metricTotalMessageDelivered.inc();
         this.server.to(clientId).emit("message", submissionId, delta);
@@ -191,6 +235,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
       }
     }
     this.clientLastMessages.delete(client.id);
+    this.clientHiddenResultSubmissionIds.delete(client.id);
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -207,6 +252,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
 
     this.clientJoinedRooms.set(client.id, new Set());
     this.clientLastMessages.set(client.id, new Map());
+    this.clientHiddenResultSubmissionIds.set(client.id, new Set(subscription.hideResultSubmissionIds || []));
 
     // Join the rooms first to prevent missing the finished message
     for (const submissionId of subscription.submissionIds) {

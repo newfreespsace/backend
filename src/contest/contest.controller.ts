@@ -209,8 +209,13 @@ export class ContestController {
             .then(map => map.get(problem.id))
         ])
       : [null, null];
+    const hideNoiResult = await this.contestService.shouldHideNoiResult(currentUser, contest);
     const effectiveLastAcceptedSubmission =
       lastSubmission && lastSubmission.status === SubmissionStatus.Accepted ? lastSubmission : lastAcceptedSubmission;
+    const lastSubmissionMeta = lastSubmission && (await this.submissionService.getSubmissionBasicMeta(lastSubmission));
+    const lastAcceptedSubmissionMeta =
+      effectiveLastAcceptedSubmission &&
+      (await this.submissionService.getSubmissionBasicMeta(effectiveLastAcceptedSubmission));
 
     return {
       contest: this.contestService.getContestMeta(contest),
@@ -234,10 +239,16 @@ export class ContestController {
         permissionOfCurrentUser: await this.problemService.getUserPermissions(currentUser, problem),
         lastSubmission: currentUser
           ? {
-              lastSubmission: lastSubmission && (await this.submissionService.getSubmissionBasicMeta(lastSubmission)),
-              lastAcceptedSubmission:
-                effectiveLastAcceptedSubmission &&
-                (await this.submissionService.getSubmissionBasicMeta(effectiveLastAcceptedSubmission)),
+              lastSubmission: hideNoiResult
+                ? lastSubmissionMeta && {
+                    ...lastSubmissionMeta,
+                    status: "Submitted" as any,
+                    score: null,
+                    timeUsed: null,
+                    memoryUsed: null
+                  }
+                : lastSubmissionMeta,
+              lastAcceptedSubmission: hideNoiResult ? null : lastAcceptedSubmissionMeta,
               lastSubmissionContent:
                 lastSubmission && (await this.submissionService.getSubmissionDetail(lastSubmission)).content
             }
