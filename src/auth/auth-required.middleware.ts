@@ -10,7 +10,9 @@ const ALLOWED_PATHS_FOR_ANONYMOUS = new Set([
   "auth/register",
   "auth/checkAvailability",
   "auth/sendEmailVerificationCode",
-  "auth/resetPassword"
+  "auth/resetPassword",
+  "migration/queryUserMigrationInfo",
+  "migration/migrateUser"
 ]);
 
 @Injectable()
