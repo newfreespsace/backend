@@ -25,6 +25,11 @@ export class AuthRequiredMiddleware implements NestMiddleware {
 
     const path = req.path.replace(/^\/api\//, "").replace(/^\/+/, "");
 
+    if (req.method === "GET" && path.startsWith("gallery/image/")) {
+      next();
+      return;
+    }
+
     if (ALLOWED_PATHS_FOR_ANONYMOUS.has(path)) {
       next();
       return;
