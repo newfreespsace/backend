@@ -25,13 +25,6 @@ interface FileObjectKeyOptions {
   objectKeyPrefix?: string;
 }
 
-interface ProxyUploadTokenPayload {
-  uuid: string;
-  size: number;
-  objectKeyPrefix?: string;
-  expiresAt: number;
-}
-
 interface ProxyDownloadTokenPayload {
   uuid: string;
   downloadFilename?: string;
@@ -277,20 +270,22 @@ export class FileService implements OnModuleInit {
     maxSize?: number,
     options: FileObjectKeyOptions = {}
   ): Promise<SignedFileUploadRequestDto> {
+    const signer = this.minioSigner[MinioSignFor.UserUpload];
     const uuid = UUID();
+    const policy = signer.client.newPostPolicy();
+    policy.setBucket(this.bucket);
+    policy.setKey(this.getObjectKey(uuid, options));
+    policy.setExpires(new Date(Date.now() + FILE_UPLOAD_EXPIRE_TIME * 1000));
+    if (minSize != null || maxSize != null) {
+      policy.setContentLengthRange(minSize || 0, maxSize || 0);
+    }
+    const policyResult = await signer.client.presignedPostPolicy(policy);
 
     return {
       uuid,
       method: "POST",
-      url: "/api/file/upload",
-      extraFormData: {
-        token: this.signProxyUploadToken({
-          uuid,
-          size: maxSize || minSize || 0,
-          objectKeyPrefix: options.objectKeyPrefix,
-          expiresAt: Date.now() + FILE_UPLOAD_EXPIRE_TIME * 1000
-        })
-      },
+      url: signer.replaceUrl(policyResult.postURL),
+      extraFormData: policyResult.formData,
       fileFieldName: "file"
     };
   }
@@ -397,10 +392,6 @@ export class FileService implements OnModuleInit {
     return `/api/file/download?token=${encodeURIComponent(token)}`;
   }
 
-  verifyProxyUploadToken(token: string): ProxyUploadTokenPayload {
-    return this.verifyProxyToken<ProxyUploadTokenPayload>(token);
-  }
-
   verifyProxyDownloadToken(token: string): ProxyDownloadTokenPayload {
     return this.verifyProxyToken<ProxyDownloadTokenPayload>(token);
   }
@@ -453,15 +444,11 @@ export class FileService implements OnModuleInit {
     return objectKey;
   }
 
-  private signProxyUploadToken(payload: ProxyUploadTokenPayload): string {
-    return this.signProxyToken(payload);
-  }
-
   private signProxyDownloadToken(payload: ProxyDownloadTokenPayload): string {
     return this.signProxyToken(payload);
   }
 
-  private signProxyToken(payload: ProxyUploadTokenPayload | ProxyDownloadTokenPayload): string {
+  private signProxyToken(payload: ProxyDownloadTokenPayload): string {
     const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
     const signature = crypto
       .createHmac("sha256", this.configService.config.security.sessionSecret)

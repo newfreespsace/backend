@@ -30,7 +30,7 @@ export class AuthRequiredMiddleware implements NestMiddleware {
       return;
     }
 
-    if (path === "file/upload" || path === "file/download") {
+    if (path === "file/download") {
       next();
       return;
     }
