@@ -239,7 +239,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     minId: number,
     maxId: number,
     publicOnly: boolean,
-    takeCount: number
+    takeCount: number,
+    excludeAdminSubmitters: boolean
   ): Promise<{ result: SubmissionEntity[]; hasSmallerId: boolean; hasLargerId: boolean }> {
     const queryBuilder = this.submissionRepository.createQueryBuilder();
 
@@ -283,6 +284,10 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       queryBuilder.andWhere("status = :status", {
         status
       });
+    }
+
+    if (excludeAdminSubmitters) {
+      queryBuilder.andWhere("submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
     }
 
     const queryBuilderWithoutPagination = queryBuilder.clone();

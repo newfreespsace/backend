@@ -267,6 +267,7 @@ export class SubmissionController {
     }
 
     const isSubmissionsOwned = filterSubmitter && currentUser && filterSubmitter.id === currentUser.id;
+    const excludeAdminSubmitters = !currentUser?.isAdmin;
     const queryResult = await this.submissionService.querySubmissions(
       filterProblem ? filterProblem.id : null,
       filterContest ? filterContest.id : null,
@@ -279,7 +280,8 @@ export class SubmissionController {
       !(hasManageProblemPrivilege || hasViewProblemPermission || hasViewContestPermission || isSubmissionsOwned),
       request.takeCount > this.configService.config.queryLimit.submissions
         ? this.configService.config.queryLimit.submissions
-        : request.takeCount
+        : request.takeCount,
+      excludeAdminSubmitters
     );
 
     const submissionMetas: SubmissionMetaDto[] = new Array(queryResult.result.length);
