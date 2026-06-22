@@ -27,6 +27,11 @@ export interface SessionInfo extends SessionInfoInternal {
   lastAccessTime: number;
 }
 
+export interface ActiveUserInfo {
+  userId: number;
+  lastAccessTime: number;
+}
+
 @Injectable()
 export class AuthSessionService {
   private redis: RedisWithSessionManager;
@@ -104,5 +109,19 @@ export class AuthSessionService {
         ...JSON.parse(sessionInfo)
       })
     );
+  }
+
+  async listActiveUsers(sinceTime: number, takeCount: number): Promise<ActiveUserInfo[]> {
+    const result = (await this.redis.callSessionManager("list_active_users", sinceTime, takeCount)) as string[];
+
+    const activeUsers: ActiveUserInfo[] = [];
+    for (let i = 0; i < result.length; i += 2) {
+      activeUsers.push({
+        userId: Number(result[i]),
+        lastAccessTime: Number(result[i + 1])
+      });
+    }
+
+    return activeUsers;
   }
 }

@@ -17,6 +17,15 @@ local REDIS_KEY_USER_SESSION_LIST = "user-session-list:%d";
 -- We store ALL the real session info in a map, from the session ID to the JSON serialized "session info".
 local REDIS_KEY_USER_SESSION_INFO_MAP = "user-session-info-map";
 
+-- We track each user's most recent activity time globally for recent-active-user queries.
+local REDIS_KEY_ACTIVE_USER_LIST = "active-user-list";
+local ACTIVE_USER_RETENTION = 30 * 24 * 60 * 60 * 1000;
+
+local function touch_active_user(timestamp, user_id)
+  redis.call("zadd", REDIS_KEY_ACTIVE_USER_LIST, timestamp, user_id)
+  redis.call("zremrangebyscore", REDIS_KEY_ACTIVE_USER_LIST, "-inf", tonumber(timestamp) - ACTIVE_USER_RETENTION)
+end
+
 -- Create a new session (when the user logged in or registered and so on)
 -- The session info is immutable for a session
 -- Returns the new session ID
@@ -28,6 +37,7 @@ local function new_session(timestamp, user_id, session_info)
   -- Add new session's item to user's session list
   local session_list_key = string.format(REDIS_KEY_USER_SESSION_LIST, user_id)
   redis.call("zadd", session_list_key, timestamp, session_id)
+  touch_active_user(timestamp, user_id)
 
   -- Check if the session count exceeded the limit and remove old sessions
   while redis.call("zcard", session_list_key) > MAX_SESSIONS_PER_USER do
@@ -50,12 +60,18 @@ local function access_session(timestamp, user_id, session_id)
 
   -- If we updated a element's score successfully, the session EXISTS in the list
   if elements_updates == 1 then
+    touch_active_user(timestamp, user_id)
     return true
   end
 
   -- If no elements are updated, we need to check if the session doesn't EXIST in the list
   -- or the timestamp didn't changed
-  return redis.call("zscore", session_list_key, session_id) ~= false
+  local exists = redis.call("zscore", session_list_key, session_id) ~= false
+  if exists then
+    touch_active_user(timestamp, user_id)
+  end
+
+  return exists
 end
 
 -- Delete a session manmully (when user logout)
@@ -125,6 +141,21 @@ local function list_sessions(user_id)
   return result
 end
 
+-- Get a list of recently active users.
+-- Returns a flat list of {user_id, last_access_time, user_id, last_access_time, ...}
+local function list_active_users(since_timestamp, take_count)
+  return redis.call(
+    "zrevrangebyscore",
+    REDIS_KEY_ACTIVE_USER_LIST,
+    "+inf",
+    since_timestamp,
+    "withscores",
+    "limit",
+    0,
+    take_count
+  )
+end
+
 -- Handle commands from Redis client
 if ARGV[1] == "new" then
   return new_session(ARGV[2], ARGV[3], ARGV[4])
@@ -136,4 +167,6 @@ elseif ARGV[1] == "revoke_all_except" then
   return revoke_all_sessions_except(ARGV[2], ARGV[3])
 elseif ARGV[1] == "list" then
   return list_sessions(ARGV[2])
+elseif ARGV[1] == "list_active_users" then
+  return list_active_users(ARGV[2], ARGV[3])
 end

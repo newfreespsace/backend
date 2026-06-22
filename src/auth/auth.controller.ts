@@ -44,6 +44,9 @@ import {
   ListUserSessionsRequestDto,
   ListUserSessionsResponseDto,
   ListUserSessionsResponseError,
+  ListActiveUsersRequestDto,
+  ListActiveUsersResponseDto,
+  ListActiveUsersResponseError,
   RevokeUserSessionRequestDto,
   RevokeUserSessionResponseDto,
   RevokeUserSessionResponseError
@@ -418,6 +421,46 @@ export class AuthController {
         loginIpLocation: this.authIpLocationService.query(sessionInfo.loginIp)
       })),
       currentSessionId: userId === currentUser.id ? req.session.sessionId : null
+    };
+  }
+
+  @Post("listActiveUsers")
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "List users active recently."
+  })
+  async listActiveUsers(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: ListActiveUsersRequestDto
+  ): Promise<ListActiveUsersResponseDto> {
+    if (!(await this.userPrivilegeService.userHasPrivilege(currentUser, UserPrivilegeType.ManageUser)))
+      return {
+        error: ListActiveUsersResponseError.PERMISSION_DENIED
+      };
+
+    const takeCount = request.takeCount ?? 50;
+    if (takeCount > this.configService.config.queryLimit.userList)
+      return {
+        error: ListActiveUsersResponseError.TAKE_TOO_MANY
+      };
+
+    const sinceTime = request.sinceTime ?? +new Date() - 24 * 60 * 60 * 1000;
+    const activeUsers = await this.authSessionService.listActiveUsers(sinceTime, takeCount);
+    const users = await this.userService.findUsersByExistingIds(activeUsers.map(activeUser => activeUser.userId));
+
+    return {
+      users: await Promise.all(
+        activeUsers
+          .map((activeUser, index) => ({
+            activeUser,
+            user: users[index]
+          }))
+          .filter(({ user }) => user)
+          .map(async ({ activeUser, user }) => ({
+            user: await this.userService.getUserMeta(user, currentUser),
+            lastAccessTime: activeUser.lastAccessTime
+          }))
+      )
     };
   }
 

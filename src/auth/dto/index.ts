@@ -19,5 +19,8 @@ export * from "./reset-password-response.dto";
 export * from "./list-user-sessions-request.dto";
 export * from "./list-user-sessions-response.dto";
 
+export * from "./list-active-users-request.dto";
+export * from "./list-active-users-response.dto";
+
 export * from "./revoke-user-session-request.dto";
 export * from "./revoke-user-session-response.dto";
