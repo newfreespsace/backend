@@ -85,17 +85,24 @@ export class GalleryService {
     return null;
   }
 
-  async listImages(user: UserEntity): Promise<{ images: GalleryImageDto[]; quota: GalleryQuotaDto }> {
-    const [images, quota] = await Promise.all([
-      this.galleryImageRepository.find({
+  async listImages(
+    user: UserEntity,
+    skipCount: number,
+    takeCount: number
+  ): Promise<{ images: GalleryImageDto[]; totalCount: number; quota: GalleryQuotaDto }> {
+    const [[images, totalCount], quota] = await Promise.all([
+      this.galleryImageRepository.findAndCount({
         where: { ownerId: user.id },
-        order: { createdAt: "DESC", id: "DESC" }
+        order: { createdAt: "DESC", id: "DESC" },
+        skip: skipCount,
+        take: takeCount
       }),
       this.getQuota(user)
     ]);
 
     return {
       images: await Promise.all(images.map(image => this.getImageDto(image, true))),
+      totalCount,
       quota
     };
   }

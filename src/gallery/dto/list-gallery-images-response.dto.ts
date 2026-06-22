@@ -15,5 +15,8 @@ export class ListGalleryImagesResponseDto {
   images?: GalleryImageDto[];
 
   @ApiProperty()
+  totalCount?: number;
+
+  @ApiProperty()
   quota?: GalleryQuotaDto;
 }

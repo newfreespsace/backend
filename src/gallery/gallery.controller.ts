@@ -16,6 +16,7 @@ import {
   DeleteGalleryImageResponseError,
   GetGalleryQuotaResponseDto,
   GetGalleryQuotaResponseError,
+  ListGalleryImagesRequestDto,
   ListGalleryImagesResponseDto,
   ListGalleryImagesResponseError
 } from "./dto";
@@ -28,10 +29,13 @@ export class GalleryController {
   @Post("listImages")
   @ApiBearerAuth()
   @ApiOperation({ summary: "List current user's gallery images." })
-  async listImages(@CurrentUser() currentUser: UserEntity): Promise<ListGalleryImagesResponseDto> {
+  async listImages(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: ListGalleryImagesRequestDto
+  ): Promise<ListGalleryImagesResponseDto> {
     if (!currentUser) return { error: ListGalleryImagesResponseError.PERMISSION_DENIED };
 
-    return await this.galleryService.listImages(currentUser);
+    return await this.galleryService.listImages(currentUser, request.skipCount, request.takeCount);
   }
 
   @Post("getQuota")
