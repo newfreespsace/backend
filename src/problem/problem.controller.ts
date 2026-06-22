@@ -8,7 +8,7 @@ import { Redis } from "ioredis";
 import { ConfigService } from "@/config/config.service";
 import { UserService } from "@/user/user.service";
 import { GroupService } from "@/group/group.service";
-import { MinioSignFor, FileService } from "@/file/file.service";
+import { FileService } from "@/file/file.service";
 import { RedisService } from "@/redis/redis.service";
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
@@ -855,10 +855,9 @@ export class ProblemController {
       downloadInfo: await Promise.all(
         downloadList.map(async problemFile => ({
           filename: problemFile.filename,
-          downloadUrl: await this.fileService.signDownloadLink({
+          downloadUrl: await this.fileService.signProxyDownloadLink({
             uuid: problemFile.uuid,
-            downloadFilename: problemFile.filename,
-            signFor: MinioSignFor.UserDownload
+            downloadFilename: problemFile.filename
           })
         }))
       )

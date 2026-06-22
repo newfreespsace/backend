@@ -30,6 +30,11 @@ export class AuthRequiredMiddleware implements NestMiddleware {
       return;
     }
 
+    if (path === "file/upload" || path === "file/download") {
+      next();
+      return;
+    }
+
     if (ALLOWED_PATHS_FOR_ANONYMOUS.has(path)) {
       next();
       return;

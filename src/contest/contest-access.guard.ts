@@ -27,6 +27,8 @@ export class ContestAccessGuard implements CanActivate {
 
     if (path.startsWith("gallery/image/")) return true;
 
+    if (path === "file/upload" || path === "file/download") return true;
+
     if (path === "contest/queryContests") return true;
 
     if (path === "contest/getContest" || path === "contest/getContestProblem") {

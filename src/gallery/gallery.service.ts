@@ -8,7 +8,7 @@ import { v4 as UUID } from "uuid";
 
 import { ConfigService } from "@/config/config.service";
 import { FileEntity } from "@/file/file.entity";
-import { FileService, MinioSignFor } from "@/file/file.service";
+import { FileService } from "@/file/file.service";
 import { FileUploadInfoDto, SignedFileUploadRequestDto } from "@/file/dto";
 import { LockService } from "@/redis/lock.service";
 import { UserEntity } from "@/user/user.entity";
@@ -177,12 +177,7 @@ export class GalleryService {
       height: image.height,
       createdAt: image.createdAt,
       downloadUrl: withDownloadUrl
-        ? await this.fileService.signDownloadLink({
-            uuid: image.uuid,
-            downloadFilename: image.filename,
-            signFor: MinioSignFor.UserDownload,
-            objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX
-          })
+        ? `/api/gallery/image/${encodeURIComponent(publicId)}/${encodeURIComponent(image.filename)}`
         : undefined
     };
   }

@@ -1,5 +1,6 @@
 import { URL } from "url";
 import { Readable } from "stream";
+import crypto from "crypto";
 
 import { Injectable, OnModuleInit } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
@@ -22,6 +23,20 @@ const FILE_DOWNLOAD_EXPIRE_TIME = 20 * 60 * 60;
 
 interface FileObjectKeyOptions {
   objectKeyPrefix?: string;
+}
+
+interface ProxyUploadTokenPayload {
+  uuid: string;
+  size: number;
+  objectKeyPrefix?: string;
+  expiresAt: number;
+}
+
+interface ProxyDownloadTokenPayload {
+  uuid: string;
+  downloadFilename?: string;
+  objectKeyPrefix?: string;
+  expiresAt: number;
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent
@@ -151,13 +166,18 @@ export class FileService implements OnModuleInit {
     );
   }
 
-  async uploadFile(uuid: string, streamOrBufferOrFile: string | Buffer | Readable, retryCount = 10): Promise<void> {
+  async uploadFile(
+    uuid: string,
+    streamOrBufferOrFile: string | Buffer | Readable,
+    retryCount = 10,
+    options: FileObjectKeyOptions = {}
+  ): Promise<void> {
     for (let i = 0; i < retryCount; i++) {
       try {
         /* eslint-disable no-await-in-loop */
         if (typeof streamOrBufferOrFile === "string")
-          await this.minioClient.fPutObject(this.bucket, uuid, streamOrBufferOrFile, {});
-        else await this.minioClient.putObject(this.bucket, uuid, streamOrBufferOrFile);
+          await this.minioClient.fPutObject(this.bucket, this.getObjectKey(uuid, options), streamOrBufferOrFile, {});
+        else await this.minioClient.putObject(this.bucket, this.getObjectKey(uuid, options), streamOrBufferOrFile);
         /* eslint-enable no-await-in-loop */
       } catch (e) {
         if (i === retryCount - 1) throw e;
@@ -257,22 +277,20 @@ export class FileService implements OnModuleInit {
     maxSize?: number,
     options: FileObjectKeyOptions = {}
   ): Promise<SignedFileUploadRequestDto> {
-    const signer = this.minioSigner[MinioSignFor.UserUpload];
     const uuid = UUID();
-    const policy = signer.client.newPostPolicy();
-    policy.setBucket(this.bucket);
-    policy.setKey(this.getObjectKey(uuid, options));
-    policy.setExpires(new Date(Date.now() + FILE_UPLOAD_EXPIRE_TIME * 1000));
-    if (minSize != null || maxSize != null) {
-      policy.setContentLengthRange(minSize || 0, maxSize || 0);
-    }
-    const policyResult = await signer.client.presignedPostPolicy(policy);
 
     return {
       uuid,
       method: "POST",
-      url: signer.replaceUrl(policyResult.postURL),
-      extraFormData: policyResult.formData,
+      url: "/api/file/upload",
+      extraFormData: {
+        token: this.signProxyUploadToken({
+          uuid,
+          size: maxSize || minSize || 0,
+          objectKeyPrefix: options.objectKeyPrefix,
+          expiresAt: Date.now() + FILE_UPLOAD_EXPIRE_TIME * 1000
+        })
+      },
       fileFieldName: "file"
     };
   }
@@ -359,12 +377,48 @@ export class FileService implements OnModuleInit {
     else return url;
   }
 
+  async signProxyDownloadLink({
+    uuid,
+    downloadFilename,
+    noExpire,
+    objectKeyPrefix
+  }: {
+    uuid: string;
+    downloadFilename?: string;
+    noExpire?: boolean;
+    objectKeyPrefix?: string;
+  }): Promise<string> {
+    const token = this.signProxyDownloadToken({
+      uuid,
+      downloadFilename,
+      objectKeyPrefix,
+      expiresAt: Date.now() + (noExpire ? 24 * 60 * 60 * 7 : FILE_DOWNLOAD_EXPIRE_TIME) * 1000
+    });
+    return `/api/file/download?token=${encodeURIComponent(token)}`;
+  }
+
+  verifyProxyUploadToken(token: string): ProxyUploadTokenPayload {
+    return this.verifyProxyToken<ProxyUploadTokenPayload>(token);
+  }
+
+  verifyProxyDownloadToken(token: string): ProxyDownloadTokenPayload {
+    return this.verifyProxyToken<ProxyDownloadTokenPayload>(token);
+  }
+
   async getFileStream(uuid: string): Promise<Readable> {
     return await this.minioClient.getObject(this.bucket, uuid);
   }
 
   async getFileStreamByObjectKey(uuid: string, options: FileObjectKeyOptions = {}): Promise<Readable> {
     return await this.minioClient.getObject(this.bucket, this.getObjectKey(uuid, options));
+  }
+
+  async getProxyDownloadStream(token: string): Promise<{ stream: Readable; downloadFilename?: string }> {
+    const payload = this.verifyProxyDownloadToken(token);
+    return {
+      stream: await this.getFileStreamByObjectKey(payload.uuid, { objectKeyPrefix: payload.objectKeyPrefix }),
+      downloadFilename: payload.downloadFilename
+    };
   }
 
   async runMaintainceTasks(): Promise<void> {
@@ -397,5 +451,43 @@ export class FileService implements OnModuleInit {
   private getFileUuidFromObjectKey(objectKey: string): string {
     if (objectKey.startsWith("gallery-images/")) return objectKey.slice("gallery-images/".length);
     return objectKey;
+  }
+
+  private signProxyUploadToken(payload: ProxyUploadTokenPayload): string {
+    return this.signProxyToken(payload);
+  }
+
+  private signProxyDownloadToken(payload: ProxyDownloadTokenPayload): string {
+    return this.signProxyToken(payload);
+  }
+
+  private signProxyToken(payload: ProxyUploadTokenPayload | ProxyDownloadTokenPayload): string {
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const signature = crypto
+      .createHmac("sha256", this.configService.config.security.sessionSecret)
+      .update(encodedPayload)
+      .digest("base64url");
+    return `${encodedPayload}.${signature}`;
+  }
+
+  private verifyProxyToken<T extends { expiresAt: number }>(token: string): T {
+    const [encodedPayload, signature] = token.split(".");
+    if (!encodedPayload || !signature) throw new Error("Invalid file token.");
+
+    const expectedSignature = crypto
+      .createHmac("sha256", this.configService.config.security.sessionSecret)
+      .update(encodedPayload)
+      .digest("base64url");
+    const signatureBuffer = Buffer.from(signature);
+    const expectedSignatureBuffer = Buffer.from(expectedSignature);
+    if (
+      signatureBuffer.length !== expectedSignatureBuffer.length ||
+      !crypto.timingSafeEqual(signatureBuffer, expectedSignatureBuffer)
+    )
+      throw new Error("Invalid file token.");
+
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf-8")) as T;
+    if (payload.expiresAt < Date.now()) throw new Error("File token expired.");
+    return payload;
   }
 }
