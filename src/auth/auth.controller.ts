@@ -444,7 +444,7 @@ export class AuthController {
         error: ListActiveUsersResponseError.TAKE_TOO_MANY
       };
 
-    const sinceTime = request.sinceTime ?? +new Date() - 24 * 60 * 60 * 1000;
+    const sinceTime = request.sinceTime ?? +new Date() - 30 * 24 * 60 * 60 * 1000;
     const activeUsers = await this.authSessionService.listActiveUsers(sinceTime, takeCount);
     const users = await this.userService.findUsersByExistingIds(activeUsers.map(activeUser => activeUser.userId));
 
