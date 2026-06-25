@@ -26,6 +26,10 @@ import {
   QuerySectionGroupRanklistDto,
   QuerySectionGroupRanklistResponseDto
 } from "./dto/query-section-group-ranklist.dto";
+import {
+  QuerySectionsByProblemIdDto,
+  QuerySectionsByProblemIdResponseDto
+} from "./dto/query-sections-by-problem-id.dto";
 import { ChapterEntity } from "./entities/chapter.entity";
 import { TrainingProgressService } from "./training-progress.service";
 
@@ -56,6 +60,56 @@ export class SectionService {
       sections.map(section => section.id)
     );
     return sections.map(section => ({ ...toSectionMetaDto(section), ...progress.get(section.id) }));
+  }
+
+  async querySectionsByProblemId(
+    currentUser: UserEntity,
+    request: QuerySectionsByProblemIdDto
+  ): Promise<QuerySectionsByProblemIdResponseDto> {
+    const problem = await this.problemService.findProblemById(request.problemId);
+    if (!problem) throw new NotFoundException(`problem ${request.problemId} not found`);
+    if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View))) {
+      throw new ForbiddenException("permission denied");
+    }
+
+    const rows: {
+      trainingId: string;
+      trainingTitle: string;
+      chapterId: string;
+      chapterTitle: string;
+      sectionId: string;
+      sectionTitle: string;
+      sortOrder: string;
+    }[] = await this.sectionProblemRepository
+      .createQueryBuilder("sectionProblem")
+      .innerJoin("sectionProblem.section", "section")
+      .innerJoin("section.chapter", "chapter")
+      .innerJoin("chapter.training", "training")
+      .where("sectionProblem.problemId = :problemId", { problemId: request.problemId })
+      .select("training.id", "trainingId")
+      .addSelect("training.title", "trainingTitle")
+      .addSelect("chapter.id", "chapterId")
+      .addSelect("chapter.title", "chapterTitle")
+      .addSelect("section.id", "sectionId")
+      .addSelect("section.title", "sectionTitle")
+      .addSelect("sectionProblem.sortOrder", "sortOrder")
+      .orderBy("training.sortOrder", "ASC")
+      .addOrderBy("chapter.sortOrder", "ASC")
+      .addOrderBy("section.sortOrder", "ASC")
+      .addOrderBy("sectionProblem.sortOrder", "ASC")
+      .getRawMany();
+
+    return {
+      references: rows.map(row => ({
+        trainingId: Number(row.trainingId),
+        trainingTitle: row.trainingTitle,
+        chapterId: Number(row.chapterId),
+        chapterTitle: row.chapterTitle,
+        sectionId: Number(row.sectionId),
+        sectionTitle: row.sectionTitle,
+        sortOrder: Number(row.sortOrder)
+      }))
+    };
   }
 
   async createSection(createSectionDto: CreateSectionDto): Promise<SectionMetaDto> {

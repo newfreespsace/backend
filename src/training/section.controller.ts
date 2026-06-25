@@ -13,6 +13,10 @@ import {
   QuerySectionGroupRanklistDto,
   QuerySectionGroupRanklistResponseDto
 } from "./dto/query-section-group-ranklist.dto";
+import {
+  QuerySectionsByProblemIdDto,
+  QuerySectionsByProblemIdResponseDto
+} from "./dto/query-sections-by-problem-id.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
 import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
 import { GetSectionByIdResponseDto } from "./dto/get-section-by-id-response.dto";
@@ -46,6 +50,17 @@ export class SectionController {
     const { chapterId } = request;
     const sections = this.sectionService.querySectionSetByChapterId(chapterId, currentUser);
     return sections;
+  }
+
+  @Post("querySectionsByProblemId")
+  @ApiOkResponse({ type: QuerySectionsByProblemIdResponseDto })
+  async querySectionsByProblemId(
+    @CurrentUser()
+    currentUser: UserEntity,
+    @Body()
+    request: QuerySectionsByProblemIdDto
+  ): Promise<QuerySectionsByProblemIdResponseDto> {
+    return await this.sectionService.querySectionsByProblemId(currentUser, request);
   }
 
   @Post("createSection")
@@ -103,7 +118,7 @@ export class SectionController {
     request: SetSectionProblemsDto
   ): Promise<SetSectionProblemsResponseDto> {
     await this.checkManageTrainingPermission(currentUser);
-    return this.sectionService.setSectionProblems(request);
+    return await this.sectionService.setSectionProblems(request);
   }
 
   @Post("delSectionById")
