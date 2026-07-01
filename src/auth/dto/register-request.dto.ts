@@ -1,4 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
+import { Transform } from "class-transformer";
 
 import { IsEmail, Length, IsString, IsOptional } from "class-validator";
 
@@ -17,6 +18,12 @@ export class RegisterRequestDto {
   @IsString()
   @IsOptional()
   readonly emailVerificationCode?: string;
+
+  @ApiProperty()
+  @IsString()
+  @Transform(({ value }) => value?.trim())
+  @Length(1, 24)
+  readonly nickname: string;
 
   @ApiProperty()
   @Length(6, 32)

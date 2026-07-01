@@ -319,6 +319,7 @@ export class AuthController {
       request.username,
       request.email,
       request.emailVerificationCode,
+      request.nickname,
       request.password
     );
 

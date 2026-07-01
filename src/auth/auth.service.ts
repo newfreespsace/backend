@@ -45,6 +45,7 @@ export class AuthService {
     username: string,
     email: string,
     emailVerificationCode: string,
+    nickname: string,
     password: string
   ): Promise<[error: RegisterResponseError, user: UserEntity]> {
     // There's a race condition on user inserting. If we do checking before inserting,
@@ -64,7 +65,7 @@ export class AuthService {
         user.username = username;
         user.email = email;
         user.publicEmail = true;
-        user.nickname = "";
+        user.nickname = nickname;
         user.bio = "";
         user.avatarInfo = "gravatar:";
         user.isAdmin = false;

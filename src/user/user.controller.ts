@@ -188,6 +188,12 @@ export class UserController {
       }
     }
 
+    if (request.nickname !== user.nickname && !hasPrivilege) {
+      return {
+        error: UpdateUserProfileResponseError.PERMISSION_DENIED
+      };
+    }
+
     // if (request.password) {
     //   // A non-admin user must give the old password to change its password
     //   if (!hasPrivilege) {
