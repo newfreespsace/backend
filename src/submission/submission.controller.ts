@@ -227,6 +227,18 @@ export class SubmissionController {
         };
     }
 
+    if (!currentUser) {
+      return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
+    }
+
+    if (!currentUser.isAdmin) {
+      if (request.submitter && request.submitter !== currentUser.username) {
+        return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
+      }
+
+      filterSubmitter = currentUser;
+    }
+
     const hasManageProblemPrivilege = await this.userPrivilegeService.userHasPrivilege(
       currentUser,
       UserPrivilegeType.ManageProblem
