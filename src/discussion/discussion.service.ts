@@ -15,6 +15,8 @@ import { ProblemEntity } from "@/problem/problem.entity";
 import { LockService } from "@/redis/lock.service";
 import { escapeLike } from "@/database/database.utils";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
+import { SubmissionService } from "@/submission/submission.service";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 
 import { DiscussionEntity } from "./discussion.entity";
 import { DiscussionContentEntity } from "./discussion-content.entity";
@@ -73,6 +75,8 @@ export class DiscussionService {
     private readonly userPrivilegeService: UserPrivilegeService,
     private readonly permissionService: PermissionService,
     private readonly problemService: ProblemService,
+    @Inject(forwardRef(() => SubmissionService))
+    private readonly submissionService: SubmissionService,
     private readonly lockService: LockService
   ) {
     this.auditService.registerObjectTypeQueryHandler(AuditLogObjectType.Discussion, async discussionId => {
@@ -125,6 +129,18 @@ export class DiscussionService {
     };
   }
 
+  private async userCanViewProblemDiscussion(
+    user: UserEntity,
+    problemId: number,
+    hasPrivilege?: boolean
+  ): Promise<boolean> {
+    if (!problemId) return true;
+    if (hasPrivilege ?? (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion)))
+      return true;
+    if (!user) return false;
+    return (await this.submissionService.getUserProblemAcceptedSubmissionCount(user.id, problemId)) > 0;
+  }
+
   async userHasPermission(
     user: UserEntity,
     discussion: DiscussionEntity,
@@ -140,9 +156,10 @@ export class DiscussionService {
     };
 
     switch (type) {
-      // Everyone can view a public discussion
-      // Owner, admins and those who has read permission can view a non-public discussion
+      // Problem discussions are visible to ordinary users only after they have accepted the problem.
+      // Owner and those who has read permission can view a non-public discussion only after that.
       case DiscussionPermissionType.View:
+        if (!(await this.userCanViewProblemDiscussion(user, discussion.problemId))) return false;
         if (discussion.isPublic) return true;
         if (user && user.id === discussion.publisherId) return true;
         if (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion)) return true;
@@ -203,10 +220,14 @@ export class DiscussionService {
     discussion: DiscussionEntity,
     hasPrivilege?: boolean
   ): Promise<DiscussionPermissionType[]> {
-    if (!user) return discussion.isPublic ? [DiscussionPermissionType.View] : [];
+    if (!user)
+      return discussion.isPublic && (await this.userCanViewProblemDiscussion(user, discussion.problemId))
+        ? [DiscussionPermissionType.View]
+        : [];
     if (hasPrivilege ?? (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion)))
       return Object.values(DiscussionPermissionType);
 
+    const canViewProblemDiscussion = await this.userCanViewProblemDiscussion(user, discussion.problemId, hasPrivilege);
     const permissionLevel =
       await this.permissionService.getUserOrItsGroupsMaxPermissionLevel<DiscussionPermissionLevel>(
         user,
@@ -214,7 +235,10 @@ export class DiscussionService {
         PermissionObjectType.Discussion
       );
     const result: DiscussionPermissionType[] = [];
-    if (discussion.isPublic || permissionLevel >= DiscussionPermissionLevel.Read || discussion.publisherId === user.id)
+    if (
+      canViewProblemDiscussion &&
+      (discussion.isPublic || permissionLevel >= DiscussionPermissionLevel.Read || discussion.publisherId === user.id)
+    )
       result.push(DiscussionPermissionType.View);
     if (permissionLevel >= DiscussionPermissionLevel.Write || discussion.publisherId === user.id)
       result.push(DiscussionPermissionType.Modify);
@@ -248,10 +272,17 @@ export class DiscussionService {
     return [];
   }
 
-  async userHasCreateDiscussionPermission(user: UserEntity, hasPrivilege?: boolean): Promise<boolean> {
+  async userHasCreateDiscussionPermission(
+    user: UserEntity,
+    hasPrivilege?: boolean,
+    problemId?: number
+  ): Promise<boolean> {
     if (!user) return false;
-    if (this.configService.config.preference.security.allowEveryoneCreateDiscussion) return true;
-    return hasPrivilege ?? (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion));
+    const canManageDiscussion =
+      hasPrivilege ?? (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion));
+    if (!this.configService.config.preference.security.allowEveryoneCreateDiscussion && !canManageDiscussion)
+      return false;
+    return await this.userCanViewProblemDiscussion(user, problemId, canManageDiscussion);
   }
 
   async createDiscussion(
@@ -349,6 +380,27 @@ export class DiscussionService {
         );
       else queryBuilder.andWhere("discussion.isPublic = 1");
     } else if (nonpublic) queryBuilder.andWhere("discussion.isPublic = 0");
+
+    if (!hasPrivilege) {
+      if (currentUser)
+        queryBuilder.andWhere(
+          new Brackets(brackets =>
+            brackets.where("discussion.problemId IS NULL").orWhere(
+              `EXISTS (
+                SELECT 1 FROM submission
+                WHERE submission.problemId = discussion.problemId
+                  AND submission.submitterId = :currentUserId
+                  AND submission.status = :acceptedStatus
+              )`,
+              {
+                currentUserId: currentUser.id,
+                acceptedStatus: SubmissionStatus.Accepted
+              }
+            )
+          )
+        );
+      else queryBuilder.andWhere("discussion.problemId IS NULL");
+    }
 
     if (publisherId) queryBuilder.andWhere("discussion.publisherId = :publisherId", { publisherId });
 

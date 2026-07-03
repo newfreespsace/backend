@@ -120,6 +120,11 @@ export class DiscussionController {
         return {
           error: CreateDiscussionResponseError.PERMISSION_DENIED
         };
+
+      if (!(await this.discussionService.userHasCreateDiscussionPermission(currentUser, undefined, problem.id)))
+        return {
+          error: CreateDiscussionResponseError.PERMISSION_DENIED
+        };
     }
 
     const discussion = await this.discussionService.createDiscussion(
@@ -323,7 +328,11 @@ export class DiscussionController {
         }))
       ),
       permissions: !request.titleOnly && {
-        createDiscussion: await this.discussionService.userHasCreateDiscussionPermission(currentUser),
+        createDiscussion: await this.discussionService.userHasCreateDiscussionPermission(
+          currentUser,
+          hasPrivilege,
+          filterProblem?.id
+        ),
         filterNonpublic: hasPrivilege
       },
       count,
@@ -510,7 +519,8 @@ export class DiscussionController {
         if (request.getDiscussion) {
           result.permissionCreateNewDiscussion = await this.discussionService.userHasCreateDiscussionPermission(
             currentUser,
-            hasPrivilege
+            hasPrivilege,
+            discussion.problemId
           );
 
           // For parallel

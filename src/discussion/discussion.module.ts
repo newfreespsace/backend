@@ -7,6 +7,7 @@ import { PermissionModule } from "@/permission/permission.module";
 import { RedisModule } from "@/redis/redis.module";
 import { GroupModule } from "@/group/group.module";
 import { ProblemModule } from "@/problem/problem.module";
+import { SubmissionModule } from "@/submission/submission.module";
 
 import { DiscussionService } from "./discussion.service";
 import { DiscussionController } from "./discussion.controller";
@@ -28,6 +29,7 @@ import { DiscussionReplyReactionEntity } from "./discussion-reply-reaction.entit
     forwardRef(() => AuditModule),
     forwardRef(() => PermissionModule),
     forwardRef(() => ProblemModule),
+    forwardRef(() => SubmissionModule),
     forwardRef(() => RedisModule)
   ],
   providers: [DiscussionService],
