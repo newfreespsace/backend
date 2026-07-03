@@ -232,10 +232,6 @@ export class SubmissionController {
     }
 
     if (!currentUser.isAdmin) {
-      if (request.submitter && request.submitter !== currentUser.username) {
-        return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
-      }
-
       filterSubmitter = currentUser;
     }
 
