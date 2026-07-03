@@ -129,7 +129,7 @@ export class DiscussionService {
     };
   }
 
-  private async userCanViewProblemDiscussion(
+  async userCanViewProblemDiscussion(
     user: UserEntity,
     problemId: number,
     hasPrivilege?: boolean

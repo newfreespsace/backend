@@ -97,6 +97,9 @@ export class GetProblemResponseDto {
   @ApiProperty()
   discussionCount?: number;
 
+  @ApiProperty()
+  canViewDiscussion?: boolean;
+
   @ApiProperty({ enum: ProblemPermissionType, isArray: true })
   permissionOfCurrentUser?: ProblemPermissionType[];
 

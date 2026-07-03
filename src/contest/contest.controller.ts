@@ -248,9 +248,7 @@ export class ContestController {
                     memoryUsed: null
                   }
                 : lastSubmissionMeta,
-              lastAcceptedSubmission: hideNoiResult ? null : lastAcceptedSubmissionMeta,
-              lastSubmissionContent:
-                lastSubmission && (await this.submissionService.getSubmissionDetail(lastSubmission)).content
+              lastAcceptedSubmission: hideNoiResult ? null : lastAcceptedSubmissionMeta
             }
           : {}
       },

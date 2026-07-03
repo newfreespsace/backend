@@ -83,6 +83,11 @@ export class GetProblemRequestDto {
   @ApiProperty({ required: false })
   @IsBoolean()
   @IsOptional()
+  readonly canViewDiscussion?: boolean;
+
+  @ApiProperty({ required: false })
+  @IsBoolean()
+  @IsOptional()
   readonly permissionOfCurrentUser?: boolean;
 
   @ApiProperty({ required: false })

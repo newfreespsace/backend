@@ -497,6 +497,13 @@ export class ProblemController {
           .then(discussionCount => (result.discussionCount = discussionCount))
       );
 
+    if (request.canViewDiscussion)
+      promises.push(
+        this.discussionService
+          .userCanViewProblemDiscussion(currentUser, problem.id)
+          .then(canViewDiscussion => (result.canViewDiscussion = canViewDiscussion))
+      );
+
     if (request.permissionOfCurrentUser) {
       promises.push(
         this.problemService
