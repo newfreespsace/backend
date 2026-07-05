@@ -308,8 +308,18 @@ export class SectionService {
     const sectionProblems = await section.problems;
     const problemIds = sectionProblems.map(sectionProblem => sectionProblem.problemId);
     const membershipsList = await Promise.all(groups.map(group => this.groupService.getGroupMemberList(group)));
-    const userIds = Array.from(new Set(membershipsList.flat().map(membership => membership.userId)));
+    const memberships = membershipsList.flat();
+    const groupAdminUserIds = new Set(
+      memberships.filter(membership => membership.isGroupAdmin).map(membership => membership.userId)
+    );
+    let userIds = Array.from(new Set(memberships.map(membership => membership.userId)));
     if (!groupId && userIds.length === 0) userIds.push(currentUser.id);
+
+    let users = await this.userService.findUsersByExistingIds(userIds);
+    if (!canManageTraining) {
+      users = users.filter(user => !user.isAdmin && !groupAdminUserIds.has(user.id));
+      userIds = users.map(user => user.id);
+    }
 
     const acceptedProblemIdsByUserId = new Map<number, Set<number>>();
     if (problemIds.length > 0 && userIds.length > 0) {
@@ -331,7 +341,6 @@ export class SectionService {
       });
     }
 
-    const users = await this.userService.findUsersByExistingIds(userIds);
     const items = await Promise.all(
       users.map(async user => {
         const acceptedProblemIds = Array.from(acceptedProblemIdsByUserId.get(user.id) || []);
