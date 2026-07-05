@@ -309,6 +309,7 @@ export class SectionService {
     const problemIds = sectionProblems.map(sectionProblem => sectionProblem.problemId);
     const membershipsList = await Promise.all(groups.map(group => this.groupService.getGroupMemberList(group)));
     const userIds = Array.from(new Set(membershipsList.flat().map(membership => membership.userId)));
+    if (!groupId && userIds.length === 0) userIds.push(currentUser.id);
 
     const acceptedProblemIdsByUserId = new Map<number, Set<number>>();
     if (problemIds.length > 0 && userIds.length > 0) {
