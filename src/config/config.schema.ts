@@ -241,6 +241,10 @@ class PreferenceConfigSecurity {
   @IsBoolean()
   @ApiProperty()
   readonly allowEveryoneCreateDiscussion: boolean;
+
+  @IsBoolean()
+  @ApiProperty()
+  readonly hideSubmissionTestcaseDetailsForNormalUsers: boolean;
 }
 
 // These config items will be sent to client

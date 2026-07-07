@@ -27,6 +27,7 @@ export interface SubmissionProgressSubscription {
   type: SubmissionProgressSubscriptionType;
   submissionIds: number[];
   hideResultSubmissionIds?: number[];
+  hideTestcaseDetailsSubmissionIds?: number[];
 }
 
 interface SubmissionProgressMessage {
@@ -69,6 +70,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
   private clientLastMessages: Map<string, Map<number, SubmissionProgressMessage>> = new Map();
 
   private clientHiddenResultSubmissionIds: Map<string, Set<number>> = new Map();
+  private clientHiddenTestcaseDetailsSubmissionIds: Map<string, Set<number>> = new Map();
 
   constructor(
     private readonly configService: ConfigService,
@@ -183,20 +185,65 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     };
   }
 
+  private sanitizeTestcaseDetails(progress: SubmissionProgress): SubmissionProgress {
+    if (!progress) return progress;
+
+    const sanitizeTestcaseResult = (testcaseResult: unknown): unknown => {
+      if (!testcaseResult || typeof testcaseResult !== "object") return testcaseResult;
+
+      const sanitized = { ...(testcaseResult as Record<string, unknown>) };
+      delete sanitized.input;
+      delete sanitized.output;
+      delete sanitized.userOutput;
+
+      if (sanitized.testcaseInfo && typeof sanitized.testcaseInfo === "object") {
+        const testcaseInfo = { ...(sanitized.testcaseInfo as Record<string, unknown>) };
+        delete testcaseInfo.inputFile;
+        delete testcaseInfo.outputFile;
+        delete testcaseInfo.userOutputFilename;
+        sanitized.testcaseInfo = testcaseInfo;
+      }
+
+      return sanitized;
+    };
+
+    return {
+      ...progress,
+      testcaseResult:
+        progress.testcaseResult &&
+        Object.fromEntries(
+          Object.entries(progress.testcaseResult).map(([testcaseHash, testcaseResult]) => [
+            testcaseHash,
+            sanitizeTestcaseResult(testcaseResult)
+          ])
+        )
+    };
+  }
+
   private sanitizeMessageForClient(
     clientId: string,
     submissionId: number,
     message: SubmissionProgressMessage
   ): SubmissionProgressMessage {
-    if (!this.clientHiddenResultSubmissionIds.get(clientId)?.has(submissionId)) return message;
-    const resultMeta = this.sanitizeMeta(message.progressMeta?.resultMeta);
-    return {
-      progressMeta: message.progressMeta && {
-        progressType: message.progressMeta.progressType,
-        resultMeta
-      },
-      progressDetail: this.sanitizeProgress(message.progressDetail, resultMeta)
-    };
+    if (this.clientHiddenResultSubmissionIds.get(clientId)?.has(submissionId)) {
+      const resultMeta = this.sanitizeMeta(message.progressMeta?.resultMeta);
+      return {
+        progressMeta: message.progressMeta && {
+          progressType: message.progressMeta.progressType,
+          resultMeta
+        },
+        progressDetail: this.sanitizeProgress(message.progressDetail, resultMeta)
+      };
+    }
+
+    if (this.clientHiddenTestcaseDetailsSubmissionIds.get(clientId)?.has(submissionId)) {
+      return {
+        progressMeta: message.progressMeta,
+        progressDetail: this.sanitizeTestcaseDetails(message.progressDetail)
+      };
+    }
+
+    return message;
   }
 
   // sendMessage: send a message to a client or a room of clients
@@ -236,6 +283,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     }
     this.clientLastMessages.delete(client.id);
     this.clientHiddenResultSubmissionIds.delete(client.id);
+    this.clientHiddenTestcaseDetailsSubmissionIds.delete(client.id);
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -253,6 +301,10 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     this.clientJoinedRooms.set(client.id, new Set());
     this.clientLastMessages.set(client.id, new Map());
     this.clientHiddenResultSubmissionIds.set(client.id, new Set(subscription.hideResultSubmissionIds || []));
+    this.clientHiddenTestcaseDetailsSubmissionIds.set(
+      client.id,
+      new Set(subscription.hideTestcaseDetailsSubmissionIds || [])
+    );
 
     // Join the rooms first to prevent missing the finished message
     for (const submissionId of subscription.submissionIds) {

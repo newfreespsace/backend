@@ -15,6 +15,7 @@ import { FileService } from "@/file/file.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
 import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 import { ContestEntity } from "@/contest/contest.entity";
+import { SiteSettingService } from "@/site-setting/site-setting.service";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionStatus } from "./submission-status.enum";
@@ -66,6 +67,7 @@ export class SubmissionController {
     private readonly userService: UserService,
     private readonly userPrivilegeService: UserPrivilegeService,
     private readonly configService: ConfigService,
+    private readonly siteSettingService: SiteSettingService,
     private readonly submissionProgressGateway: SubmissionProgressGateway,
     private readonly submissionProgressService: SubmissionProgressService,
     private readonly submissionStatisticsService: SubmissionStatisticsService,
@@ -98,6 +100,66 @@ export class SubmissionController {
       progressType: SubmissionProgressType.Finished,
       status: this.getHiddenSubmissionStatus(metaStatus),
       score: null
+    };
+  }
+
+  private async shouldHideSubmissionTestcaseDetails(
+    currentUser: UserEntity,
+    submission: SubmissionEntity,
+    problem: ProblemEntity,
+    hasPrivilege: boolean
+  ): Promise<boolean> {
+    const preference = await this.siteSettingService.getPreference();
+
+    if (!preference.security.hideSubmissionTestcaseDetailsForNormalUsers) return false;
+    if (!currentUser) return true;
+    if (currentUser.isAdmin) return false;
+    if (hasPrivilege) return false;
+
+    const canModifyProblem = await this.problemService.userHasPermission(
+      currentUser,
+      problem,
+      ProblemPermissionType.Modify,
+      hasPrivilege
+    );
+
+    if (canModifyProblem) return false;
+
+    return true;
+  }
+
+  private sanitizeSubmissionTestcaseDetails(progress: SubmissionProgress): SubmissionProgress {
+    if (!progress) return progress;
+
+    const sanitizeTestcaseResult = (testcaseResult: unknown): unknown => {
+      if (!testcaseResult || typeof testcaseResult !== "object") return testcaseResult;
+
+      const sanitized = { ...(testcaseResult as Record<string, unknown>) };
+      delete sanitized.input;
+      delete sanitized.output;
+      delete sanitized.userOutput;
+
+      if (sanitized.testcaseInfo && typeof sanitized.testcaseInfo === "object") {
+        const testcaseInfo = { ...(sanitized.testcaseInfo as Record<string, unknown>) };
+        delete testcaseInfo.inputFile;
+        delete testcaseInfo.outputFile;
+        delete testcaseInfo.userOutputFilename;
+        sanitized.testcaseInfo = testcaseInfo;
+      }
+
+      return sanitized;
+    };
+
+    return {
+      ...progress,
+      testcaseResult:
+        progress.testcaseResult &&
+        Object.fromEntries(
+          Object.entries(progress.testcaseResult).map(([testcaseHash, testcaseResult]) => [
+            testcaseHash,
+            sanitizeTestcaseResult(testcaseResult)
+          ])
+        )
     };
   }
 
@@ -459,10 +521,21 @@ export class SubmissionController {
       memoryUsed: submission.memoryUsed
     };
     const hideNoiResult = await this.shouldHideNoiSubmissionResult(currentUser, submission);
+    const hideTestcaseDetails = await this.shouldHideSubmissionTestcaseDetails(
+      currentUser,
+      submission,
+      problem,
+      hasPrivilege
+    );
+
+    const rawProgress = progress || submissionDetail.result;
+
     const visibleMeta = hideNoiResult ? this.sanitizeNoiSubmissionMeta(meta) : meta;
     const visibleProgress = hideNoiResult
-      ? this.sanitizeNoiSubmissionProgress(progress || submissionDetail.result, submission.status)
-      : progress || submissionDetail.result;
+      ? this.sanitizeNoiSubmissionProgress(rawProgress, submission.status)
+      : hideTestcaseDetails
+      ? this.sanitizeSubmissionTestcaseDetails(rawProgress)
+      : rawProgress;
 
     return {
       meta: visibleMeta,
@@ -473,7 +546,8 @@ export class SubmissionController {
         : this.submissionProgressGateway.encodeSubscription({
             type: SubmissionProgressSubscriptionType.Detail,
             submissionIds: [submission.id],
-            hideResultSubmissionIds: hideNoiResult ? [submission.id] : []
+            hideResultSubmissionIds: hideNoiResult ? [submission.id] : [],
+            hideTestcaseDetailsSubmissionIds: hideTestcaseDetails ? [submission.id] : []
           }),
       permissionRejudge,
       permissionCancel,

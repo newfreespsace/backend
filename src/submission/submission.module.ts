@@ -10,6 +10,7 @@ import { AuditModule } from "@/audit/audit.module";
 import { FileModule } from "@/file/file.module";
 import { MetricsModule } from "@/metrics/metrics.module";
 import { ContestModule } from "@/contest/contest.module";
+import { SiteSettingModule } from "@/site-setting/site-setting.module";
 
 import { SubmissionEntity } from "./submission.entity";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
@@ -31,7 +32,8 @@ import { SubmissionStatisticsService } from "./submission-statistics.service";
     forwardRef(() => AuditModule),
     forwardRef(() => FileModule),
     forwardRef(() => ContestModule),
-    forwardRef(() => MetricsModule)
+    forwardRef(() => MetricsModule),
+    forwardRef(() => SiteSettingModule)
   ],
   providers: [SubmissionService, SubmissionProgressService, SubmissionProgressGateway, SubmissionStatisticsService],
   controllers: [SubmissionController],

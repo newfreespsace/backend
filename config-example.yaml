@@ -58,6 +58,7 @@ preference:
     discussionDefaultPublic: true
     discussionReplyDefaultPublic: true
     allowRegister: true
+    hideSubmissionTestcaseDetailsForNormalUsers: false
   pagination:
     homepageUserList: 10
     homepageProblemList: 10
