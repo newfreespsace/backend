@@ -30,11 +30,11 @@ export function IsPortNumber(validationOptions?: ValidationOptions) {
   return If(value => Number.isInteger(value) && value >= 1 && value <= 65535, validationOptions);
 }
 
-// A username is a string of 3 ~ 24 ASCII characters, and each character
-// is a uppercase / lowercase letter or a number or any of '-_.#$' and is
-// NOT '%'.
+// A username is a string of 3 ~ 24 ASCII characters, starts with a
+// uppercase / lowercase letter or a number, and the rest are uppercase /
+// lowercase letters, numbers, underscores or hyphens.
 export function isUsername(str: string) {
-  return /^[a-zA-Z0-9\-_.#$]{3,24}$/.test(str);
+  return /^[a-zA-Z0-9][a-zA-Z0-9_-]{2,23}$/.test(str);
 }
 
 export function IsUsername(validationOptions?: ValidationOptions) {
