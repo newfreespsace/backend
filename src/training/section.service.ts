@@ -322,22 +322,59 @@ export class SectionService {
     }
 
     const acceptedProblemIdsByUserId = new Map<number, Set<number>>();
+    const displaySubmissionsByUserProblemKey = new Map<
+      string,
+      { problemId: number; submissionId: number; status: SubmissionStatus; canView: boolean }
+    >();
     if (problemIds.length > 0 && userIds.length > 0) {
-      const rows: { userId: string; problemId: string }[] = await this.submissionRepository
-        .createQueryBuilder("submission")
-        .select("submission.submitterId", "userId")
-        .addSelect("submission.problemId", "problemId")
-        .where("submission.submitterId IN (:...userIds)", { userIds })
-        .andWhere("submission.problemId IN (:...problemIds)", { problemIds })
-        .andWhere("submission.status = :status", { status: SubmissionStatus.Accepted })
-        .distinct(true)
-        .getRawMany();
+      const getLatestSubmissionsByUserProblem = async (acceptedOnly: boolean) => {
+        const queryBuilder = this.submissionRepository
+          .createQueryBuilder("submission")
+          .select("submission.id", "submissionId")
+          .addSelect("submission.submitterId", "userId")
+          .addSelect("submission.problemId", "problemId")
+          .addSelect("submission.status", "status")
+          .where("submission.submitterId IN (:...userIds)", { userIds })
+          .andWhere("submission.problemId IN (:...problemIds)", { problemIds })
+          .orderBy("submission.submitTime", "DESC")
+          .addOrderBy("submission.id", "DESC");
 
-      rows.forEach(row => {
-        const userId = Number(row.userId);
-        const problemId = Number(row.problemId);
+        if (acceptedOnly) queryBuilder.andWhere("submission.status = :status", { status: SubmissionStatus.Accepted });
+
+        const latestSubmissionsByUserProblemKey = new Map<
+          string,
+          { problemId: number; submissionId: number; status: SubmissionStatus; canView: boolean }
+        >();
+        const submissionRows: { submissionId: string; userId: string; problemId: string; status: SubmissionStatus }[] =
+          await queryBuilder.getRawMany();
+
+        submissionRows.forEach(row => {
+          const key = `${row.userId}:${row.problemId}`;
+          if (latestSubmissionsByUserProblemKey.has(key)) return;
+          latestSubmissionsByUserProblemKey.set(key, {
+            problemId: Number(row.problemId),
+            submissionId: Number(row.submissionId),
+            status: row.status,
+            canView: currentUser.isAdmin || currentUser.id === Number(row.userId)
+          });
+        });
+
+        return latestSubmissionsByUserProblemKey;
+      };
+
+      const [latestAcceptedSubmissions, latestSubmissions] = await Promise.all([
+        getLatestSubmissionsByUserProblem(true),
+        getLatestSubmissionsByUserProblem(false)
+      ]);
+
+      latestAcceptedSubmissions.forEach((submission, key) => {
+        const userId = Number(key.split(":")[0]);
         if (!acceptedProblemIdsByUserId.has(userId)) acceptedProblemIdsByUserId.set(userId, new Set<number>());
-        acceptedProblemIdsByUserId.get(userId).add(problemId);
+        acceptedProblemIdsByUserId.get(userId).add(submission.problemId);
+      });
+
+      latestSubmissions.forEach((submission, key) => {
+        displaySubmissionsByUserProblemKey.set(key, latestAcceptedSubmissions.get(key) || submission);
       });
     }
 
@@ -348,7 +385,10 @@ export class SectionService {
           rank: 0,
           user: await this.userService.getUserMeta(user, currentUser),
           acceptedProblemCount: acceptedProblemIds.length,
-          acceptedProblemIds
+          acceptedProblemIds,
+          submissions: problemIds
+            .map(problemId => displaySubmissionsByUserProblemKey.get(`${user.id}:${problemId}`))
+            .filter(submission => submission != null)
         };
       })
     );

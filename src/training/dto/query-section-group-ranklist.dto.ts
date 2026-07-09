@@ -3,6 +3,7 @@ import { Type } from "class-transformer";
 import { IsInt, IsOptional } from "class-validator";
 
 import { GroupMetaDto } from "@/group/dto";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { UserMetaDto } from "@/user/dto";
 
 export class QuerySectionGroupRanklistDto {
@@ -14,6 +15,20 @@ export class QuerySectionGroupRanklistDto {
   @IsOptional()
   @IsInt()
   groupId?: number;
+}
+
+export class SectionGroupRanklistProblemSubmissionDto {
+  @ApiProperty()
+  problemId: number;
+
+  @ApiProperty()
+  submissionId: number;
+
+  @ApiProperty({ enum: SubmissionStatus })
+  status: SubmissionStatus;
+
+  @ApiProperty()
+  canView: boolean;
 }
 
 export class SectionGroupRanklistItemDto {
@@ -28,6 +43,9 @@ export class SectionGroupRanklistItemDto {
 
   @ApiProperty({ type: [Number] })
   acceptedProblemIds: number[];
+
+  @ApiProperty({ type: [SectionGroupRanklistProblemSubmissionDto] })
+  submissions: SectionGroupRanklistProblemSubmissionDto[];
 }
 
 export class QuerySectionGroupRanklistResponseDto {
