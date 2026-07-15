@@ -6,6 +6,7 @@ import { Locale } from "@/common/locale.type";
 import { DiscussionService } from "@/discussion/discussion.service";
 import { GroupService } from "@/group/group.service";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
+import { ProblemFileType } from "@/problem/problem-file.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { SubmissionService } from "@/submission/submission.service";
 import { UserEntity } from "@/user/user.entity";
@@ -239,6 +240,7 @@ export class ContestController {
           contentSections: await this.problemService.getProblemLocalizedContent(problem, resultLocale)
         },
         samples: await this.problemService.getProblemSamples(problem),
+        additionalFiles: await this.problemService.listProblemFiles(problem, ProblemFileType.AdditionalFile, true),
         judgeInfo,
         submittable,
         discussionCount: await this.discussionService.getDiscussionCountOfProblem(problem),

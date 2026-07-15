@@ -43,6 +43,10 @@ export class ContestAccessGuard implements CanActivate {
       return true;
     }
 
+    if (path === "problem/downloadProblemFiles") {
+      return activeContestIds.has(contestId);
+    }
+
     return false;
   }
 }

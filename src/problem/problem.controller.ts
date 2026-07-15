@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Req } from "@nestjs/common";
+import { Controller, Post, Body, Req, Inject, forwardRef } from "@nestjs/common";
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Recaptcha } from "@nestlab/google-recaptcha";
@@ -19,6 +19,7 @@ import { SubmissionService } from "@/submission/submission.service";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { DiscussionService } from "@/discussion/discussion.service";
+import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 
 import { ProblemFileType } from "./problem-file.entity";
 import { ProblemEntity } from "./problem.entity";
@@ -115,7 +116,9 @@ export class ProblemController {
     private readonly submissionService: SubmissionService,
     private readonly auditService: AuditService,
     private readonly discussionService: DiscussionService,
-    private readonly redisService: RedisService
+    private readonly redisService: RedisService,
+    @Inject(forwardRef(() => ContestService))
+    private readonly contestService: ContestService
   ) {
     this.redis = this.redisService.getClient();
   }
@@ -832,7 +835,17 @@ export class ProblemController {
         error: DownloadProblemFilesResponseError.NO_SUCH_PROBLEM
       };
 
-    if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)))
+    let canDownload = await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View);
+    if (!canDownload && request.contestId && request.contestProblemIndex) {
+      const contest = await this.contestService.findContestById(request.contestId);
+      canDownload =
+        !!contest &&
+        contest.problemIds[request.contestProblemIndex - 1] === problem.id &&
+        this.contestService.isUnveiled(contest, currentUser) &&
+        (await this.contestService.userHasPermission(currentUser, contest, ContestPermissionType.View));
+    }
+
+    if (!canDownload)
       return {
         error: DownloadProblemFilesResponseError.PERMISSION_DENIED
       };
