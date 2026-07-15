@@ -5,7 +5,7 @@ import { CurrentUser } from "@/common/user.decorator";
 import { Locale } from "@/common/locale.type";
 import { DiscussionService } from "@/discussion/discussion.service";
 import { GroupService } from "@/group/group.service";
-import { ProblemService } from "@/problem/problem.service";
+import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { SubmissionService } from "@/submission/submission.service";
 import { UserEntity } from "@/user/user.entity";
@@ -196,6 +196,12 @@ export class ContestController {
     const problem = await this.problemService.findProblemById(problemId);
     if (!problem) return { error: GetContestProblemResponseError.NO_SUCH_PROBLEM };
 
+    const canViewProblemStatistics = await this.problemService.userHasPermission(
+      currentUser,
+      problem,
+      ProblemPermissionType.Modify
+    );
+
     const { locale } = request;
     const resultLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
     const [judgeInfo, submittable] = await this.problemService.getProblemPreprocessedJudgeInfo(problem);
@@ -221,7 +227,7 @@ export class ContestController {
       contest: this.contestService.getContestMeta(contest),
       pid,
       problem: {
-        meta: await this.problemService.getProblemMeta(problem, true),
+        meta: await this.problemService.getProblemMeta(problem, canViewProblemStatistics),
         tagsOfLocale: await this.problemService
           .getProblemTagsByProblem(problem)
           .then(problemTags =>
