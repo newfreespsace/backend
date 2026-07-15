@@ -363,6 +363,10 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
   > {
     const problemTypeService = this.problemTypeFactoryService.type(problem.type);
 
+    if ([ProblemType.Traditional, ProblemType.Interaction].includes(problem.type)) {
+      (content as { skipSamples?: boolean }).skipSamples = true;
+    }
+
     const validationError = await problemTypeService.validateSubmissionContent(content);
     if (validationError && validationError.length > 0) return [validationError, null, null];
 
