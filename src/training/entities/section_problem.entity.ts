@@ -4,9 +4,14 @@ import { ProblemEntity } from "@/problem/problem.entity";
 
 import { SectionEntity } from "./section.entity";
 
+export enum SectionProblemCategory {
+  Example = "Example",
+  Exercise = "Exercise"
+}
+
 @Entity("section_problem")
 @Index(["sectionId", "problemId"], { unique: true })
-@Index(["sectionId", "sortOrder"], { unique: true })
+@Index(["sectionId", "category", "sortOrder"], { unique: true })
 export class SectionProblemEntity {
   @PrimaryGeneratedColumn()
   id: number;
@@ -26,6 +31,9 @@ export class SectionProblemEntity {
   @ManyToOne(() => ProblemEntity, { onDelete: "CASCADE" })
   @JoinColumn({ name: "problemId" })
   problem: Promise<ProblemEntity>;
+
+  @Column({ type: "enum", enum: SectionProblemCategory, default: SectionProblemCategory.Exercise })
+  category: SectionProblemCategory;
 
   @Column()
   sortOrder: number;

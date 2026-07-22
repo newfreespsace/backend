@@ -15,7 +15,7 @@ import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
 import { SectionEntity } from "./entities/section.entity";
-import { SectionProblemEntity } from "./entities/section_problem.entity";
+import { SectionProblemCategory, SectionProblemEntity } from "./entities/section_problem.entity";
 import { GetSectionByIdDto } from "./dto/get-section-by-id.dto";
 import { SectionMetaDto } from "./dto/training-meta.dto";
 import { toSectionMetaDto } from "./training.mapper";
@@ -164,16 +164,25 @@ export class SectionService {
     const section = await this.sectionRepository.findOneBy({ id });
     if (!section) throw new NotFoundException(`section ${id} not found`);
 
+    const categoryOrder: Record<SectionProblemCategory, number> = {
+      [SectionProblemCategory.Example]: 0,
+      [SectionProblemCategory.Exercise]: 1
+    };
     const sectionProblems = await section.problems;
-    sectionProblems.sort((a, b) => a.sortOrder - b.sortOrder);
+    sectionProblems.sort((a, b) => categoryOrder[a.category] - categoryOrder[b.category] || a.sortOrder - b.sortOrder);
 
-    const problems = await Promise.all(sectionProblems.map(sectionProblem => sectionProblem.problem));
-
-    const visibleProblemFlags = await Promise.all(
-      problems.map(problem => this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View))
+    const items = await Promise.all(
+      sectionProblems.map(async sectionProblem => ({ sectionProblem, problem: await sectionProblem.problem }))
     );
 
-    const visibleProblems = problems.filter((_, index) => visibleProblemFlags[index]);
+    const visibleProblemFlags = await Promise.all(
+      items.map(({ problem }) =>
+        this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)
+      )
+    );
+
+    const visibleItems = items.filter((_, index) => visibleProblemFlags[index]);
+    const visibleProblems = visibleItems.map(({ problem }) => problem);
 
     const [acceptedSubmissions, nonAcceptedSubmissions] = currentUser
       ? await Promise.all([
@@ -185,7 +194,7 @@ export class SectionService {
       : [new Map(), new Map()];
 
     const result = await Promise.all(
-      visibleProblems.map(async problem => {
+      visibleItems.map(async ({ sectionProblem, problem }) => {
         const titleLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
 
         const title = await this.problemService.getProblemLocalizedTitle(problem, titleLocale);
@@ -195,6 +204,8 @@ export class SectionService {
         return {
           meta: await this.problemService.getProblemMeta(problem, true),
           title,
+          category: sectionProblem.category,
+          sortOrder: sectionProblem.sortOrder,
           tags:
             !titleOnly &&
             (await Promise.all(
@@ -219,12 +230,12 @@ export class SectionService {
     if (!section) throw new NotFoundException(`section ${sectionId} not found`);
 
     const problemIds = problems.map(problem => problem.problemId);
-    const sortOrders = problems.map(problem => problem.sortOrder);
+    const categorySortOrders = problems.map(problem => `${problem.category}:${problem.sortOrder}`);
 
     if (new Set(problemIds).size !== problemIds.length) {
       throw new BadRequestException("duplicate problemId");
     }
-    if (new Set(sortOrders).size !== sortOrders.length) {
+    if (new Set(categorySortOrders).size !== categorySortOrders.length) {
       throw new BadRequestException("duplicate sortOrder");
     }
 
@@ -241,6 +252,7 @@ export class SectionService {
         manager.create(SectionProblemEntity, {
           sectionId,
           problemId: problem.problemId,
+          category: problem.category,
           sortOrder: problem.sortOrder
         })
       );

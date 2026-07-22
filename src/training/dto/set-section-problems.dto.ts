@@ -1,10 +1,18 @@
+import { ApiProperty } from "@nestjs/swagger";
+
 import { Type } from "class-transformer";
-import { IsArray, IsInt, ValidateNested } from "class-validator";
+import { IsArray, IsEnum, IsInt, ValidateNested } from "class-validator";
+
+import { SectionProblemCategory } from "../entities/section_problem.entity";
 
 class SetSectionProblemItemDto {
   @Type(() => Number)
   @IsInt()
   problemId: number;
+
+  @ApiProperty({ enum: SectionProblemCategory })
+  @IsEnum(SectionProblemCategory)
+  category: SectionProblemCategory;
 
   @Type(() => Number)
   @IsInt()
