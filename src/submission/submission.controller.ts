@@ -77,28 +77,25 @@ export class SubmissionController {
     private readonly contestService: ContestService
   ) {}
 
-  private getHiddenSubmissionStatus(status: SubmissionStatus): SubmissionStatus {
-    return "Submitted" as any;
+  private getHiddenSubmissionStatus(): SubmissionStatus {
+    return "Submitted" as SubmissionStatus;
   }
 
   private sanitizeNoiSubmissionMeta<T extends SubmissionBasicMetaDto>(meta: T): T {
     return {
       ...meta,
       score: null,
-      status: this.getHiddenSubmissionStatus(meta.status),
+      status: this.getHiddenSubmissionStatus(),
       timeUsed: null,
       memoryUsed: null
     };
   }
 
-  private sanitizeNoiSubmissionProgress(
-    progress: SubmissionProgress,
-    metaStatus: SubmissionStatus
-  ): SubmissionProgress {
+  private sanitizeNoiSubmissionProgress(progress: SubmissionProgress): SubmissionProgress {
     if (!progress) return null;
     return {
       progressType: SubmissionProgressType.Finished,
-      status: this.getHiddenSubmissionStatus(metaStatus),
+      status: this.getHiddenSubmissionStatus(),
       score: null
     };
   }
@@ -360,7 +357,6 @@ export class SubmissionController {
       this.userService.findUsersByExistingIds(queryResult.result.map(submission => submission.submitterId))
     ]);
     const pendingSubmissionIds: number[] = [];
-    const hideResultSubmissionIds: number[] = [];
     await Promise.all(
       queryResult.result.map(async (_, i) => {
         const submission = queryResult.result[i];
@@ -394,9 +390,8 @@ export class SubmissionController {
           submissionMetas[i].progressType = progress.progressType;
         }
 
-        if (submission.status === SubmissionStatus.Pending) {
+        if (submission.status === SubmissionStatus.Pending && !hideNoiResult) {
           pendingSubmissionIds.push(submission.id);
-          if (hideNoiResult) hideResultSubmissionIds.push(submission.id);
         }
       })
     );
@@ -408,8 +403,7 @@ export class SubmissionController {
           ? null
           : this.submissionProgressGateway.encodeSubscription({
               type: SubmissionProgressSubscriptionType.Meta,
-              submissionIds: pendingSubmissionIds,
-              hideResultSubmissionIds
+              submissionIds: pendingSubmissionIds
             }),
       hasSmallerId: queryResult.hasSmallerId,
       hasLargerId: queryResult.hasLargerId
@@ -532,7 +526,7 @@ export class SubmissionController {
 
     const visibleMeta = hideNoiResult ? this.sanitizeNoiSubmissionMeta(meta) : meta;
     const visibleProgress = hideNoiResult
-      ? this.sanitizeNoiSubmissionProgress(rawProgress, submission.status)
+      ? this.sanitizeNoiSubmissionProgress(rawProgress)
       : hideTestcaseDetails
       ? this.sanitizeSubmissionTestcaseDetails(rawProgress)
       : rawProgress;
@@ -541,14 +535,14 @@ export class SubmissionController {
       meta: visibleMeta,
       content: submissionDetail.content,
       progress: visibleProgress,
-      progressSubscriptionKey: !pending
-        ? null
-        : this.submissionProgressGateway.encodeSubscription({
-            type: SubmissionProgressSubscriptionType.Detail,
-            submissionIds: [submission.id],
-            hideResultSubmissionIds: hideNoiResult ? [submission.id] : [],
-            hideTestcaseDetailsSubmissionIds: hideTestcaseDetails ? [submission.id] : []
-          }),
+      progressSubscriptionKey:
+        !pending || hideNoiResult
+          ? null
+          : this.submissionProgressGateway.encodeSubscription({
+              type: SubmissionProgressSubscriptionType.Detail,
+              submissionIds: [submission.id],
+              hideTestcaseDetailsSubmissionIds: hideTestcaseDetails ? [submission.id] : []
+            }),
       permissionRejudge,
       permissionCancel,
       permissionSetPublic,

@@ -70,6 +70,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
   private clientLastMessages: Map<string, Map<number, SubmissionProgressMessage>> = new Map();
 
   private clientHiddenResultSubmissionIds: Map<string, Set<number>> = new Map();
+
   private clientHiddenTestcaseDetailsSubmissionIds: Map<string, Set<number>> = new Map();
 
   constructor(
@@ -161,8 +162,8 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     this.rooms.delete(room);
   }
 
-  private getHiddenSubmissionStatus(status: SubmissionStatus): SubmissionStatus {
-    return "Submitted" as any;
+  private getHiddenSubmissionStatus(): SubmissionStatus {
+    return "Submitted" as SubmissionStatus;
   }
 
   private sanitizeMeta(meta: SubmissionBasicMetaDto): SubmissionBasicMetaDto {
@@ -170,17 +171,17 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     return {
       ...meta,
       score: null,
-      status: this.getHiddenSubmissionStatus(meta.status),
+      status: this.getHiddenSubmissionStatus(),
       timeUsed: null,
       memoryUsed: null
     };
   }
 
-  private sanitizeProgress(progress: SubmissionProgress, meta?: SubmissionBasicMetaDto): SubmissionProgress {
+  private sanitizeProgress(progress: SubmissionProgress): SubmissionProgress {
     if (!progress) return progress;
     return {
       progressType: SubmissionProgressType.Finished,
-      status: this.getHiddenSubmissionStatus(meta?.status || progress.status),
+      status: this.getHiddenSubmissionStatus(),
       score: null
     };
   }
@@ -232,7 +233,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
           progressType: message.progressMeta.progressType,
           resultMeta
         },
-        progressDetail: this.sanitizeProgress(message.progressDetail, resultMeta)
+        progressDetail: this.sanitizeProgress(message.progressDetail)
       };
     }
 
@@ -371,8 +372,8 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
 
     if (!isDeleted) {
       // If the progressType is "Finished", it's called after database updated
-      const submission = isFinished && (await this.submissionService.findSubmissionById(submissionId));
-      const basicMeta = isFinished && (await this.submissionService.getSubmissionBasicMeta(submission));
+      const submission = isFinished ? await this.submissionService.findSubmissionById(submissionId) : undefined;
+      const basicMeta = submission ? await this.submissionService.getSubmissionBasicMeta(submission) : undefined;
 
       this.sendMessage(this.getRoom(SubmissionProgressSubscriptionType.Meta, submissionId), submissionId, {
         progressMeta: {
