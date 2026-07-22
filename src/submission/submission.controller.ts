@@ -91,8 +91,7 @@ export class SubmissionController {
     };
   }
 
-  private sanitizeNoiSubmissionProgress(progress: SubmissionProgress): SubmissionProgress {
-    if (!progress) return null;
+  private sanitizeNoiSubmissionProgress(): SubmissionProgress {
     return {
       progressType: SubmissionProgressType.Finished,
       status: this.getHiddenSubmissionStatus(),
@@ -526,7 +525,7 @@ export class SubmissionController {
 
     const visibleMeta = hideNoiResult ? this.sanitizeNoiSubmissionMeta(meta) : meta;
     const visibleProgress = hideNoiResult
-      ? this.sanitizeNoiSubmissionProgress(rawProgress)
+      ? this.sanitizeNoiSubmissionProgress()
       : hideTestcaseDetails
       ? this.sanitizeSubmissionTestcaseDetails(rawProgress)
       : rawProgress;
