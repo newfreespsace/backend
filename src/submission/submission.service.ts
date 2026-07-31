@@ -33,6 +33,7 @@ import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.s
 import { ContestService } from "@/contest/contest.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
+import { ProblemReviewService } from "@/problem-review/problem-review.service";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionContent } from "./submission-content.interface";
@@ -136,7 +137,9 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly userPrivilegeService: UserPrivilegeService,
     @Inject(forwardRef(() => ContestService))
     private readonly contestService: ContestService,
-    private readonly metricsService: MetricsService
+    private readonly metricsService: MetricsService,
+    @Inject(forwardRef(() => ProblemReviewService))
+    private readonly problemReviewService: ProblemReviewService
   ) {
     this.judgeQueueService.registerTaskType(JudgeTaskType.Submission, this);
 
@@ -688,6 +691,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     if (!oldAccepted && newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, 1);
       await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "NON_AC_TO_AC");
+      await this.problemReviewService.onAcceptedSubmission(submission);
     } else if (oldAccepted && !newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, -1);
       await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");

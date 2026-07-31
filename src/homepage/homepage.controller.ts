@@ -10,6 +10,7 @@ import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.s
 import { ProblemService } from "@/problem/problem.service";
 import { SubmissionService } from "@/submission/submission.service";
 import { AuditService } from "@/audit/audit.service";
+import { ProblemReviewService } from "@/problem-review/problem-review.service";
 
 import { HomepageService } from "./homepage.service";
 
@@ -34,7 +35,8 @@ export class HomepageController {
     private readonly discussionService: DiscussionService,
     private readonly problemService: ProblemService,
     private readonly submissionService: SubmissionService,
-    private readonly auditService: AuditService
+    private readonly auditService: AuditService,
+    private readonly problemReviewService: ProblemReviewService
   ) {}
 
   @Get("getHomepage")
@@ -61,7 +63,7 @@ export class HomepageController {
         : (Object.keys(homepageSettings.annnouncements.items)[0] as Locale);
     const annnouncementIds = annnouncementsLocale ? homepageSettings.annnouncements.items[annnouncementsLocale] : [];
 
-    const [annnouncements, topUsers, latestUpdatedProblems] = await Promise.all([
+    const [annnouncements, topUsers, latestUpdatedProblems, reviews] = await Promise.all([
       this.discussionService
         .findDiscussionsByExistingIds(annnouncementIds)
         .then(discussions =>
@@ -97,7 +99,8 @@ export class HomepageController {
             };
           })
         );
-      })()
+      })(),
+      currentUser ? this.problemReviewService.queryDueReviews(currentUser, request.locale, 0, 5) : null
     ]);
 
     return {
@@ -109,7 +112,12 @@ export class HomepageController {
       countdown: homepageSettings.countdown.enabled ? homepageSettings.countdown : null,
       friendLinks: homepageSettings.friendLinks.enabled ? homepageSettings.friendLinks : null,
       topUsers,
-      latestUpdatedProblems
+      latestUpdatedProblems,
+      reviewSummary: reviews && {
+        pendingCount: reviews.count,
+        overdueCount: reviews.overdueCount,
+        items: reviews.result
+      }
     };
   }
 

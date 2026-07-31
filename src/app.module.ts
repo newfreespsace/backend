@@ -35,6 +35,7 @@ import { GalleryModule } from "./gallery/gallery.module";
 import { RequestLogMiddleware } from "./request-log.middleware";
 import { TrainingModule } from "./training/training.module";
 import { ContestAccessGuard } from "./contest/contest-access.guard";
+import { ProblemReviewModule } from "./problem-review/problem-review.module";
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { ContestAccessGuard } from "./contest/contest-access.guard";
     forwardRef(() => MetricsModule),
     forwardRef(() => SiteSettingModule),
     forwardRef(() => GalleryModule),
+    forwardRef(() => ProblemReviewModule),
     TrainingModule
   ],
   controllers: [AppController],

@@ -6,6 +6,7 @@ import { ProblemMetaDto } from "@/problem/dto";
 import { UserMetaDto } from "@/user/dto";
 import { SubmissionBasicMetaDto } from "@/submission/dto";
 import { DiscussionMetaDto } from "@/discussion/dto";
+import { ProblemReviewMetaDto } from "@/problem-review/dto";
 
 import {
   HomepageSettingsCountdown,
@@ -22,6 +23,17 @@ export class GetHomepageResponseProblemDto {
 
   @ApiProperty()
   submission: SubmissionBasicMetaDto;
+}
+
+export class GetHomepageResponseReviewSummaryDto {
+  @ApiProperty()
+  pendingCount: number;
+
+  @ApiProperty()
+  overdueCount: number;
+
+  @ApiProperty({ type: [ProblemReviewMetaDto] })
+  items: ProblemReviewMetaDto[];
 }
 
 export class GetHomepageResponseDto {
@@ -51,4 +63,7 @@ export class GetHomepageResponseDto {
 
   @ApiProperty({ type: [GetHomepageResponseProblemDto] })
   latestUpdatedProblems: GetHomepageResponseProblemDto[];
+
+  @ApiProperty()
+  reviewSummary?: GetHomepageResponseReviewSummaryDto;
 }
