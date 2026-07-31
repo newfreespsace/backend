@@ -4,7 +4,7 @@ export interface ProblemReviewScheduleItem {
 }
 
 export const PROBLEM_REVIEW_SCHEDULE: ProblemReviewScheduleItem[] = [
-  { availableAfterDays: 1, overdueAfterDays: 2 },
+  { availableAfterDays: 0, overdueAfterDays: 2 },
   { availableAfterDays: 3, overdueAfterDays: 5 },
   { availableAfterDays: 7, overdueAfterDays: 10 },
   { availableAfterDays: 14, overdueAfterDays: 21 }

@@ -1,10 +1,12 @@
-import { Injectable } from "@nestjs/common";
+import { forwardRef, Inject, Injectable } from "@nestjs/common";
 
 import { InjectRepository } from "@nestjs/typeorm";
 
-import { Repository } from "typeorm";
+import { In, Repository } from "typeorm";
 
 import { Locale } from "@/common/locale.type";
+import { ContestEntity } from "@/contest/contest.entity";
+import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
@@ -24,6 +26,8 @@ export class ProblemReviewService {
     private readonly problemReviewRepository: Repository<ProblemReviewEntity>,
     @InjectRepository(SubmissionEntity)
     private readonly submissionRepository: Repository<SubmissionEntity>,
+    @Inject(forwardRef(() => ContestService))
+    private readonly contestService: ContestService,
     private readonly problemService: ProblemService
   ) {}
 
@@ -70,11 +74,14 @@ export class ProblemReviewService {
 
       const now = new Date();
       const window = this.calculateReviewWindow(now, 0);
+      const hasContestContext = !!submission.contestId && !!submission.contestProblemIndex;
       const newReview = this.problemReviewRepository.create({
         userId: submission.submitterId,
         problemId: submission.problemId,
         completedReviewCount: 0,
         firstAcceptedSubmissionId: submission.id,
+        sourceContestId: hasContestContext ? submission.contestId : null,
+        sourceContestProblemIndex: hasContestContext ? submission.contestProblemIndex : null,
         firstAcceptedAt: now,
         lastReviewedAt: null,
         availableAt: window.availableAt,
@@ -165,13 +172,58 @@ export class ProblemReviewService {
       .getMany();
 
     const problems = await this.problemService.findProblemsByExistingIds(reviews.map(review => review.problemId));
+    const legacySubmissionIds = reviews
+      .filter(review => !review.sourceContestId || !review.sourceContestProblemIndex)
+      .map(review => review.firstAcceptedSubmissionId);
+    const legacySubmissions =
+      legacySubmissionIds.length === 0
+        ? []
+        : await this.submissionRepository.findBy({
+            id: In(legacySubmissionIds)
+          });
+    const legacySubmissionMap = new Map(legacySubmissions.map(submission => [submission.id, submission]));
+    const contestMap = new Map<number, Promise<ContestEntity>>();
+    const contestPermissionMap = new Map<number, Promise<boolean>>();
+
+    const getContest = (contestId: number): Promise<ContestEntity> => {
+      if (!contestMap.has(contestId)) contestMap.set(contestId, this.contestService.findContestById(contestId));
+      return contestMap.get(contestId);
+    };
+    const canViewContest = (contestId: number): Promise<boolean> => {
+      if (!contestPermissionMap.has(contestId))
+        contestPermissionMap.set(
+          contestId,
+          getContest(contestId).then(
+            async contest =>
+              !!contest &&
+              this.contestService.isUnveiled(contest, user) &&
+              (await this.contestService.userHasPermission(user, contest, ContestPermissionType.View))
+          )
+        );
+      return contestPermissionMap.get(contestId);
+    };
+
     const visibleRows = (
       await Promise.all(
         reviews.map(async (review, index) => {
           const problem = problems[index];
-          if (!problem || !(await this.problemService.userHasPermission(user, problem, ProblemPermissionType.View)))
-            return null;
-          return { review, problem };
+          if (!problem) return null;
+
+          const firstAcceptedSubmission = legacySubmissionMap.get(review.firstAcceptedSubmissionId);
+          const hasStoredContestContext = !!review.sourceContestId && !!review.sourceContestProblemIndex;
+          const contestId = hasStoredContestContext ? review.sourceContestId : firstAcceptedSubmission?.contestId;
+          const contestProblemIndex = hasStoredContestContext
+            ? review.sourceContestProblemIndex
+            : firstAcceptedSubmission?.contestProblemIndex;
+
+          if (contestId && contestProblemIndex) {
+            const contest = await getContest(contestId);
+            if (contest?.problemIds[contestProblemIndex - 1] === problem.id && (await canViewContest(contestId)))
+              return { review, problem, contestId, contestProblemIndex };
+          }
+
+          if (!(await this.problemService.userHasPermission(user, problem, ProblemPermissionType.View))) return null;
+          return { review, problem, contestId: null, contestProblemIndex: null };
         })
       )
     ).filter(row => row);
@@ -179,11 +231,13 @@ export class ProblemReviewService {
     const overdueCount = visibleRows.filter(({ review }) => review.dueAt.getTime() < now.getTime()).length;
     const selectedRows = visibleRows.slice(skipCount, skipCount + takeCount);
     const result = await Promise.all(
-      selectedRows.map(async ({ review, problem }): Promise<ProblemReviewMetaDto> => {
+      selectedRows.map(async ({ review, problem, contestId, contestProblemIndex }): Promise<ProblemReviewMetaDto> => {
         const titleLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
         return {
           problem: await this.problemService.getProblemMeta(problem),
           title: await this.problemService.getProblemLocalizedTitle(problem, titleLocale),
+          contestId: contestId || undefined,
+          contestProblemIndex: contestProblemIndex || undefined,
           reviewNumber: review.completedReviewCount + 1,
           totalReviewCount: PROBLEM_REVIEW_COUNT,
           availableAt: review.availableAt,

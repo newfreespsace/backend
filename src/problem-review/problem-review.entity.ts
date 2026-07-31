@@ -31,6 +31,12 @@ export class ProblemReviewEntity {
   @Column({ type: "integer" })
   firstAcceptedSubmissionId: number;
 
+  @Column({ type: "integer", nullable: true })
+  sourceContestId: number;
+
+  @Column({ type: "integer", nullable: true })
+  sourceContestProblemIndex: number;
+
   @Column({ type: "datetime" })
   firstAcceptedAt: Date;
 

@@ -9,6 +9,12 @@ export class ProblemReviewMetaDto {
   @ApiProperty()
   title: string;
 
+  @ApiProperty({ required: false })
+  contestId?: number;
+
+  @ApiProperty({ required: false })
+  contestProblemIndex?: number;
+
   @ApiProperty()
   reviewNumber: number;
 
