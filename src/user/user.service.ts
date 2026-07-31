@@ -265,6 +265,9 @@ export class UserService {
     takeCount: number
   ): Promise<[users: UserEntity[], count: number]> {
     return await this.userRepository.findAndCount({
+      where: {
+        isAdmin: false
+      },
       order: {
         [sortBy]: "DESC"
       },
@@ -331,9 +334,11 @@ export class UserService {
       (await this.userRepository.countBy(
         this.configService.config.preference.misc.sortUserByRating
           ? {
+              isAdmin: false,
               rating: MoreThan(user.rating)
             }
           : {
+              isAdmin: false,
               acceptedProblemCount: MoreThan(user.acceptedProblemCount)
             }
       ))
