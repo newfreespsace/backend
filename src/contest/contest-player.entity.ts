@@ -1,9 +1,15 @@
 import { Entity, PrimaryGeneratedColumn, Index, ManyToOne, Column, JoinColumn } from "typeorm";
 
 import { SubmissionStatus } from "@/submission/submission-status.enum";
+import type { ContestSubmissionPhase } from "@/submission/submission.entity";
 import { UserEntity } from "@/user/user.entity";
 
 import { ContestEntity } from "./contest.entity";
+
+export enum ContestRanklistScope {
+  Official = "official",
+  Combined = "combined"
+}
 
 export interface ContestPlayerScoreDetail {
   score?: number;
@@ -18,6 +24,7 @@ export interface ContestPlayerScoreDetail {
       accepted?: boolean;
       compiled?: boolean;
       time: string;
+      contestPhase?: ContestSubmissionPhase;
     }
   >;
   accepted?: boolean;
@@ -27,7 +34,7 @@ export interface ContestPlayerScoreDetail {
 }
 
 @Entity("contest_player")
-@Index(["contestId", "userId"], { unique: true })
+@Index(["contestId", "userId", "ranklistScope"], { unique: true })
 export class ContestPlayerEntity {
   @PrimaryGeneratedColumn()
   id: number;
@@ -47,6 +54,10 @@ export class ContestPlayerEntity {
   @Column()
   @Index()
   userId: number;
+
+  @Column({ type: "enum", enum: ContestRanklistScope, default: ContestRanklistScope.Official })
+  @Index()
+  ranklistScope: ContestRanklistScope;
 
   @Column({ type: "integer" })
   score: number;

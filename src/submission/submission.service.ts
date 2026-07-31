@@ -39,7 +39,7 @@ import { SubmissionProgress, SubmissionProgressType } from "./submission-progres
 import { SubmissionContent } from "./submission-content.interface";
 import { SubmissionProgressService, SubmissionEventType } from "./submission-progress.service";
 import { SubmissionStatisticsService } from "./submission-statistics.service";
-import { SubmissionEntity } from "./submission.entity";
+import { ContestSubmissionPhase, SubmissionEntity } from "./submission.entity";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
 import { SubmissionStatus } from "./submission-status.enum";
 
@@ -352,7 +352,9 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     content: SubmissionContent,
     uploadInfo: FileUploadInfoDto,
     contestId?: number,
-    contestProblemIndex?: number
+    contestProblemIndex?: number,
+    contestPhase?: ContestSubmissionPhase,
+    submitTime = new Date()
   ): Promise<
     [
       errors: ValidationError[],
@@ -403,10 +405,11 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       submission.answerSize = pair.answerSize;
       submission.score = null;
       submission.status = SubmissionStatus.Pending;
-      submission.submitTime = new Date();
+      submission.submitTime = submitTime;
       submission.problemId = problem.id;
       submission.contestId = contestId || null;
       submission.contestProblemIndex = contestProblemIndex || null;
+      submission.contestPhase = contestPhase || null;
       submission.submitterId = submitter.id;
       await transactionalEntityManager.save(submission);
 
@@ -442,6 +445,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       isPublic: submission.isPublic,
       contestId: submission.contestId,
       contestProblemIndex: submission.contestProblemIndex,
+      contestPhase: submission.contestPhase,
       codeLanguage: submission.codeLanguage,
       answerSize: submission.answerSize,
       score: submission.score,

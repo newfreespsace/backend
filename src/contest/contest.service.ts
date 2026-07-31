@@ -7,14 +7,15 @@ import { Locale } from "@/common/locale.type";
 import { GroupService } from "@/group/group.service";
 import { ProblemEntity } from "@/problem/problem.entity";
 import { ProblemService } from "@/problem/problem.service";
-import { SubmissionEntity } from "@/submission/submission.entity";
+import { ContestSubmissionPhase, SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { UserEntity } from "@/user/user.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
 import { UserService } from "@/user/user.service";
 
 import { ContestEntity, ContestType } from "./contest.entity";
-import { ContestPlayerEntity, ContestPlayerScoreDetail } from "./contest-player.entity";
+import { ContestSubmissionState } from "./contest-submission-state.enum";
+import { ContestPlayerEntity, ContestPlayerScoreDetail, ContestRanklistScope } from "./contest-player.entity";
 
 import { ContestMetaDto, ContestProblemDto, ContestRanklistRowDto, SaveContestRequestDto } from "./dto";
 
@@ -25,6 +26,8 @@ export enum ContestPermissionType {
   ViewRanklist = "ViewRanklist",
   ViewStatistics = "ViewStatistics"
 }
+
+export const POST_CONTEST_SUBMISSION_DELAY_MS = 10 * 60 * 1000;
 
 @Injectable()
 export class ContestService {
@@ -181,6 +184,24 @@ export class ContestService {
     return now >= contest.endTime;
   }
 
+  getPostContestSubmissionOpenTime(contest: ContestEntity): Date {
+    return new Date(contest.endTime.getTime() + POST_CONTEST_SUBMISSION_DELAY_MS);
+  }
+
+  getSubmissionState(contest: ContestEntity, now = new Date()): ContestSubmissionState {
+    if (now < contest.startTime) return ContestSubmissionState.NotStarted;
+    if (this.isRunning(contest, now)) return ContestSubmissionState.Official;
+    if (now < this.getPostContestSubmissionOpenTime(contest)) return ContestSubmissionState.Cooldown;
+    return ContestSubmissionState.PostContest;
+  }
+
+  getSubmissionPhase(contest: ContestEntity, now = new Date()): ContestSubmissionPhase | null {
+    const state = this.getSubmissionState(contest, now);
+    if (state === ContestSubmissionState.Official) return ContestSubmissionPhase.Official;
+    if (state === ContestSubmissionState.PostContest) return ContestSubmissionPhase.PostContest;
+    return null;
+  }
+
   isUnveiled(contest: ContestEntity, user: UserEntity): boolean {
     return this.isManagerSync(user, contest) || new Date() >= contest.startTime;
   }
@@ -253,18 +274,23 @@ export class ContestService {
     contest: ContestEntity,
     locale: Locale,
     user: UserEntity,
-    includeStatistics: boolean
+    includeStatistics: boolean,
+    ranklistScope = ContestRanklistScope.Official
   ): Promise<ContestProblemDto[]> {
+    if (ranklistScope === ContestRanklistScope.Combined) await this.ensureCombinedRanklist(contest);
     const problems = (await this.problemService.findProblemsByExistingIds(contest.problemIds)).filter(
       problem => problem
     );
     const player = user
       ? await this.contestPlayerRepository.findOneBy({
           contestId: contest.id,
-          userId: user.id
+          userId: user.id,
+          ranklistScope
         })
       : null;
-    const players = includeStatistics ? await this.contestPlayerRepository.findBy({ contestId: contest.id }) : [];
+    const players = includeStatistics
+      ? await this.contestPlayerRepository.findBy({ contestId: contest.id, ranklistScope })
+      : [];
     const hideNoiResult = await this.shouldHideNoiResult(user, contest);
 
     return await Promise.all(
@@ -329,36 +355,46 @@ export class ContestService {
     return statistics;
   }
 
-  async getRanklistRows(contest: ContestEntity, currentUser: UserEntity): Promise<ContestRanklistRowDto[]> {
-    const players = await this.contestPlayerRepository.findBy({ contestId: contest.id });
-    const rows = await Promise.all(
-      players.map(async player => {
-        const scoreDetails = this.cloneScoreDetails(player.scoreDetails);
+  async getRanklistRows(
+    contest: ContestEntity,
+    currentUser: UserEntity,
+    ranklistScope = ContestRanklistScope.Official
+  ): Promise<ContestRanklistRowDto[]> {
+    if (ranklistScope === ContestRanklistScope.Combined) await this.ensureCombinedRanklist(contest);
+    const players = await this.contestPlayerRepository.findBy({ contestId: contest.id, ranklistScope });
+    const rows = (
+      await Promise.all(
+        players.map(async player => {
+          const user = await this.userService.findUserById(player.userId);
+          if (!user || (await this.userHasPermission(user, contest, ContestPermissionType.Manage))) return null;
 
-        let { score, timeSpent } = player;
+          const scoreDetails = this.cloneScoreDetails(player.scoreDetails);
 
-        if (contest.type !== ContestType.ACM) {
-          score = 0;
-          let latest = 0;
-          for (const [problemId, detail] of Object.entries(scoreDetails)) {
-            const weightedScore = Math.round((detail.score || 0) * this.getRankingMultiplier(contest, problemId));
-            detail.weightedScore = weightedScore;
-            score += weightedScore;
-            const time = this.getElapsedSeconds(contest, detail.submissions?.[detail.submissionId]?.time);
-            latest = Math.max(latest, time);
+          let { score, timeSpent } = player;
+
+          if (contest.type !== ContestType.ACM) {
+            score = 0;
+            let latest = 0;
+            for (const [problemId, detail] of Object.entries(scoreDetails)) {
+              const weightedScore = Math.round((detail.score || 0) * this.getRankingMultiplier(contest, problemId));
+              detail.weightedScore = weightedScore;
+              score += weightedScore;
+              const time = this.getElapsedSeconds(contest, detail.submissions?.[detail.submissionId]?.time);
+              latest = Math.max(latest, time);
+            }
+            timeSpent = latest;
           }
-          timeSpent = latest;
-        }
 
-        return {
-          rank: 0,
-          user: await this.userService.getUserMeta(await this.userService.findUserById(player.userId), currentUser),
-          score,
-          timeSpent,
-          scoreDetails
-        };
-      })
-    );
+          return {
+            rank: 0,
+            user: await this.userService.getUserMeta(user, currentUser),
+            score,
+            timeSpent,
+            scoreDetails
+          };
+        })
+      )
+    ).filter((row): row is ContestRanklistRowDto => !!row);
 
     rows.sort((a, b) => {
       if (a.score !== b.score) return b.score - a.score;
@@ -382,10 +418,20 @@ export class ContestService {
     const contest = await this.findContestById(relatedSubmission.contestId);
     if (!contest) return;
 
-    await this.rebuildPlayerScore(contest, relatedSubmission.submitterId);
+    const affectsOfficial = [oldSubmission, submission].some(
+      item => item && (!item.contestPhase || item.contestPhase === ContestSubmissionPhase.Official)
+    );
+    const scopes = affectsOfficial
+      ? [ContestRanklistScope.Official, ContestRanklistScope.Combined]
+      : [ContestRanklistScope.Combined];
+    await Promise.all(scopes.map(scope => this.rebuildPlayerScore(contest, relatedSubmission.submitterId, scope)));
   }
 
-  private async rebuildPlayerScore(contest: ContestEntity, userId: number): Promise<void> {
+  private async rebuildPlayerScore(
+    contest: ContestEntity,
+    userId: number,
+    ranklistScope: ContestRanklistScope
+  ): Promise<void> {
     const submissions = await this.submissionRepository.find({
       where: {
         contestId: contest.id,
@@ -398,12 +444,15 @@ export class ContestService {
       }
     });
     const validSubmissions = submissions.filter(
-      submission => contest.problemIds[submission.contestProblemIndex - 1] === submission.problemId
+      submission =>
+        contest.problemIds[submission.contestProblemIndex - 1] === submission.problemId &&
+        this.isSubmissionInRanklistScope(submission, ranklistScope)
     );
 
     let player = await this.contestPlayerRepository.findOneBy({
       contestId: contest.id,
-      userId
+      userId,
+      ranklistScope
     });
 
     if (validSubmissions.length === 0) {
@@ -415,6 +464,7 @@ export class ContestService {
       player = new ContestPlayerEntity();
       player.contestId = contest.id;
       player.userId = userId;
+      player.ranklistScope = ranklistScope;
     }
 
     player.score = 0;
@@ -422,17 +472,52 @@ export class ContestService {
     player.scoreDetails = {};
 
     for (const submission of validSubmissions) {
-      this.applySubmissionToPlayer(contest, player, submission);
+      this.applySubmissionToPlayer(contest, player, submission, ranklistScope);
     }
 
     this.recalculatePlayerSummary(contest, player);
-    await this.contestPlayerRepository.save(player);
+    await this.contestPlayerRepository.upsert(player, ["contestId", "userId", "ranklistScope"]);
+  }
+
+  private async ensureCombinedRanklist(contest: ContestEntity): Promise<void> {
+    const [submissions, players] = await Promise.all([
+      this.submissionRepository.find({
+        select: { submitterId: true },
+        where: {
+          contestId: contest.id,
+          status: Not(In([SubmissionStatus.Pending, SubmissionStatus.Canceled]))
+        }
+      }),
+      this.contestPlayerRepository.find({
+        select: { userId: true },
+        where: {
+          contestId: contest.id,
+          ranklistScope: ContestRanklistScope.Combined
+        }
+      })
+    ]);
+    const existingUserIds = new Set(players.map(player => player.userId));
+    const missingUserIds = Array.from(new Set(submissions.map(submission => submission.submitterId))).filter(
+      userId => !existingUserIds.has(userId)
+    );
+    await Promise.all(
+      missingUserIds.map(userId => this.rebuildPlayerScore(contest, userId, ContestRanklistScope.Combined))
+    );
+  }
+
+  private isSubmissionInRanklistScope(submission: SubmissionEntity, ranklistScope: ContestRanklistScope): boolean {
+    return (
+      ranklistScope === ContestRanklistScope.Combined ||
+      !submission.contestPhase ||
+      submission.contestPhase === ContestSubmissionPhase.Official
+    );
   }
 
   private applySubmissionToPlayer(
     contest: ContestEntity,
     player: ContestPlayerEntity,
-    submission: SubmissionEntity
+    submission: SubmissionEntity,
+    ranklistScope: ContestRanklistScope
   ): void {
     if (!submission.contestId) return;
 
@@ -447,11 +532,12 @@ export class ContestService {
       score: submission.score,
       accepted: submission.status === SubmissionStatus.Accepted,
       compiled: submission.score != null,
-      time: submission.submitTime.toISOString()
+      time: submission.submitTime.toISOString(),
+      contestPhase: submission.contestPhase || ContestSubmissionPhase.Official
     };
 
     if (contest.type === ContestType.IOI) this.updateIoiDetail(detail);
-    else if (contest.type === ContestType.NOI) this.updateNoiDetail(detail);
+    else if (contest.type === ContestType.NOI) this.updateNoiDetail(detail, ranklistScope);
     else this.updateAcmDetail(detail);
 
     player.scoreDetails[problemId] = detail;
@@ -469,12 +555,15 @@ export class ContestService {
     detail.score = best.score || 0;
   }
 
-  private updateNoiDetail(detail: ContestPlayerScoreDetail): void {
+  private updateNoiDetail(detail: ContestPlayerScoreDetail, ranklistScope: ContestRanklistScope): void {
     const submissions = Object.values(detail.submissions).sort((a, b) => this.compareSubmissionSummary(a, b));
-    const latest = submissions[submissions.length - 1];
-    detail.submissionId = latest.submissionId;
-    detail.score = latest.score || 0;
-    detail.status = latest.status;
+    const selected =
+      ranklistScope === ContestRanklistScope.Combined
+        ? submissions.reduce((best, item) => ((item.score || 0) > (best.score || 0) ? item : best))
+        : submissions[submissions.length - 1];
+    detail.submissionId = selected.submissionId;
+    detail.score = selected.score || 0;
+    detail.status = selected.status;
   }
 
   private updateAcmDetail(detail: ContestPlayerScoreDetail): void {

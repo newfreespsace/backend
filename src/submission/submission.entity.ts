@@ -6,6 +6,11 @@ import { ProblemEntity } from "@/problem/problem.entity";
 import { SubmissionStatus } from "./submission-status.enum";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
 
+export enum ContestSubmissionPhase {
+  Official = "official",
+  PostContest = "post_contest"
+}
+
 @Entity("submission")
 @Index(["isPublic", "problemId", "submitterId", "status", "codeLanguage"])
 @Index(["isPublic", "problemId", "status", "codeLanguage"])
@@ -76,6 +81,10 @@ export class SubmissionEntity {
 
   @Column({ type: "integer", nullable: true })
   contestProblemIndex: number;
+
+  @Column({ type: "enum", enum: ContestSubmissionPhase, nullable: true })
+  @Index()
+  contestPhase: ContestSubmissionPhase;
 
   @ManyToOne(() => UserEntity)
   @JoinColumn()

@@ -6,6 +6,7 @@ import { UserMetaDto } from "@/user/dto";
 
 import { SubmissionStatus } from "../submission-status.enum";
 import { SubmissionProgressType } from "../submission-progress.interface";
+import { ContestSubmissionPhase } from "../submission.entity";
 
 // The basic meta doesn't contains information obtained from related database tables, such as problem and submitter meta
 export class SubmissionBasicMetaDto {
@@ -20,6 +21,9 @@ export class SubmissionBasicMetaDto {
 
   @ApiProperty()
   contestProblemIndex?: number;
+
+  @ApiProperty({ enum: ContestSubmissionPhase })
+  contestPhase?: ContestSubmissionPhase;
 
   @ApiProperty()
   codeLanguage: string;

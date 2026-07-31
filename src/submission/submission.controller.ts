@@ -15,11 +15,12 @@ import { FileService } from "@/file/file.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
 import { ContestPermissionType, ContestService } from "@/contest/contest.service";
 import { ContestEntity } from "@/contest/contest.entity";
+import { ContestSubmissionState } from "@/contest/contest-submission-state.enum";
 import { SiteSettingService } from "@/site-setting/site-setting.service";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionStatus } from "./submission-status.enum";
-import { SubmissionEntity } from "./submission.entity";
+import { ContestSubmissionPhase, SubmissionEntity } from "./submission.entity";
 import { SubmissionStatisticsService } from "./submission-statistics.service";
 import { SubmissionProgressService } from "./submission-progress.service";
 import { SubmissionProgressGateway, SubmissionProgressSubscriptionType } from "./submission-progress.gateway";
@@ -189,6 +190,8 @@ export class SubmissionController {
           error: SubmitResponseError.NO_SUCH_PROBLEM
         };
 
+      const submitTime = new Date();
+      let contestPhase: ContestSubmissionPhase = null;
       if (request.contestId != null) {
         const contest = await this.contestService.findContestById(request.contestId);
         if (!contest) return { error: SubmitResponseError.NO_SUCH_CONTEST };
@@ -199,7 +202,16 @@ export class SubmissionController {
         if (!request.contestProblemIndex || contest.problemIds[request.contestProblemIndex - 1] !== problem.id)
           return { error: SubmitResponseError.NO_SUCH_PROBLEM };
 
-        if (!this.contestService.isRunning(contest)) return { error: SubmitResponseError.CONTEST_NOT_RUNNING };
+        contestPhase = this.contestService.getSubmissionPhase(contest, submitTime);
+        if (!contestPhase) {
+          const state = this.contestService.getSubmissionState(contest, submitTime);
+          return {
+            error:
+              state === ContestSubmissionState.Cooldown
+                ? SubmitResponseError.POST_CONTEST_SUBMISSION_NOT_OPEN
+                : SubmitResponseError.CONTEST_NOT_RUNNING
+          };
+        }
       } else {
         // TODO: add "submit" permission
         if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)))
@@ -220,7 +232,9 @@ export class SubmissionController {
         request.content,
         request.uploadInfo,
         request.contestId,
-        request.contestProblemIndex
+        request.contestProblemIndex,
+        contestPhase,
+        submitTime
       );
 
       if (validationError && validationError.length > 0) throw new BadRequestException(validationError);
@@ -366,6 +380,7 @@ export class SubmissionController {
           isPublic: submission.isPublic,
           contestId: submission.contestId,
           contestProblemIndex: submission.contestProblemIndex,
+          contestPhase: submission.contestPhase,
           codeLanguage: submission.codeLanguage,
           answerSize: submission.answerSize,
           score: submission.score,
@@ -502,6 +517,7 @@ export class SubmissionController {
       isPublic: submission.isPublic,
       contestId: submission.contestId,
       contestProblemIndex: submission.contestProblemIndex,
+      contestPhase: submission.contestPhase,
       codeLanguage: submission.codeLanguage,
       answerSize: submission.answerSize,
       score: submission.score,

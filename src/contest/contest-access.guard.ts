@@ -31,7 +31,11 @@ export class ContestAccessGuard implements CanActivate {
 
     if (path === "contest/queryContests") return true;
 
-    if (path === "contest/getContest" || path === "contest/getContestProblem") {
+    if (
+      path === "contest/getContest" ||
+      path === "contest/getContestProblem" ||
+      path === "contest/getContestRanklist"
+    ) {
       return activeContestIds.has(contestId);
     }
 

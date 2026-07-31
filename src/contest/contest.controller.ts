@@ -2,7 +2,6 @@ import { Body, Controller, Inject, Post, forwardRef } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
-import { Locale } from "@/common/locale.type";
 import { DiscussionService } from "@/discussion/discussion.service";
 import { GroupService } from "@/group/group.service";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
@@ -13,6 +12,8 @@ import { UserEntity } from "@/user/user.entity";
 import { UserService } from "@/user/user.service";
 
 import { ContestPermissionType, ContestService } from "./contest.service";
+import { ContestSubmissionState } from "./contest-submission-state.enum";
+import { ContestRanklistScope } from "./contest-player.entity";
 
 import {
   GetContestRanklistRequestDto,
@@ -113,12 +114,19 @@ export class ContestController {
       ContestPermissionType.ViewStatistics
     );
     const unveiled = this.contestService.isUnveiled(contest, currentUser);
+    const submissionState = this.contestService.getSubmissionState(contest);
+    const ranklistScope =
+      submissionState === ContestSubmissionState.PostContest
+        ? ContestRanklistScope.Combined
+        : ContestRanklistScope.Official;
 
     const [holder, group, admins, problems] = await Promise.all([
       this.userService.findUserById(contest.holderId),
       contest.groupId ? this.groupService.findGroupById(contest.groupId) : null,
       this.userService.findUsersByExistingIds(contest.adminIds),
-      unveiled ? this.contestService.getContestProblems(contest, request.locale, currentUser, viewStatistics) : []
+      unveiled
+        ? this.contestService.getContestProblems(contest, request.locale, currentUser, viewStatistics, ranklistScope)
+        : []
     ]);
 
     return {
@@ -131,7 +139,11 @@ export class ContestController {
         manage,
         viewRanklist,
         viewStatistics,
-        unveiled
+        unveiled,
+        canSubmit:
+          submissionState === ContestSubmissionState.Official || submissionState === ContestSubmissionState.PostContest,
+        submissionState,
+        postContestOpensAt: this.contestService.getPostContestSubmissionOpenTime(contest)
       }
     };
   }
@@ -159,11 +171,21 @@ export class ContestController {
     if (!contest) return { error: GetContestRanklistResponseError.NO_SUCH_CONTEST };
     if (!(await this.contestService.userHasPermission(currentUser, contest, ContestPermissionType.ViewRanklist)))
       return { error: GetContestRanklistResponseError.PERMISSION_DENIED };
+    const ranklistScope = request.ranklistScope || ContestRanklistScope.Official;
+    if (ranklistScope === ContestRanklistScope.Combined && !this.contestService.isEnded(contest))
+      return { error: GetContestRanklistResponseError.PERMISSION_DENIED };
 
     return {
       meta: this.contestService.getContestMeta(contest),
-      problems: await this.contestService.getContestProblems(contest, request.locale, currentUser, false),
-      rows: await this.contestService.getRanklistRows(contest, currentUser)
+      problems: await this.contestService.getContestProblems(
+        contest,
+        request.locale,
+        currentUser,
+        false,
+        ranklistScope
+      ),
+      rows: await this.contestService.getRanklistRows(contest, currentUser, ranklistScope),
+      ranklistScope
     };
   }
 
@@ -217,6 +239,7 @@ export class ContestController {
         ])
       : [null, null];
     const hideNoiResult = await this.contestService.shouldHideNoiResult(currentUser, contest);
+    const submissionState = this.contestService.getSubmissionState(contest);
     const effectiveLastAcceptedSubmission =
       lastSubmission && lastSubmission.status === SubmissionStatus.Accepted ? lastSubmission : lastAcceptedSubmission;
     const lastSubmissionMeta = lastSubmission && (await this.submissionService.getSubmissionBasicMeta(lastSubmission));
@@ -250,7 +273,7 @@ export class ContestController {
               lastSubmission: hideNoiResult
                 ? lastSubmissionMeta && {
                     ...lastSubmissionMeta,
-                    status: "Submitted" as any,
+                    status: "Submitted" as any, // eslint-disable-line @typescript-eslint/no-explicit-any
                     score: null,
                     timeUsed: null,
                     memoryUsed: null
@@ -263,7 +286,11 @@ export class ContestController {
       permissions: {
         manageContest: isManager,
         running: this.contestService.isRunning(contest),
-        ended: this.contestService.isEnded(contest)
+        ended: this.contestService.isEnded(contest),
+        canSubmit:
+          submissionState === ContestSubmissionState.Official || submissionState === ContestSubmissionState.PostContest,
+        submissionState,
+        postContestOpensAt: this.contestService.getPostContestSubmissionOpenTime(contest)
       }
     };
   }

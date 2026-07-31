@@ -1,10 +1,13 @@
 import { ApiProperty } from "@nestjs/swagger";
 
+import { ContestMetaDto } from "./contest-meta.dto";
+
+import { ContestProblemDto } from "./contest-problem.dto";
+
 import { GroupMetaDto } from "@/group/dto";
 import { UserMetaDto } from "@/user/dto";
 
-import { ContestMetaDto } from "./contest-meta.dto";
-import { ContestProblemDto } from "./contest-problem.dto";
+import { ContestSubmissionState } from "../contest-submission-state.enum";
 
 export enum GetContestResponseError {
   NO_SUCH_CONTEST = "NO_SUCH_CONTEST",
@@ -36,5 +39,8 @@ export class GetContestResponseDto {
     viewRanklist: boolean;
     viewStatistics: boolean;
     unveiled: boolean;
+    canSubmit: boolean;
+    submissionState: ContestSubmissionState;
+    postContestOpensAt: Date;
   };
 }

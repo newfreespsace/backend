@@ -7,6 +7,7 @@ export enum SubmitResponseError {
   NO_SUCH_PROBLEM = "NO_SUCH_PROBLEM",
   NO_SUCH_CONTEST = "NO_SUCH_CONTEST",
   CONTEST_NOT_RUNNING = "CONTEST_NOT_RUNNING",
+  POST_CONTEST_SUBMISSION_NOT_OPEN = "POST_CONTEST_SUBMISSION_NOT_OPEN",
   FILE_TOO_LARGE = "FILE_TOO_LARGE",
 
   // Below only happen when user uploaded the file and call this API twice.
