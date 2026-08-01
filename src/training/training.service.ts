@@ -4,6 +4,8 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 
 import { UserEntity } from "@/user/user.entity";
+import { UserService } from "@/user/user.service";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 
 import { CreateTrainingDto } from "./dto/create-training.dto";
 import { QueryTrainingSetResponseDto } from "./dto/query-training-set-response.dto";
@@ -13,6 +15,7 @@ import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toTrainingMetaDto } from "./training.mapper";
 import { TrainingProgressService } from "./training-progress.service";
+import { QueryTrainingRanklistResponseDto } from "./dto/query-training-ranklist.dto";
 
 interface ReorderItem {
   id: number;
@@ -28,7 +31,8 @@ export class TrainingService {
     @InjectRepository(UserEntity)
     private readonly userRepository: Repository<UserEntity>,
 
-    private readonly trainingProgressService: TrainingProgressService
+    private readonly trainingProgressService: TrainingProgressService,
+    private readonly userService: UserService
   ) {}
 
   async queryTrainingSet(currentUser: UserEntity): Promise<QueryTrainingSetResponseDto> {
@@ -82,6 +86,111 @@ export class TrainingService {
       ...toTrainingMetaDto(training),
       ...trainingProgress.get(training.id),
       chapters: chapters.map(chapter => ({ ...toChapterMetaDto(chapter), ...chapterProgress.get(chapter.id) }))
+    };
+  }
+
+  async queryTrainingRanklist(
+    trainingId: number,
+    skipCount: number,
+    takeCount: number,
+    currentUser: UserEntity
+  ): Promise<QueryTrainingRanklistResponseDto> {
+    const training = await this.trainingRepository.findOneBy({ id: trainingId });
+    if (!training) throw new NotFoundException(`training ${trainingId} not found`);
+
+    const { manager } = this.trainingRepository;
+    const ranklistSql = `
+      SELECT
+        ranked.submitterId,
+        ranked.acceptedProblemCount,
+        ranked.lastSubmissionTime,
+        ranked.\`rank\`,
+        ranked.totalCount
+      FROM (
+        SELECT
+          aggregated.*,
+          RANK() OVER (ORDER BY aggregated.acceptedProblemCount DESC) AS \`rank\`,
+          COUNT(*) OVER () AS totalCount
+        FROM (
+          SELECT
+            submission.submitterId AS submitterId,
+            rankedUser.username AS username,
+            COUNT(DISTINCT CASE
+              WHEN submission.status = ? THEN submission.problemId
+              ELSE NULL
+            END) AS acceptedProblemCount,
+            MAX(submission.submitTime) AS lastSubmissionTime
+          FROM submission
+          INNER JOIN \`user\` rankedUser
+            ON rankedUser.id = submission.submitterId
+            AND rankedUser.isAdmin = 0
+          INNER JOIN (
+            SELECT DISTINCT sectionProblem.problemId AS problemId
+            FROM section_problem sectionProblem
+            INNER JOIN section trainingSection ON trainingSection.id = sectionProblem.sectionId
+            INNER JOIN chapter trainingChapter ON trainingChapter.id = trainingSection.chapterId
+            WHERE trainingChapter.trainingId = ?
+          ) trainingProblem ON trainingProblem.problemId = submission.problemId
+          GROUP BY submission.submitterId, rankedUser.username
+        ) aggregated
+      ) ranked
+      ORDER BY
+        ranked.acceptedProblemCount DESC,
+        ranked.username ASC,
+        ranked.submitterId ASC
+      LIMIT ? OFFSET ?
+    `;
+
+    type RawRanklistRow = {
+      submitterId: string;
+      acceptedProblemCount: string;
+      lastSubmissionTime: Date;
+      rank: string;
+      totalCount: string;
+    };
+
+    const queryRanklistRows = async (limit: number, offset: number): Promise<RawRanklistRow[]> =>
+      await manager.query(ranklistSql, [SubmissionStatus.Accepted, trainingId, limit, offset]);
+
+    const [problemCountRows, initialRanklistRows] = await Promise.all([
+      manager.query(
+        `
+          SELECT COUNT(DISTINCT sectionProblem.problemId) AS problemCount
+          FROM section_problem sectionProblem
+          INNER JOIN section trainingSection ON trainingSection.id = sectionProblem.sectionId
+          INNER JOIN chapter trainingChapter ON trainingChapter.id = trainingSection.chapterId
+          WHERE trainingChapter.trainingId = ?
+        `,
+        [trainingId]
+      ),
+      queryRanklistRows(takeCount, skipCount)
+    ]);
+
+    const ranklistRows = initialRanklistRows;
+    let count = ranklistRows.length ? Number(ranklistRows[0].totalCount) : 0;
+
+    // A manually entered page can point past the last row. Read one ranked row so
+    // the response still contains the correct total for the pagination control.
+    if (!ranklistRows.length && skipCount > 0) {
+      const firstRow = (await queryRanklistRows(1, 0))[0];
+      count = firstRow ? Number(firstRow.totalCount) : 0;
+    }
+
+    const users = await this.userService.findUsersByExistingIds(ranklistRows.map(row => Number(row.submitterId)));
+    const result = await Promise.all(
+      ranklistRows.map(async (row, index) => ({
+        rank: Number(row.rank),
+        user: await this.userService.getUserMeta(users[index], currentUser),
+        acceptedProblemCount: Number(row.acceptedProblemCount),
+        lastSubmissionTime: new Date(row.lastSubmissionTime)
+      }))
+    );
+
+    return {
+      trainingId,
+      problemCount: Number(problemCountRows[0]?.problemCount || 0),
+      count,
+      result
     };
   }
 

@@ -19,6 +19,7 @@ export enum ContestSubmissionPhase {
 @Index(["isPublic", "codeLanguage", "submitterId"])
 @Index(["isPublic", "status", "codeLanguage"])
 @Index(["problemId", "submitterId"])
+@Index(["problemId", "submitterId", "status", "submitTime"])
 @Index(["submitterId", "status"])
 @Index(["submitTime", "submitterId"])
 export class SubmissionEntity {

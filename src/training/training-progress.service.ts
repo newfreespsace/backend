@@ -74,10 +74,15 @@ export class TrainingProgressService {
         ? await this.submissionService.getUserLatestSubmissionByProblems(user, Array.from(problemsById.values()), true)
         : new Map();
 
+    const countedProblemKeys = new Set<string>();
     for (const row of rows) {
       const id = Number(row.id);
       const problemId = Number(row.problemId);
       if (!problemsById.has(problemId)) continue;
+
+      const problemKey = `${id}:${problemId}`;
+      if (countedProblemKeys.has(problemKey)) continue;
+      countedProblemKeys.add(problemKey);
 
       const progress = result.get(id);
       progress.problemCount++;

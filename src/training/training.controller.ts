@@ -1,6 +1,8 @@
 import { Body, Controller, ForbiddenException, Post } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 
+import { ConfigService } from "@/config/config.service";
+
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
@@ -15,13 +17,19 @@ import { UpdateTrainingDto } from "./dto/update-training.dto";
 import { TrainingService } from "./training.service";
 import { SetCurrentTrainingDto } from "./dto/set-current-training.dto";
 import { SetCurrentTrainingResponseDto } from "./dto/set-current-training-response.dto";
+import {
+  QueryTrainingRanklistDto,
+  QueryTrainingRanklistResponseDto,
+  QueryTrainingRanklistResponseError
+} from "./dto/query-training-ranklist.dto";
 
 @ApiTags("Training")
 @Controller("training")
 export class TrainingController {
   constructor(
     private readonly trainingService: TrainingService,
-    private readonly userPrivilegeService: UserPrivilegeService
+    private readonly userPrivilegeService: UserPrivilegeService,
+    private readonly configService: ConfigService
   ) {}
 
   private async checkManageTrainingPermission(currentUser: UserEntity): Promise<void> {
@@ -112,5 +120,26 @@ export class TrainingController {
   ): Promise<SetCurrentTrainingResponseDto> {
     if (!currentUser) throw new ForbiddenException("permission denied");
     return await this.trainingService.setCurrentTraining(currentUser, request.trainingId);
+  }
+
+  @Post("queryTrainingRanklist")
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Query a training plan ranklist." })
+  async queryTrainingRanklist(
+    @CurrentUser()
+    currentUser: UserEntity,
+    @Body()
+    request: QueryTrainingRanklistDto
+  ): Promise<QueryTrainingRanklistResponseDto> {
+    if (request.takeCount > this.configService.config.queryLimit.userList) {
+      return { error: QueryTrainingRanklistResponseError.TAKE_TOO_MANY };
+    }
+
+    return await this.trainingService.queryTrainingRanklist(
+      request.trainingId,
+      request.skipCount,
+      request.takeCount,
+      currentUser
+    );
   }
 }
