@@ -18,6 +18,7 @@ import { PROBLEM_REVIEW_COUNT, PROBLEM_REVIEW_SCHEDULE } from "./problem-review.
 import { CurrentProblemReviewDto, ProblemReviewMetaDto, QueryProblemReviewsResponseDto } from "./dto";
 
 const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+const REVIEW_DATE_DELAY_DAYS = 1;
 
 @Injectable()
 export class ProblemReviewService {
@@ -33,9 +34,16 @@ export class ProblemReviewService {
 
   private calculateReviewWindow(anchor: Date, reviewIndex: number): { availableAt: Date; dueAt: Date } {
     const schedule = PROBLEM_REVIEW_SCHEDULE[reviewIndex];
+    const calculateReviewDate = (daysAfterAnchor: number): Date =>
+      new Date(
+        anchor.getFullYear(),
+        anchor.getMonth(),
+        anchor.getDate() + daysAfterAnchor + REVIEW_DATE_DELAY_DAYS
+      );
+
     return {
-      availableAt: new Date(anchor.getTime() + schedule.availableAfterDays * DAY_IN_MILLISECONDS),
-      dueAt: new Date(anchor.getTime() + schedule.overdueAfterDays * DAY_IN_MILLISECONDS)
+      availableAt: calculateReviewDate(schedule.availableAfterDays),
+      dueAt: calculateReviewDate(schedule.overdueAfterDays)
     };
   }
 
