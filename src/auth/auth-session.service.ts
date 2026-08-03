@@ -5,6 +5,7 @@ import { Injectable } from "@nestjs/common";
 
 import jwt from "jsonwebtoken";
 import { Redis } from "ioredis";
+import moment from "moment-timezone";
 
 import { UserEntity } from "@/user/user.entity";
 import { ConfigService } from "@/config/config.service";
@@ -20,6 +21,12 @@ interface SessionInfoInternal {
   loginIp: string;
   userAgent: string;
   loginTime: number;
+  expiresAt: number;
+}
+
+interface SessionTokenPayload extends jwt.JwtPayload {
+  userId: number;
+  sessionId: number;
 }
 
 export interface SessionInfo extends SessionInfoInternal {
@@ -41,6 +48,9 @@ export class AuthSessionService {
     private readonly userService: UserService,
     private readonly redisService: RedisService
   ) {
+    if (!moment.tz.zone(this.configService.config.security.sessionTimezone))
+      throw new Error(`Invalid session timezone: ${this.configService.config.security.sessionTimezone}`);
+
     this.redis = this.redisService.getClient() as RedisWithSessionManager;
     this.redis.defineCommand("callSessionManager", {
       numberOfKeys: 0,
@@ -49,21 +59,47 @@ export class AuthSessionService {
   }
 
   async newSession(user: UserEntity, loginIp: string, userAgent: string): Promise<string> {
-    const timeStamp = +new Date();
+    const now = moment();
+    const timeStamp = now.valueOf();
+    const expiresAt = now
+      .clone()
+      .tz(this.configService.config.security.sessionTimezone)
+      .add(1, "day")
+      .startOf("day")
+      .hour(this.configService.config.security.sessionExpirationHour)
+      .valueOf();
     const sessionInfo: SessionInfoInternal = {
       loginIp,
       userAgent,
-      loginTime: timeStamp
+      loginTime: timeStamp,
+      expiresAt
     };
 
-    const sessionId = await this.redis.callSessionManager("new", timeStamp, user.id, JSON.stringify(sessionInfo));
+    const sessionId = Number(
+      await this.redis.callSessionManager("new", timeStamp, expiresAt, user.id, JSON.stringify(sessionInfo))
+    );
 
-    return jwt.sign(`${user.id.toString()} ${sessionId}`, this.configService.config.security.sessionSecret);
+    return jwt.sign(
+      {
+        userId: user.id,
+        sessionId,
+        exp: Math.floor(expiresAt / 1000)
+      } as SessionTokenPayload,
+      this.configService.config.security.sessionSecret
+    );
   }
 
   private decodeSessionKey(sessionKey: string): [userId: number, sessionId: number] {
-    const jwtString = jwt.verify(sessionKey, this.configService.config.security.sessionSecret) as string;
-    return jwtString.split(" ").map(s => Number(s)) as [userId: number, sessionId: number];
+    const payload = jwt.verify(sessionKey, this.configService.config.security.sessionSecret);
+    const [userId, sessionId] =
+      typeof payload === "string"
+        ? payload.split(" ").map(value => Number(value))
+        : [Number(payload.userId), Number(payload.sessionId)];
+
+    if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(sessionId) || sessionId <= 0)
+      throw new Error("Invalid session token payload");
+
+    return [userId, sessionId];
   }
 
   async revokeSession(userId: number, sessionId: number): Promise<void> {
@@ -97,7 +133,7 @@ export class AuthSessionService {
   }
 
   async listUserSessions(userId: number): Promise<SessionInfo[]> {
-    const result = (await this.redis.callSessionManager("list", userId)) as [
+    const result = (await this.redis.callSessionManager("list", +new Date(), userId)) as [
       sessionId: string,
       lastAccessTime: string,
       sessionInfo: string

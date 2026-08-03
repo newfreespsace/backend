@@ -35,6 +35,8 @@ security:
     whiteList:
       - http://lyrio-ui.test
   sessionSecret: don't leak this
+  sessionTimezone: Asia/Shanghai
+  sessionExpirationHour: 6
   maintainceKey: also don't leak this
   recaptcha:
     secretKey: null

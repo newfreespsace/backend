@@ -23,6 +23,9 @@ export class UserSessionDto implements SessionInfo {
   loginTime: number;
 
   @ApiProperty()
+  expiresAt: number;
+
+  @ApiProperty()
   lastAccessTime: number;
 }
 

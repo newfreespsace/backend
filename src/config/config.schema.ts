@@ -13,7 +13,8 @@ import {
   IsArray,
   ArrayNotEmpty,
   ArrayUnique,
-  IsUrl
+  IsUrl,
+  Max
 } from "class-validator";
 import { Type } from "class-transformer";
 
@@ -173,6 +174,14 @@ class SecurityConfigRateLimit {
 class SecurityConfig {
   @IsString()
   readonly sessionSecret: string;
+
+  @IsString()
+  readonly sessionTimezone: string = "Asia/Shanghai";
+
+  @IsInt()
+  @Min(0)
+  @Max(23)
+  readonly sessionExpirationHour: number = 6;
 
   @IsString()
   readonly maintainceKey: string;
