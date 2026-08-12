@@ -66,6 +66,12 @@ export class MigrationController {
         error: MigrateUserResponseError.WRONG_PASSWORD
       };
 
+    const existingUser = await this.userService.findUserById(userMigrationInfo.userId);
+    if (!existingUser.isActive)
+      return {
+        error: MigrateUserResponseError.ACCOUNT_INACTIVE
+      };
+
     if (userMigrationInfo.usernameMustChange)
       if (!request.newUsername || !(await this.userService.checkUsernameAvailability(request.newUsername)))
         return {

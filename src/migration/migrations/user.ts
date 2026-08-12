@@ -54,6 +54,7 @@ export const migrationUser: MigrationInterface = {
         user.bio = (oldUser.information || "").substr(0, 160);
         user.avatarInfo = getAvatarInfo(oldUser.email);
         user.isAdmin = !!oldUser.is_admin;
+        user.isActive = true;
         user.submissionCount = 0;
         user.acceptedProblemCount = 0;
         user.rating = oldUser.rating || 0;

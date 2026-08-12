@@ -14,4 +14,7 @@ export class RegisterResponseDto {
 
   @ApiProperty()
   token?: string;
+
+  @ApiProperty()
+  pendingActivation?: boolean;
 }

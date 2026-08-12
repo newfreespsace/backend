@@ -36,6 +36,9 @@ export class UserEntity {
   @Column({ type: "boolean" })
   isAdmin: boolean;
 
+  @Column({ type: "boolean", default: true })
+  isActive: boolean;
+
   @Column({ type: "integer" })
   acceptedProblemCount: number;
 

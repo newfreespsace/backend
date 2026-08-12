@@ -69,6 +69,7 @@ export class AuthService {
         user.bio = "";
         user.avatarInfo = "gravatar:";
         user.isAdmin = false;
+        user.isActive = false;
         user.submissionCount = 0;
         user.acceptedProblemCount = 0;
         user.rating = 0;

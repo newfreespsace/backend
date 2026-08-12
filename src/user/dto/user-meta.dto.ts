@@ -25,6 +25,9 @@ export class UserMetaDto {
   isAdmin: boolean;
 
   @ApiProperty()
+  isActive: boolean;
+
+  @ApiProperty()
   acceptedProblemCount: number;
 
   @ApiProperty()

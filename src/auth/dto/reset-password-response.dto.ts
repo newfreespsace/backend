@@ -12,4 +12,7 @@ export class ResetPasswordResponseDto {
 
   @ApiProperty()
   token?: string;
+
+  @ApiProperty()
+  pendingActivation?: boolean;
 }

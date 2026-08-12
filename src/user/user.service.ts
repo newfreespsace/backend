@@ -137,6 +137,7 @@ export class UserService {
       nickname: user.nickname,
       bio: user.bio,
       isAdmin: user.isAdmin,
+      isActive: user.isActive,
       acceptedProblemCount: user.acceptedProblemCount,
       submissionCount: user.submissionCount,
       rating: user.rating,
@@ -274,6 +275,24 @@ export class UserService {
       skip: skipCount,
       take: takeCount
     });
+  }
+
+  async getInactiveUserList(skipCount: number, takeCount: number): Promise<[users: UserEntity[], count: number]> {
+    return await this.userRepository.findAndCount({
+      where: {
+        isActive: false
+      },
+      order: {
+        registrationTime: "ASC"
+      },
+      skip: skipCount,
+      take: takeCount
+    });
+  }
+
+  async setUserActiveStatus(user: UserEntity, isActive: boolean): Promise<void> {
+    user.isActive = isActive;
+    await this.userRepository.save(user);
   }
 
   async onDeleteProblem(problemId: number, transactionalEntityManager: EntityManager): Promise<void> {

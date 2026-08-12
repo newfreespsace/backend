@@ -133,6 +133,12 @@ export class AuthController {
         return { error: LoginResponseError.WRONG_PASSWORD };
       }
 
+      const user = await this.userService.findUserById(userMigrationInfo.userId);
+      if (!user.isActive) {
+        await this.auditService.log(user.id, "auth.login_failed.account_inactive");
+        return { error: LoginResponseError.ACCOUNT_INACTIVE };
+      }
+
       return { error: LoginResponseError.USER_NOT_MIGRATED, username: userMigrationInfo.oldUsername };
     };
 
@@ -161,6 +167,13 @@ export class AuthController {
 
       return {
         error: LoginResponseError.WRONG_PASSWORD
+      };
+    }
+
+    if (!user.isActive) {
+      await this.auditService.log(user.id, "auth.login_failed.account_inactive");
+      return {
+        error: LoginResponseError.ACCOUNT_INACTIVE
       };
     }
 
@@ -296,11 +309,10 @@ export class AuthController {
   @Post("register")
   @ApiBearerAuth()
   @ApiOperation({
-    summary: "Register then login.",
-    description: "Recaptcha required. Return the session token if success."
+    summary: "Register an inactive user account.",
+    description: "Recaptcha required. The account must be activated by an administrator before login."
   })
   async register(
-    @Req() req: RequestWithSession,
     @CurrentUser() currentUser: UserEntity,
     @Body() request: RegisterRequestDto
   ): Promise<RegisterResponseDto> {
@@ -333,17 +345,15 @@ export class AuthController {
       email: request.email
     });
 
-    return {
-      token: await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"])
-    };
+    return { pendingActivation: true };
   }
 
   @Recaptcha()
   @Post("resetPassword")
   @ApiBearerAuth()
   @ApiOperation({
-    summary: "Reset a user's password with email verification code and then login.",
-    description: "Recaptcha required."
+    summary: "Reset a user's password with an email verification code.",
+    description: "Recaptcha required. Active accounts are logged in after a successful reset."
   })
   async resetPassword(
     @Req() req: RequestWithSession,
@@ -383,6 +393,8 @@ export class AuthController {
     await this.authSessionService.revokeAllSessionsExcept(user.id, null);
 
     await this.auditService.log(user.id, "auth.reset_password");
+
+    if (!user.isActive) return { pendingActivation: true };
 
     return {
       token: await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"])

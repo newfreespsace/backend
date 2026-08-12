@@ -3,6 +3,7 @@ import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { AuthService } from "@/auth/auth.service";
+import { AuthSessionService } from "@/auth/auth-session.service";
 import { ConfigService } from "@/config/config.service";
 import { SubmissionService } from "@/submission/submission.service";
 import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
@@ -21,6 +22,9 @@ import {
   SetUserPrivilegesResponseDto,
   SetUserPrivilegesRequestDto,
   SetUserPrivilegesResponseError,
+  SetUserActiveStatusRequestDto,
+  SetUserActiveStatusResponseDto,
+  SetUserActiveStatusResponseError,
   UpdateUserProfileRequestDto,
   UpdateUserProfileResponseDto,
   UpdateUserProfileResponseError,
@@ -29,6 +33,9 @@ import {
   GetUserListRequestDto,
   GetUserListResponseDto,
   GetUserListResponseError,
+  GetInactiveUserListRequestDto,
+  GetInactiveUserListResponseDto,
+  GetInactiveUserListResponseError,
   GetUserDetailRequestDto,
   GetUserDetailResponseDto,
   GetUserDetailResponseError,
@@ -61,6 +68,7 @@ export class UserController {
   constructor(
     private readonly userService: UserService,
     private readonly authService: AuthService,
+    private readonly authSessionService: AuthSessionService,
     private readonly configService: ConfigService,
     private readonly userPrivilegeService: UserPrivilegeService,
     @Inject(forwardRef(() => SubmissionService))
@@ -147,6 +155,52 @@ export class UserController {
 
     return {
       error
+    };
+  }
+
+  @Post("setUserActiveStatus")
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Activate or deactivate a user account."
+  })
+  async setUserActiveStatus(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: SetUserActiveStatusRequestDto
+  ): Promise<SetUserActiveStatusResponseDto> {
+    if (!currentUser?.isAdmin)
+      return {
+        error: SetUserActiveStatusResponseError.PERMISSION_DENIED
+      };
+
+    const user = await this.userService.findUserById(request.userId);
+    if (!user)
+      return {
+        error: SetUserActiveStatusResponseError.NO_SUCH_USER
+      };
+
+    if (user.id === currentUser.id && !request.isActive)
+      return {
+        error: SetUserActiveStatusResponseError.CANNOT_DEACTIVATE_SELF
+      };
+
+    const oldIsActive = user.isActive;
+    if (oldIsActive !== request.isActive) {
+      await this.userService.setUserActiveStatus(user, request.isActive);
+      if (!request.isActive) await this.authSessionService.revokeAllSessionsExcept(user.id, null);
+
+      await this.auditService.log(
+        request.isActive ? "user.activate" : "user.deactivate",
+        AuditLogObjectType.User,
+        user.id,
+        {
+          oldIsActive,
+          newIsActive: request.isActive
+        }
+      );
+    }
+
+    return {
+      meta: await this.userService.getUserMeta(user, currentUser)
     };
   }
 
@@ -270,6 +324,39 @@ export class UserController {
 
     return {
       userMetas: await Promise.all(users.map(user => this.userService.getUserMeta(user, currentUser))),
+      count
+    };
+  }
+
+  @Post("getInactiveUserList")
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Get inactive user accounts for activation."
+  })
+  async getInactiveUserList(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: GetInactiveUserListRequestDto
+  ): Promise<GetInactiveUserListResponseDto> {
+    if (!currentUser?.isAdmin)
+      return {
+        error: GetInactiveUserListResponseError.PERMISSION_DENIED
+      };
+
+    if (request.takeCount > this.configService.config.queryLimit.userList)
+      return {
+        error: GetInactiveUserListResponseError.TAKE_TOO_MANY
+      };
+
+    const [users, count] = await this.userService.getInactiveUserList(request.skipCount, request.takeCount);
+
+    return {
+      users: users.map(user => ({
+        id: user.id,
+        username: user.username,
+        nickname: user.nickname,
+        email: user.email,
+        registrationTime: user.registrationTime
+      })),
       count
     };
   }
