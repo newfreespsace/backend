@@ -35,11 +35,7 @@ export class ProblemReviewService {
   private calculateReviewWindow(anchor: Date, reviewIndex: number): { availableAt: Date; dueAt: Date } {
     const schedule = PROBLEM_REVIEW_SCHEDULE[reviewIndex];
     const calculateReviewDate = (daysAfterAnchor: number): Date =>
-      new Date(
-        anchor.getFullYear(),
-        anchor.getMonth(),
-        anchor.getDate() + daysAfterAnchor + REVIEW_DATE_DELAY_DAYS
-      );
+      new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + daysAfterAnchor + REVIEW_DATE_DELAY_DAYS);
 
     return {
       availableAt: calculateReviewDate(schedule.availableAfterDays),

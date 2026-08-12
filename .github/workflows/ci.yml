@@ -1,8 +1,8 @@
 name: CI
 
 on:
-- push
-- pull_request
+  - push
+  - pull_request
 
 env:
   CI: true
@@ -11,17 +11,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Check out
-      uses: actions/checkout@v2
-    - name: Set up Node
-      uses: actions/setup-node@v2-beta
-      with:
-        node-version: 16.x
-    - name: Install
-      run: yarn
-    - name: Build
-      run: yarn build
-    - name: Lint
-      run: yarn lint
-    - name: Check style
-      run: yarn check-style
+      - name: Check out
+        uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 18.x
+      - name: Install
+        run: yarn
+      - name: Build
+        run: yarn build
+      - name: Lint
+        run: yarn lint
+      - name: Check style
+        run: yarn check-style

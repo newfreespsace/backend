@@ -1,6 +1,6 @@
 import { Injectable, NestMiddleware, UnauthorizedException } from "@nestjs/common";
 
-import { Response } from "express";
+import type { Response } from "express";
 
 import { RequestWithSession } from "./auth.middleware";
 

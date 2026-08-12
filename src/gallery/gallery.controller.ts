@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post, Res } from "@nestjs/common";
 import { ApiBearerAuth, ApiExcludeEndpoint, ApiOperation, ApiTags } from "@nestjs/swagger";
+
 import { Recaptcha } from "@nestlab/google-recaptcha";
 import { Response } from "express";
 
@@ -7,6 +8,7 @@ import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 
 import { GalleryService } from "./gallery.service";
+
 import {
   AddGalleryImageRequestDto,
   AddGalleryImageResponseDto,

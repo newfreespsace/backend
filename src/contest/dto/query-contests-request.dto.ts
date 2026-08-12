@@ -1,4 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
+
 import { IsBoolean, IsInt, IsOptional, Max, Min } from "class-validator";
 
 export class QueryContestsRequestDto {

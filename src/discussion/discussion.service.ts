@@ -129,11 +129,7 @@ export class DiscussionService {
     };
   }
 
-  async userCanViewProblemDiscussion(
-    user: UserEntity,
-    problemId: number,
-    hasPrivilege?: boolean
-  ): Promise<boolean> {
+  async userCanViewProblemDiscussion(user: UserEntity, problemId: number, hasPrivilege?: boolean): Promise<boolean> {
     if (!problemId) return true;
     if (hasPrivilege ?? (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageDiscussion)))
       return true;

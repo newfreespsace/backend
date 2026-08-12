@@ -1,9 +1,11 @@
 import { ApiProperty } from "@nestjs/swagger";
+
 import { Type } from "class-transformer";
 import { IsInt, IsOptional } from "class-validator";
 
-import { GroupMetaDto } from "@/group/dto";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
+
+import { GroupMetaDto } from "@/group/dto";
 import { UserMetaDto } from "@/user/dto";
 
 export class QuerySectionGroupRanklistDto {

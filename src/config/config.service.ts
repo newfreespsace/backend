@@ -18,7 +18,6 @@ export class ConfigService {
 
     const config = yaml.load(fs.readFileSync(filePath).toString());
     this.config = this.validateInput(config);
-
   }
 
   private validateInput(inputConfig: unknown): AppConfig {
@@ -38,5 +37,4 @@ export class ConfigService {
 
     return appConfig;
   }
-
 }

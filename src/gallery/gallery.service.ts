@@ -1,7 +1,7 @@
+import { Readable } from "stream";
+
 import { Injectable } from "@nestjs/common";
 import { InjectDataSource, InjectRepository } from "@nestjs/typeorm";
-
-import { Readable } from "stream";
 
 import { DataSource, EntityManager, Repository } from "typeorm";
 import { v4 as UUID } from "uuid";
@@ -9,11 +9,13 @@ import { v4 as UUID } from "uuid";
 import { ConfigService } from "@/config/config.service";
 import { FileEntity } from "@/file/file.entity";
 import { FileService } from "@/file/file.service";
-import { FileUploadInfoDto, SignedFileUploadRequestDto } from "@/file/dto";
 import { LockService } from "@/redis/lock.service";
 import { UserEntity } from "@/user/user.entity";
 
 import { GalleryImageEntity } from "./gallery-image.entity";
+
+import { FileUploadInfoDto, SignedFileUploadRequestDto } from "@/file/dto";
+
 import { AddGalleryImageResponseError, GalleryImageDto, GalleryImageMimeType, GalleryQuotaDto } from "./dto";
 
 type AddGalleryImageLimitError =
@@ -124,33 +126,35 @@ export class GalleryService {
   }): Promise<
     GalleryImageDto | SignedFileUploadRequestDto | AddGalleryImageLimitError | "FILE_UUID_EXISTS" | "FILE_NOT_UPLOADED"
   > {
-    return await this.lockService.lock(`ManageGallery_${user.id}`, async () => {
-      return await this.connection.transaction("REPEATABLE READ", async transactionalEntityManager => {
-        const result = await this.fileService.processUploadRequest(
-          uploadInfo,
-          async size => await this.checkAddImageLimit(user, size, transactionalEntityManager),
-          transactionalEntityManager,
-          { objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX }
-        );
+    return await this.lockService.lock(
+      `ManageGallery_${user.id}`,
+      async () =>
+        await this.connection.transaction("REPEATABLE READ", async transactionalEntityManager => {
+          const result = await this.fileService.processUploadRequest(
+            uploadInfo,
+            async size => await this.checkAddImageLimit(user, size, transactionalEntityManager),
+            transactionalEntityManager,
+            { objectKeyPrefix: GALLERY_IMAGE_OBJECT_KEY_PREFIX }
+          );
 
-        if (!(result instanceof FileEntity)) return result;
+          if (!(result instanceof FileEntity)) return result;
 
-        const image = new GalleryImageEntity();
-        image.ownerId = user.id;
-        image.uuid = result.uuid;
-        image.publicId = UUID();
-        image.filename = filename;
-        image.mimeType = mimeType;
-        image.size = result.size;
-        image.width = width || null;
-        image.height = height || null;
-        image.createdAt = new Date();
+          const image = new GalleryImageEntity();
+          image.ownerId = user.id;
+          image.uuid = result.uuid;
+          image.publicId = UUID();
+          image.filename = filename;
+          image.mimeType = mimeType;
+          image.size = result.size;
+          image.width = width || null;
+          image.height = height || null;
+          image.createdAt = new Date();
 
-        await transactionalEntityManager.save(GalleryImageEntity, image);
+          await transactionalEntityManager.save(GalleryImageEntity, image);
 
-        return await this.getImageDto(image, true);
-      });
-    });
+          return await this.getImageDto(image, true);
+        })
+    );
   }
 
   async deleteImage(user: UserEntity, id: number): Promise<boolean> {

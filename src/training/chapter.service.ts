@@ -3,6 +3,8 @@ import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
 
+import { UserEntity } from "@/user/user.entity";
+
 import { CreateChapterDto } from "./dto/create-chapter.dto";
 import { ChapterMetaDto } from "./dto/training-meta.dto";
 import { UpdateChapterDto } from "./dto/update-chapter.dto";
@@ -10,7 +12,6 @@ import { ChapterEntity } from "./entities/chapter.entity";
 import { TrainingEntity } from "./entities/training.entity";
 import { toChapterMetaDto, toSectionMetaDto } from "./training.mapper";
 import { TrainingProgressService } from "./training-progress.service";
-import { UserEntity } from "@/user/user.entity";
 
 interface ReorderItem {
   id: number;

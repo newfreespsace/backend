@@ -1,8 +1,8 @@
 import { ApiProperty } from "@nestjs/swagger";
 
-import { SignedFileUploadRequestDto } from "@/file/dto";
-
 import { GalleryImageDto } from "./gallery-image.dto";
+
+import { SignedFileUploadRequestDto } from "@/file/dto";
 
 export enum AddGalleryImageResponseError {
   PERMISSION_DENIED = "PERMISSION_DENIED",

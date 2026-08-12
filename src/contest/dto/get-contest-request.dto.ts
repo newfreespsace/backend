@@ -1,4 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
+
 import { IsIn, IsInt } from "class-validator";
 
 import { Locale } from "@/common/locale.type";

@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
+
 import { Repository } from "typeorm";
 
 import { ConfigService } from "@/config/config.service";
@@ -13,9 +14,10 @@ const SITE_PREFERENCE_KEY = "preference";
 function deepMerge<T>(base: T, patch: Partial<T>): T {
   if (!patch || typeof patch !== "object") return base;
 
-  const result = (Array.isArray(base)
-    ? [...base]
-    : { ...((base as unknown) as Record<string, unknown>) }) as Record<string, unknown>;
+  const result = (Array.isArray(base) ? [...base] : { ...(base as unknown as Record<string, unknown>) }) as Record<
+    string,
+    unknown
+  >;
 
   for (const [key, value] of Object.entries(patch)) {
     if (
