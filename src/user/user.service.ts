@@ -314,17 +314,20 @@ export class UserService {
     userId: number,
     problemId: number,
     type: "NON_AC_TO_AC" | "AC_TO_NON_AC"
-  ): Promise<void> {
-    await this.lockService.lock(`updateUserAcceptedCount_${userId}_${problemId}`, async () => {
+  ): Promise<boolean> {
+    return await this.lockService.lock(`updateUserAcceptedCount_${userId}_${problemId}`, async () => {
       if (type === "NON_AC_TO_AC") {
         if ((await this.submissionService.getUserProblemAcceptedSubmissionCount(userId, problemId)) === 1) {
           await this.userRepository.increment({ id: userId }, "acceptedProblemCount", 1);
+          return true;
         }
       } else {
         if ((await this.submissionService.getUserProblemAcceptedSubmissionCount(userId, problemId)) === 0) {
           await this.userRepository.increment({ id: userId }, "acceptedProblemCount", -1);
         }
       }
+
+      return false;
     });
   }
 

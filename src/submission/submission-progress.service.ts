@@ -15,7 +15,9 @@ export enum SubmissionEventType {
 }
 
 const REDIS_KEY_SUBMISSION_PROGRESS = "submission-progress:%d";
+const REDIS_KEY_SUBMISSION_FIRST_ACCEPTED = "submission-first-accepted:%d";
 const REDIS_CHANNEL_SUBMISSION_EVENT = "submission-event";
+const FIRST_ACCEPTED_MARKER_RETENTION_SECONDS = 5 * 60;
 
 // The process for after a progress received:
 // 1. If its type is "Finished", it's converted to a "result" and stored to the database,
@@ -58,9 +60,22 @@ export class SubmissionProgressService {
   ): Promise<void> {
     logger.log(`Progress for submission ${submissionId} received, pushing to Redis`);
     if (type === SubmissionEventType.Progress && progress.progressType !== SubmissionProgressType.Finished) {
+      await this.redis.del(REDIS_KEY_SUBMISSION_FIRST_ACCEPTED.format(submissionId));
       await this.redis.set(REDIS_KEY_SUBMISSION_PROGRESS.format(submissionId), JSON.stringify(progress));
-    } else {
+    } else if (type === SubmissionEventType.Progress) {
+      // Keep the UI-only first-accept marker briefly so a result that finishes before
+      // the detail page/WebSocket connects can still be delivered without persisting it.
       await this.redis.del(REDIS_KEY_SUBMISSION_PROGRESS.format(submissionId));
+      await this.redis.setex(
+        REDIS_KEY_SUBMISSION_FIRST_ACCEPTED.format(submissionId),
+        FIRST_ACCEPTED_MARKER_RETENTION_SECONDS,
+        progress.isFirstAccepted ? "1" : "0"
+      );
+    } else {
+      await this.redis.del(
+        REDIS_KEY_SUBMISSION_PROGRESS.format(submissionId),
+        REDIS_KEY_SUBMISSION_FIRST_ACCEPTED.format(submissionId)
+      );
     }
 
     // This will call this.onSubmissionEvent
@@ -81,5 +96,10 @@ export class SubmissionProgressService {
     } catch (e) {
       return null;
     }
+  }
+
+  async getRecentlyFinishedFirstAccepted(submissionId: number): Promise<boolean | null> {
+    const marker = await this.redis.get(REDIS_KEY_SUBMISSION_FIRST_ACCEPTED.format(submissionId));
+    return marker == null ? null : marker === "1";
   }
 }

@@ -340,12 +340,18 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
             break;
           case SubmissionProgressSubscriptionType.Detail: {
             const submissionDetail = await this.submissionService.getSubmissionDetail(submission);
+            const recentlyFinishedFirstAccepted = await this.submissionService.getRecentlyFinishedFirstAccepted(
+              submission.id
+            );
             this.sendMessage(client, submissionId, {
               progressMeta: {
                 progressType: SubmissionProgressType.Finished,
                 resultMeta: basicMeta
               },
-              progressDetail: submissionDetail.result
+              progressDetail:
+                recentlyFinishedFirstAccepted == null
+                  ? submissionDetail.result
+                  : { ...submissionDetail.result, isFirstAccepted: recentlyFinishedFirstAccepted }
             });
             break;
           }

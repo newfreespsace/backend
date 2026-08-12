@@ -28,6 +28,10 @@ export interface SubmissionProgress<TestcaseResult extends SubmissionTestcaseRes
   score?: number;
   totalOccupiedTime?: number;
 
+  // Only attached to the short-lived finished progress event. It is deliberately
+  // added after the judge result is saved, so it isn't persisted in submission_detail.result.
+  isFirstAccepted?: boolean;
+
   compile?: {
     compileTaskHash: string;
     success: boolean;

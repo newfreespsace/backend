@@ -474,6 +474,7 @@ export class SubmissionController {
       submitter,
       submissionDetail,
       progress,
+      recentlyFinishedFirstAccepted,
       permissionRejudge,
       permissionCancel,
       permissionSetPublic,
@@ -481,7 +482,8 @@ export class SubmissionController {
     ] = await Promise.all([
       this.userService.findUserById(submission.submitterId),
       this.submissionService.getSubmissionDetail(submission),
-      pending && this.submissionProgressService.getPendingSubmissionProgress(submission.id),
+      pending ? this.submissionProgressService.getPendingSubmissionProgress(submission.id) : null,
+      pending ? null : this.submissionProgressService.getRecentlyFinishedFirstAccepted(submission.id),
       this.submissionService.userHasPermission(
         currentUser,
         submission,
@@ -537,7 +539,11 @@ export class SubmissionController {
       hasPrivilege
     );
 
-    const rawProgress = progress || submissionDetail.result;
+    const storedProgress =
+      recentlyFinishedFirstAccepted == null
+        ? submissionDetail.result
+        : { ...submissionDetail.result, isFirstAccepted: recentlyFinishedFirstAccepted };
+    const rawProgress = progress || storedProgress;
 
     const visibleMeta = hideNoiResult ? this.sanitizeNoiSubmissionMeta(meta) : meta;
     const visibleProgress = hideNoiResult

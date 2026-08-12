@@ -687,19 +687,26 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
   /**
    * This function updates related info, the problem must be locked for Read first, then the submission must be locked.
    */
-  private async onSubmissionUpdated(oldSubmission: SubmissionEntity, submission: SubmissionEntity): Promise<void> {
+  private async onSubmissionUpdated(oldSubmission: SubmissionEntity, submission: SubmissionEntity): Promise<boolean> {
     await this.submissionStatisticsService.onSubmissionUpdated(oldSubmission, submission);
 
     const oldAccepted = oldSubmission.status === SubmissionStatus.Accepted;
     const newAccepted = submission.status === SubmissionStatus.Accepted;
     if (!oldAccepted && newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, 1);
-      await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "NON_AC_TO_AC");
+      const isFirstAccepted = await this.userService.updateUserAcceptedCount(
+        submission.submitterId,
+        submission.problemId,
+        "NON_AC_TO_AC"
+      );
       await this.problemReviewService.onAcceptedSubmission(submission);
+      return isFirstAccepted;
     } else if (oldAccepted && !newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, -1);
       await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
     }
+
+    return false;
   }
 
   /**
@@ -710,33 +717,47 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     problem: ProblemEntity,
     progress: SubmissionProgress
   ): Promise<void> {
-    const oldSubmission = { ...submission };
+    const finishSubmission = async () => {
+      const oldSubmission = { ...submission };
 
-    const submissionDetail = await this.getSubmissionDetail(submission);
-    submissionDetail.result = progress;
+      const submissionDetail = await this.getSubmissionDetail(submission);
+      submissionDetail.result = progress;
 
-    submission.taskId = null;
-    submission.status = progress.status;
-    submission.score = progress.score;
-    submission.totalOccupiedTime = progress.totalOccupiedTime;
+      submission.taskId = null;
+      submission.status = progress.status;
+      submission.score = progress.score;
+      submission.totalOccupiedTime = progress.totalOccupiedTime;
 
-    this.metricSubmissionJudgeTime.observe(submission.totalOccupiedTime);
+      this.metricSubmissionJudgeTime.observe(submission.totalOccupiedTime);
 
-    const timeAndMemory = this.problemTypeFactoryService
-      .type(problem.type)
-      .getTimeAndMemoryUsedFromFinishedSubmissionProgress(submissionDetail.result);
-    submission.timeUsed = timeAndMemory.timeUsed;
-    submission.memoryUsed = timeAndMemory.memoryUsed;
+      const timeAndMemory = this.problemTypeFactoryService
+        .type(problem.type)
+        .getTimeAndMemoryUsedFromFinishedSubmissionProgress(submissionDetail.result);
+      submission.timeUsed = timeAndMemory.timeUsed;
+      submission.memoryUsed = timeAndMemory.memoryUsed;
 
-    await this.connection.transaction(async transactionalEntityManager => {
-      await transactionalEntityManager.save(submission);
-      await transactionalEntityManager.save(submissionDetail);
-    });
+      // Save the judge-owned result before adding the UI-only first-accept marker.
+      await this.connection.transaction(async transactionalEntityManager => {
+        await transactionalEntityManager.save(submission);
+        await transactionalEntityManager.save(submissionDetail);
+      });
 
-    logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
+      logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
 
-    await this.onSubmissionUpdated(oldSubmission, submission);
-    await this.contestService.onSubmissionFinished(submission);
+      progress.isFirstAccepted = await this.onSubmissionUpdated(oldSubmission, submission);
+      await this.contestService.onSubmissionFinished(submission);
+    };
+
+    // Two pending submissions for the same user/problem may finish together. Serialize
+    // their Accepted transition so the existing accepted-problem counter identifies one first AC.
+    if (progress.status === SubmissionStatus.Accepted) {
+      await this.lockService.lock(
+        `finishAcceptedSubmission_${submission.submitterId}_${submission.problemId}`,
+        finishSubmission
+      );
+    } else {
+      await finishSubmission();
+    }
   }
 
   /**
@@ -850,6 +871,10 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       problemId,
       status: SubmissionStatus.Accepted
     });
+  }
+
+  async getRecentlyFinishedFirstAccepted(submissionId: number): Promise<boolean | null> {
+    return await this.submissionProgressService.getRecentlyFinishedFirstAccepted(submissionId);
   }
 
   async getUserLatestSubmissionByProblems(
