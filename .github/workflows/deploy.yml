@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+
   workflow_dispatch:
 
 env:
@@ -16,23 +17,65 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     steps:
+      # 1. 获取代码
       - name: Check out
         uses: actions/checkout@v4
 
+      # 2. Node 环境
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: yarn
 
-      - name: Install
+      # 3. 安装完整依赖
+      # 因为这里需要 TypeScript、构建工具等 devDependencies
+      - name: Install dependencies
         run: yarn install --frozen-lockfile
 
+      # 4. 在 GitHub Actions 中完成构建
       - name: Build
         run: yarn build
 
-      - name: Deploy to server
+      # 5. 配置 SSH
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+
+          printf '%s\n' "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan \
+            -p "${{ secrets.SERVER_PORT }}" \
+            -H "${{ secrets.SERVER_HOST }}" \
+            >> ~/.ssh/known_hosts
+
+      # 6. 同步编译结果
+      # --delete 确保服务器 dist 和本次构建完全一致
+      - name: Deploy dist
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.SERVER_PORT }}" \
+            dist/ \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PROJECT_PATH }}/dist/"
+
+      # 7. 同步依赖描述文件
+      - name: Deploy package files
+        run: |
+          rsync -az \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.SERVER_PORT }}" \
+            package.json \
+            yarn.lock \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PROJECT_PATH }}/"
+
+      # 8. 在服务器安装运行依赖并重启
+      - name: Restart server
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -45,12 +88,10 @@ jobs:
 
             cd "${{ secrets.SERVER_PROJECT_PATH }}"
 
-            git fetch origin master
-            git reset --hard origin/master
-
             yarn install --frozen-lockfile --production=false
-            yarn build
 
             export LYRIO_CONFIG_FILE="${{ secrets.SERVER_PROJECT_PATH }}/config.yaml"
+
             pm2 restart nsoj-backend --update-env
+
             pm2 save
