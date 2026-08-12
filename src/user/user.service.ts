@@ -267,7 +267,8 @@ export class UserService {
   ): Promise<[users: UserEntity[], count: number]> {
     return await this.userRepository.findAndCount({
       where: {
-        isAdmin: false
+        isAdmin: false,
+        isActive: true
       },
       order: {
         [sortBy]: "DESC"
