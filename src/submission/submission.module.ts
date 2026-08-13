@@ -12,6 +12,7 @@ import { MetricsModule } from "@/metrics/metrics.module";
 import { ContestModule } from "@/contest/contest.module";
 import { SiteSettingModule } from "@/site-setting/site-setting.module";
 import { ProblemReviewModule } from "@/problem-review/problem-review.module";
+import { TrainingPointModule } from "@/training-points/training-point.module";
 
 import { SubmissionEntity } from "./submission.entity";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
@@ -35,7 +36,8 @@ import { SubmissionStatisticsService } from "./submission-statistics.service";
     forwardRef(() => ContestModule),
     forwardRef(() => MetricsModule),
     forwardRef(() => SiteSettingModule),
-    forwardRef(() => ProblemReviewModule)
+    forwardRef(() => ProblemReviewModule),
+    TrainingPointModule
   ],
   providers: [SubmissionService, SubmissionProgressService, SubmissionProgressGateway, SubmissionStatisticsService],
   controllers: [SubmissionController],

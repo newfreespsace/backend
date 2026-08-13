@@ -21,6 +21,7 @@ import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
 import { FileEntity } from "@/file/file.entity";
 import { escapeLike } from "@/database/database.utils";
+import { TrainingPointService } from "@/training-points/training-point.service";
 
 import { ProblemJudgeInfo } from "./problem-judge-info.interface";
 import { ProblemSampleData } from "./problem-sample-data.interface";
@@ -92,7 +93,8 @@ export class ProblemService {
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly lockService: LockService,
-    private readonly auditService: AuditService
+    private readonly auditService: AuditService,
+    private readonly trainingPointService: TrainingPointService
   ) {
     this.auditService.registerObjectTypeQueryHandler(AuditLogObjectType.Problem, async (problemId, locale) => {
       const problem = await this.findProblemById(problemId);
@@ -1075,6 +1077,7 @@ export class ProblemService {
       await transactionalEntityManager.remove(problem);
     });
     if (deleteFilesActually) deleteFilesActually();
+    await this.trainingPointService.clearDeletedProblemPoints(problem.id, problem.displayId);
     await this.submissionService.onProblemDeleted(problem.id);
   }
 

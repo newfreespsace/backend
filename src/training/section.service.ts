@@ -11,6 +11,8 @@ import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.s
 import { SubmissionService } from "@/submission/submission.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
+import { TrainingPointService } from "@/training-points/training-point.service";
+import { TrainingPointChangeReason } from "@/training-points/entities/training-point-ledger.entity";
 
 import { CreateSectionDto } from "./dto/create-section.dto";
 import { UpdateSectionDto } from "./dto/update-section.dto";
@@ -50,7 +52,8 @@ export class SectionService {
     private readonly trainingProgressService: TrainingProgressService,
     private readonly groupService: GroupService,
     private readonly userService: UserService,
-    private readonly userPrivilegeService: UserPrivilegeService
+    private readonly userPrivilegeService: UserPrivilegeService,
+    private readonly trainingPointService: TrainingPointService
   ) {}
 
   async querySectionSetByChapterId(chapterId: number, currentUser: UserEntity): Promise<SectionMetaDto[]> {
@@ -122,6 +125,12 @@ export class SectionService {
   }
 
   async updateSection(id: number, updateSectionDto: UpdateSectionDto): Promise<SectionMetaDto> {
+    const existingSection = await this.sectionRepository.findOneBy({ id });
+    if (!existingSection) throw new NotFoundException(`section ${id} not found`);
+    const problemIds =
+      updateSectionDto.chapterId !== undefined && updateSectionDto.chapterId !== existingSection.chapterId
+        ? (await existingSection.problems).map(problem => problem.problemId)
+        : [];
     const { chapterId } = updateSectionDto;
     if (chapterId !== undefined) {
       const chapter = await this.chapterRepository.findOneBy({ id: chapterId });
@@ -134,6 +143,10 @@ export class SectionService {
     });
     if (!section) throw new NotFoundException(`section ${id} not found`);
     const updateSection = await this.sectionRepository.save(section);
+    await this.trainingPointService.reconcileProblems(
+      problemIds,
+      TrainingPointChangeReason.ProblemMovedBetweenTrainings
+    );
     return { ...toSectionMetaDto(updateSection) };
   }
 
@@ -228,6 +241,7 @@ export class SectionService {
     const { sectionId, problems } = request;
     const section = await this.sectionRepository.findOneBy({ id: sectionId });
     if (!section) throw new NotFoundException(`section ${sectionId} not found`);
+    const oldProblemIds = (await section.problems).map(problem => problem.problemId);
 
     const problemIds = problems.map(problem => problem.problemId);
     const categorySortOrders = problems.map(problem => `${problem.category}:${problem.sortOrder}`);
@@ -260,14 +274,31 @@ export class SectionService {
       await manager.save(SectionProblemEntity, sectionProblems);
     });
 
+    const affectedProblemIds = Array.from(new Set([...oldProblemIds, ...problemIds]));
+    const oldSet = new Set(oldProblemIds);
+    const newSet = new Set(problemIds);
+    const hasAdded = problemIds.some(problemId => !oldSet.has(problemId));
+    const hasRemoved = oldProblemIds.some(problemId => !newSet.has(problemId));
+    const reason =
+      hasAdded && hasRemoved
+        ? TrainingPointChangeReason.ProblemMovedBetweenTrainings
+        : hasAdded
+        ? TrainingPointChangeReason.ProblemAddedToTraining
+        : TrainingPointChangeReason.ProblemRemovedFromTraining;
+    if (hasAdded || hasRemoved) await this.trainingPointService.reconcileProblems(affectedProblemIds, reason);
+
     return { success: true };
   }
 
   async delSectionById(id: number): Promise<void> {
+    const section = await this.sectionRepository.findOneBy({ id });
+    if (!section) throw new NotFoundException(`section ${id} not found`);
+    const problemIds = (await section.problems).map(problem => problem.problemId);
     const result = await this.sectionRepository.delete(id);
     if (result.affected === 0) {
       throw new NotFoundException(`section ${id} not found`);
     }
+    await this.trainingPointService.reconcileProblems(problemIds, TrainingPointChangeReason.SectionDeleted);
   }
 
   async reorderSections(chapterId: number, items: { id: number; sortOrder: number }[]): Promise<void> {

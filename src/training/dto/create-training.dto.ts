@@ -1,5 +1,5 @@
 import { Type } from "class-transformer";
-import { IsNumber, IsOptional, IsString } from "class-validator";
+import { IsInt, IsNumber, IsOptional, IsString, Min } from "class-validator";
 
 export class CreateTrainingDto {
   @IsString()
@@ -12,4 +12,9 @@ export class CreateTrainingDto {
   @Type(() => Number)
   @IsNumber()
   sortOrder: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pointsPerProblem: number;
 }

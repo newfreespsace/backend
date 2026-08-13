@@ -6,6 +6,8 @@ import { Repository } from "typeorm";
 import { UserEntity } from "@/user/user.entity";
 import { UserService } from "@/user/user.service";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
+import { TrainingPointService } from "@/training-points/training-point.service";
+import { TrainingPointChangeReason } from "@/training-points/entities/training-point-ledger.entity";
 
 import { CreateTrainingDto } from "./dto/create-training.dto";
 import { QueryTrainingSetResponseDto } from "./dto/query-training-set-response.dto";
@@ -32,7 +34,8 @@ export class TrainingService {
     private readonly userRepository: Repository<UserEntity>,
 
     private readonly trainingProgressService: TrainingProgressService,
-    private readonly userService: UserService
+    private readonly userService: UserService,
+    private readonly trainingPointService: TrainingPointService
   ) {}
 
   async queryTrainingSet(currentUser: UserEntity): Promise<QueryTrainingSetResponseDto> {
@@ -58,6 +61,9 @@ export class TrainingService {
   }
 
   async updateTraining(id: number, updateTrainingDto: UpdateTrainingDto): Promise<TrainingMetaDto> {
+    const existingTraining = await this.trainingRepository.findOneBy({ id });
+    if (!existingTraining) throw new NotFoundException(`training ${id} not found`);
+
     // preload() 是 TypeORM 里的一个方法，常用于更新数据前，先根据 id 查出原来的实体，再把新数据合并进去。
     const training = await this.trainingRepository.preload({
       id,
@@ -65,6 +71,12 @@ export class TrainingService {
     });
     if (!training) throw new NotFoundException(`training ${id} not found`);
     const updatedTraining = await this.trainingRepository.save(training);
+    if (existingTraining.pointsPerProblem !== updatedTraining.pointsPerProblem) {
+      await this.trainingPointService.reconcileProblems(
+        await this.getProblemIdsByTrainingId(id),
+        TrainingPointChangeReason.TrainingPointsChanged
+      );
+    }
     return { ...toTrainingMetaDto(updatedTraining) };
   }
 
@@ -195,10 +207,32 @@ export class TrainingService {
   }
 
   async delTrainingById(id: number): Promise<void> {
+    const training = await this.trainingRepository.findOneBy({ id });
+    if (!training) throw new NotFoundException(`training ${id} not found`);
+    const problemIds = await this.getProblemIdsByTrainingId(id);
     const result = await this.trainingRepository.delete(id);
     if (result.affected === 0) {
       throw new NotFoundException(`training ${id} not found`);
     }
+    await this.trainingPointService.reconcileProblems(
+      problemIds,
+      TrainingPointChangeReason.TrainingDeleted,
+      new Map([[training.id, training.title]])
+    );
+  }
+
+  private async getProblemIdsByTrainingId(trainingId: number): Promise<number[]> {
+    const rows: { problemId: string }[] = await this.trainingRepository.manager.query(
+      `
+        SELECT DISTINCT sectionProblem.problemId AS problemId
+        FROM section_problem sectionProblem
+        INNER JOIN section trainingSection ON trainingSection.id = sectionProblem.sectionId
+        INNER JOIN chapter trainingChapter ON trainingChapter.id = trainingSection.chapterId
+        WHERE trainingChapter.trainingId = ?
+      `,
+      [trainingId]
+    );
+    return rows.map(row => Number(row.problemId));
   }
 
   async reorderTrainings(items: ReorderItem[]): Promise<void> {

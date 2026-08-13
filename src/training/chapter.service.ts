@@ -4,6 +4,8 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 
 import { UserEntity } from "@/user/user.entity";
+import { TrainingPointService } from "@/training-points/training-point.service";
+import { TrainingPointChangeReason } from "@/training-points/entities/training-point-ledger.entity";
 
 import { CreateChapterDto } from "./dto/create-chapter.dto";
 import { ChapterMetaDto } from "./dto/training-meta.dto";
@@ -26,7 +28,8 @@ export class ChapterService {
 
     @InjectRepository(TrainingEntity)
     private readonly trainingRepository: Repository<TrainingEntity>,
-    private readonly trainingProgressService: TrainingProgressService
+    private readonly trainingProgressService: TrainingProgressService,
+    private readonly trainingPointService: TrainingPointService
   ) {}
 
   async queryChapterSetByTrainingId(trainingId: number, currentUser: UserEntity): Promise<ChapterMetaDto[]> {
@@ -49,6 +52,12 @@ export class ChapterService {
   }
 
   async updateChapter(id: number, updateTrainingDto: UpdateChapterDto): Promise<ChapterMetaDto> {
+    const existingChapter = await this.chapterRepository.findOneBy({ id });
+    if (!existingChapter) throw new NotFoundException(`chapter ${id} not found`);
+    const problemIds =
+      updateTrainingDto.trainingId !== undefined && updateTrainingDto.trainingId !== existingChapter.trainingId
+        ? await this.getProblemIdsByChapterId(id)
+        : [];
     const { trainingId } = updateTrainingDto;
     if (trainingId !== undefined) {
       const training = await this.trainingRepository.findOneBy({ id: trainingId });
@@ -62,6 +71,10 @@ export class ChapterService {
     if (!chapter) throw new NotFoundException(`chapter ${id} not found`);
 
     const updatedChapter = await this.chapterRepository.save(chapter);
+    await this.trainingPointService.reconcileProblems(
+      problemIds,
+      TrainingPointChangeReason.ProblemMovedBetweenTrainings
+    );
     return { ...toChapterMetaDto(updatedChapter) };
   }
 
@@ -85,10 +98,25 @@ export class ChapterService {
   }
 
   async delChapterById(id: number): Promise<void> {
+    const problemIds = await this.getProblemIdsByChapterId(id);
     const result = await this.chapterRepository.delete(id);
     if (result.affected === 0) {
       throw new NotFoundException(`chapter ${id} not found`);
     }
+    await this.trainingPointService.reconcileProblems(problemIds, TrainingPointChangeReason.ChapterDeleted);
+  }
+
+  private async getProblemIdsByChapterId(chapterId: number): Promise<number[]> {
+    const rows: { problemId: string }[] = await this.chapterRepository.manager.query(
+      `
+        SELECT DISTINCT sectionProblem.problemId AS problemId
+        FROM section_problem sectionProblem
+        INNER JOIN section trainingSection ON trainingSection.id = sectionProblem.sectionId
+        WHERE trainingSection.chapterId = ?
+      `,
+      [chapterId]
+    );
+    return rows.map(row => Number(row.problemId));
   }
 
   async reorderChapters(trainingId: number, items: ReorderItem[]): Promise<void> {

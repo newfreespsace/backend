@@ -6,6 +6,7 @@ import { SubmissionModule } from "@/submission/submission.module";
 import { SubmissionEntity } from "@/submission/submission.entity";
 import { UserModule } from "@/user/user.module";
 import { GroupModule } from "@/group/group.module";
+import { TrainingPointModule } from "@/training-points/training-point.module";
 
 import { UserEntity } from "@/user/user.entity";
 
@@ -34,7 +35,8 @@ import { TrainingProgressService } from "./training-progress.service";
     ProblemModule,
     SubmissionModule,
     UserModule,
-    GroupModule
+    GroupModule,
+    TrainingPointModule
   ],
   controllers: [TrainingController, ChapterController, SectionController],
   providers: [TrainingService, ChapterService, SectionService, TrainingProgressService]
