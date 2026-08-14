@@ -16,9 +16,6 @@ export class TrainingEntity {
   @Column()
   sortOrder: number;
 
-  @Column({ type: "integer", default: 0 })
-  pointsPerProblem: number;
-
   // 第一个箭头函数表示这个一对多关系关联的是哪个实体类
   // 第二个箭头函数表示 Chapter 那边的哪个属性是这个关系的反向关系
   @OneToMany(() => ChapterEntity, chapter => chapter.training)

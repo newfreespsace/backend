@@ -78,10 +78,6 @@ export class TrainingMetaDto {
 
   @Type(() => Number)
   @ApiProperty()
-  pointsPerProblem: number;
-
-  @Type(() => Number)
-  @ApiProperty()
   problemCount: number;
 
   @Type(() => Number)

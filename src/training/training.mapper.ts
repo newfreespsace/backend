@@ -9,7 +9,6 @@ export function toTrainingMetaDto(training: TrainingEntity): TrainingMetaDto {
     title: training.title,
     description: training.description,
     sortOrder: training.sortOrder,
-    pointsPerProblem: training.pointsPerProblem,
     problemCount: 0,
     acceptedProblemCount: 0
   };

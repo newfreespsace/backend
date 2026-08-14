@@ -12,7 +12,6 @@ import { ProblemTypeModule } from "@/problem-type/problem-type.module";
 import { AuditModule } from "@/audit/audit.module";
 import { DiscussionModule } from "@/discussion/discussion.module";
 import { ContestModule } from "@/contest/contest.module";
-import { TrainingPointModule } from "@/training-points/training-point.module";
 
 import { ProblemService } from "./problem.service";
 import { ProblemController } from "./problem.controller";
@@ -41,8 +40,7 @@ import { ProblemEntity } from "./problem.entity";
     forwardRef(() => ProblemTypeModule),
     forwardRef(() => AuditModule),
     forwardRef(() => DiscussionModule),
-    forwardRef(() => ContestModule),
-    TrainingPointModule
+    forwardRef(() => ContestModule)
   ],
   providers: [ProblemService],
   controllers: [ProblemController],

@@ -34,8 +34,6 @@ import { ContestService } from "@/contest/contest.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
 import { ProblemReviewService } from "@/problem-review/problem-review.service";
-import { TrainingPointService } from "@/training-points/training-point.service";
-import { TrainingPointChangeReason } from "@/training-points/entities/training-point-ledger.entity";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionContent } from "./submission-content.interface";
@@ -141,8 +139,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly contestService: ContestService,
     private readonly metricsService: MetricsService,
     @Inject(forwardRef(() => ProblemReviewService))
-    private readonly problemReviewService: ProblemReviewService,
-    private readonly trainingPointService: TrainingPointService
+    private readonly problemReviewService: ProblemReviewService
   ) {
     this.judgeQueueService.registerTaskType(JudgeTaskType.Submission, this);
 
@@ -680,12 +677,6 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       if (submission.status === SubmissionStatus.Accepted) {
         await this.problemService.updateProblemStatistics(submission.problemId, -1, -1);
         await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
-        await this.trainingPointService.reconcileUserProblem(
-          submission.submitterId,
-          submission.problemId,
-          TrainingPointChangeReason.LostAccepted,
-          submission.id
-        );
       } else {
         await this.problemService.updateProblemStatistics(submission.problemId, -1, 0);
       }
@@ -708,23 +699,11 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
         submission.problemId,
         "NON_AC_TO_AC"
       );
-      await this.trainingPointService.reconcileUserProblem(
-        submission.submitterId,
-        submission.problemId,
-        TrainingPointChangeReason.FirstAccepted,
-        submission.id
-      );
       await this.problemReviewService.onAcceptedSubmission(submission);
       return isFirstAccepted;
     } else if (oldAccepted && !newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, -1);
       await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
-      await this.trainingPointService.reconcileUserProblem(
-        submission.submitterId,
-        submission.problemId,
-        TrainingPointChangeReason.LostAccepted,
-        submission.id
-      );
     }
 
     return false;

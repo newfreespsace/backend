@@ -3,18 +3,8 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
-import { TrainingPointService } from "@/training-points/training-point.service";
 
 import { SiteSettingService } from "./site-setting.service";
-
-import {
-  GetTrainingPointRecalculationRequestDto,
-  GetTrainingPointRecalculationResponseDto,
-  GetTrainingPointRecalculationResponseError,
-  StartTrainingPointRecalculationRequestDto,
-  StartTrainingPointRecalculationResponseDto,
-  StartTrainingPointRecalculationResponseError
-} from "@/training-points/dto";
 
 import {
   GetSitePreferenceResponseDto,
@@ -27,10 +17,7 @@ import {
 @ApiTags("SiteSetting")
 @Controller("site-setting")
 export class SiteSettingController {
-  constructor(
-    private readonly siteSettingService: SiteSettingService,
-    private readonly trainingPointService: TrainingPointService
-  ) {}
+  constructor(private readonly siteSettingService: SiteSettingService) {}
 
   @Get("preference")
   @ApiBearerAuth()
@@ -58,53 +45,6 @@ export class SiteSettingController {
 
     return {
       preference: await this.siteSettingService.updatePreferencePatch(request.preference || {}, currentUser)
-    };
-  }
-
-  @Post("training-points/recalculate")
-  @ApiBearerAuth()
-  async startTrainingPointRecalculation(
-    @CurrentUser() currentUser: UserEntity,
-    @Body() request: StartTrainingPointRecalculationRequestDto
-  ): Promise<StartTrainingPointRecalculationResponseDto> {
-    if (!currentUser?.isAdmin)
-      return {
-        error: StartTrainingPointRecalculationResponseError.PermissionDenied
-      };
-
-    const task = await this.trainingPointService.startRecalculation(currentUser.id, request.dryRun);
-    if (!task) {
-      const activeTask = await this.trainingPointService.getActiveRecalculationTask();
-      return {
-        error: StartTrainingPointRecalculationResponseError.AlreadyRunning,
-        task: activeTask ? this.trainingPointService.toTaskDto(activeTask) : undefined
-      };
-    }
-
-    return {
-      task: this.trainingPointService.toTaskDto(task)
-    };
-  }
-
-  @Post("training-points/recalculation-status")
-  @ApiBearerAuth()
-  async getTrainingPointRecalculation(
-    @CurrentUser() currentUser: UserEntity,
-    @Body() request: GetTrainingPointRecalculationRequestDto
-  ): Promise<GetTrainingPointRecalculationResponseDto> {
-    if (!currentUser?.isAdmin)
-      return {
-        error: GetTrainingPointRecalculationResponseError.PermissionDenied
-      };
-
-    const task = await this.trainingPointService.getRecalculationTask(request.taskId);
-    if (!task)
-      return {
-        error: GetTrainingPointRecalculationResponseError.NotFound
-      };
-
-    return {
-      task: this.trainingPointService.toTaskDto(task)
     };
   }
 }
