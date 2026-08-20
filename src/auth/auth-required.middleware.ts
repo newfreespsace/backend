@@ -11,6 +11,8 @@ const ALLOWED_PATHS_FOR_ANONYMOUS = new Set([
   "auth/checkAvailability",
   "auth/sendEmailVerificationCode",
   "auth/resetPassword",
+  "cors/streamsaver/mitm.html",
+  "cors/streamsaver/sw.js",
   "migration/queryUserMigrationInfo",
   "migration/migrateUser"
 ]);
