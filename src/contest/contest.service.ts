@@ -277,7 +277,6 @@ export class ContestService {
     includeStatistics: boolean,
     ranklistScope = ContestRanklistScope.Official
   ): Promise<ContestProblemDto[]> {
-    if (ranklistScope === ContestRanklistScope.Combined) await this.ensureCombinedRanklist(contest);
     const problems = (await this.problemService.findProblemsByExistingIds(contest.problemIds)).filter(
       problem => problem
     );
@@ -360,7 +359,6 @@ export class ContestService {
     currentUser: UserEntity,
     ranklistScope = ContestRanklistScope.Official
   ): Promise<ContestRanklistRowDto[]> {
-    if (ranklistScope === ContestRanklistScope.Combined) await this.ensureCombinedRanklist(contest);
     const players = await this.contestPlayerRepository.findBy({ contestId: contest.id, ranklistScope });
     const rows = (
       await Promise.all(
@@ -402,10 +400,6 @@ export class ContestService {
     });
     rows.forEach((row, index) => (row.rank = index + 1));
     return rows;
-  }
-
-  async onSubmissionFinished(submission: SubmissionEntity): Promise<void> {
-    await this.onSubmissionUpdated(null, submission);
   }
 
   async onSubmissionUpdated(
@@ -479,7 +473,7 @@ export class ContestService {
     await this.contestPlayerRepository.upsert(player, ["contestId", "userId", "ranklistScope"]);
   }
 
-  private async ensureCombinedRanklist(contest: ContestEntity): Promise<void> {
+  async ensureCombinedRanklist(contest: ContestEntity): Promise<void> {
     const [submissions, players] = await Promise.all([
       this.submissionRepository.find({
         select: { submitterId: true },

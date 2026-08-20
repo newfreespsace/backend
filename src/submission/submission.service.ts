@@ -674,6 +674,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       });
 
       await this.submissionStatisticsService.onSubmissionUpdated(submission, null);
+      await this.contestService.onSubmissionUpdated(submission, null);
       if (submission.status === SubmissionStatus.Accepted) {
         await this.problemService.updateProblemStatistics(submission.problemId, -1, -1);
         await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
@@ -689,6 +690,10 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
    */
   private async onSubmissionUpdated(oldSubmission: SubmissionEntity, submission: SubmissionEntity): Promise<boolean> {
     await this.submissionStatisticsService.onSubmissionUpdated(oldSubmission, submission);
+    const affectsContestRanklist = [oldSubmission, submission].some(
+      item => item.contestId && ![SubmissionStatus.Pending, SubmissionStatus.Canceled].includes(item.status)
+    );
+    if (affectsContestRanklist) await this.contestService.onSubmissionUpdated(oldSubmission, submission);
 
     const oldAccepted = oldSubmission.status === SubmissionStatus.Accepted;
     const newAccepted = submission.status === SubmissionStatus.Accepted;
@@ -745,7 +750,6 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
 
       progress.isFirstAccepted = await this.onSubmissionUpdated(oldSubmission, submission);
-      await this.contestService.onSubmissionFinished(submission);
     };
 
     // Two pending submissions for the same user/problem may finish together. Serialize

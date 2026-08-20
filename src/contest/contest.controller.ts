@@ -119,6 +119,7 @@ export class ContestController {
       submissionState === ContestSubmissionState.PostContest
         ? ContestRanklistScope.Combined
         : ContestRanklistScope.Official;
+    if (ranklistScope === ContestRanklistScope.Combined) await this.contestService.ensureCombinedRanklist(contest);
 
     const [holder, group, admins, problems] = await Promise.all([
       this.userService.findUserById(contest.holderId),
@@ -174,6 +175,7 @@ export class ContestController {
     const ranklistScope = request.ranklistScope || ContestRanklistScope.Official;
     if (ranklistScope === ContestRanklistScope.Combined && !this.contestService.isEnded(contest))
       return { error: GetContestRanklistResponseError.PERMISSION_DENIED };
+    if (ranklistScope === ContestRanklistScope.Combined) await this.contestService.ensureCombinedRanklist(contest);
 
     return {
       meta: this.contestService.getContestMeta(contest),
