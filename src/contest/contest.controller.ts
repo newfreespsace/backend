@@ -242,6 +242,18 @@ export class ContestController {
       : [null, null];
     const hideNoiResult = await this.contestService.shouldHideNoiResult(currentUser, contest);
     const submissionState = this.contestService.getSubmissionState(contest);
+    const ranklistScope =
+      submissionState === ContestSubmissionState.PostContest
+        ? ContestRanklistScope.Combined
+        : ContestRanklistScope.Official;
+    if (ranklistScope === ContestRanklistScope.Combined) await this.contestService.ensureCombinedRanklist(contest);
+    const contestProblems = await this.contestService.getContestProblems(
+      contest,
+      locale,
+      currentUser,
+      false,
+      ranklistScope
+    );
     const effectiveLastAcceptedSubmission =
       lastSubmission && lastSubmission.status === SubmissionStatus.Accepted ? lastSubmission : lastAcceptedSubmission;
     const lastSubmissionMeta = lastSubmission && (await this.submissionService.getSubmissionBasicMeta(lastSubmission));
@@ -252,6 +264,7 @@ export class ContestController {
     return {
       contest: this.contestService.getContestMeta(contest),
       pid,
+      problems: contestProblems,
       problem: {
         meta: await this.problemService.getProblemMeta(problem, canViewProblemStatistics),
         tagsOfLocale: await this.problemService

@@ -1,6 +1,7 @@
 import { ApiProperty } from "@nestjs/swagger";
 
 import { ContestMetaDto } from "./contest-meta.dto";
+import { ContestProblemDto } from "./contest-problem.dto";
 
 import { GetProblemResponseDto } from "@/problem/dto";
 
@@ -25,6 +26,9 @@ export class GetContestProblemResponseDto {
 
   @ApiProperty({ type: GetProblemResponseDto })
   problem?: GetProblemResponseDto;
+
+  @ApiProperty({ type: [ContestProblemDto] })
+  problems?: ContestProblemDto[];
 
   @ApiProperty()
   permissions?: {
