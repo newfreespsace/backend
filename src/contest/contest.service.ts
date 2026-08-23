@@ -4,6 +4,7 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { In, Not, Repository } from "typeorm";
 
 import { Locale } from "@/common/locale.type";
+import { removeProblemTitlePrefix } from "@/common/problem-title";
 import { GroupService } from "@/group/group.service";
 import { ProblemEntity } from "@/problem/problem.entity";
 import { ProblemService } from "@/problem/problem.service";
@@ -298,9 +299,11 @@ export class ContestService {
         const detail = player?.scoreDetails?.[problem.id];
         const result: ContestProblemDto = {
           meta: await this.problemService.getProblemMeta(problem, includeStatistics),
-          title: await this.problemService.getProblemLocalizedTitle(
-            problem,
-            problem.locales.includes(locale) ? locale : problem.locales[0]
+          title: removeProblemTitlePrefix(
+            await this.problemService.getProblemLocalizedTitle(
+              problem,
+              problem.locales.includes(locale) ? locale : problem.locales[0]
+            )
           )
         };
 

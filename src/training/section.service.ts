@@ -3,6 +3,7 @@ import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
 
+import { removeProblemTitlePrefix } from "@/common/problem-title";
 import { GroupService } from "@/group/group.service";
 import { ProblemService, ProblemPermissionType } from "@/problem/problem.service";
 import { UserEntity } from "@/user/user.entity";
@@ -197,7 +198,9 @@ export class SectionService {
       visibleItems.map(async ({ sectionProblem, problem }) => {
         const titleLocale = problem.locales.includes(locale) ? locale : problem.locales[0];
 
-        const title = await this.problemService.getProblemLocalizedTitle(problem, titleLocale);
+        const title = removeProblemTitlePrefix(
+          await this.problemService.getProblemLocalizedTitle(problem, titleLocale)
+        );
         const problemTags = !titleOnly && (await this.problemService.getProblemTagsByProblem(problem));
         const submission = acceptedSubmissions.get(problem.id) || nonAcceptedSubmissions.get(problem.id);
 

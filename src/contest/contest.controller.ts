@@ -2,6 +2,7 @@ import { Body, Controller, Inject, Post, forwardRef } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
+import { removeProblemTitlePrefix } from "@/common/problem-title";
 import { DiscussionService } from "@/discussion/discussion.service";
 import { GroupService } from "@/group/group.service";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
@@ -274,7 +275,7 @@ export class ContestController {
           ),
         localizedContentsOfLocale: {
           locale: resultLocale,
-          title: await this.problemService.getProblemLocalizedTitle(problem, resultLocale),
+          title: removeProblemTitlePrefix(await this.problemService.getProblemLocalizedTitle(problem, resultLocale)),
           contentSections: await this.problemService.getProblemLocalizedContent(problem, resultLocale)
         },
         samples: await this.problemService.getProblemSamples(problem),
