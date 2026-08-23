@@ -106,9 +106,7 @@ export class ContestService {
       }
     });
     const visible = all.filter(contest =>
-      nonpublic
-        ? !contest.isPublic
-        : canViewNonpublic || this.isVisibleInListSync(user, contest, groupIds)
+      nonpublic ? !contest.isPublic : canViewNonpublic || this.isVisibleInListSync(user, contest, groupIds)
     );
     return [visible.slice(skipCount, skipCount + takeCount), visible.length];
   }
