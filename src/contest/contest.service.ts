@@ -84,7 +84,8 @@ export class ContestService {
 
   private async canViewContest(user: UserEntity, contest: ContestEntity, manage: boolean): Promise<boolean> {
     if (manage) return true;
-    if (!contest.groupId) return contest.isPublic;
+    if (!contest.isPublic) return false;
+    if (!contest.groupId) return true;
     return !!user && !!(await this.groupService.findGroupMembership(user.id, contest.groupId));
   }
 
@@ -107,7 +108,7 @@ export class ContestService {
     const visible = all.filter(contest =>
       nonpublic
         ? !contest.isPublic
-        : this.isVisibleInListSync(user, contest, groupIds) || (canViewNonpublic && !!contest.groupId)
+        : canViewNonpublic || this.isVisibleInListSync(user, contest, groupIds)
     );
     return [visible.slice(skipCount, skipCount + takeCount), visible.length];
   }
@@ -129,7 +130,8 @@ export class ContestService {
     return await this.contestRepository
       .find({
         where: {
-          groupId: In(groupIds)
+          groupId: In(groupIds),
+          isPublic: true
         },
         order: {
           startTime: "ASC",
@@ -153,8 +155,9 @@ export class ContestService {
 
   private isVisibleInListSync(user: UserEntity, contest: ContestEntity, groupIds: number[]): boolean {
     if (this.isManagerSync(user, contest)) return true;
+    if (!contest.isPublic) return false;
     if (contest.groupId) return !!user && groupIds.includes(contest.groupId);
-    return contest.isPublic;
+    return true;
   }
 
   getContestMeta(contest: ContestEntity): ContestMetaDto {
