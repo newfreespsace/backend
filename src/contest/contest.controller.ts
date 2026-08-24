@@ -267,12 +267,7 @@ export class ContestController {
       pid,
       problems: contestProblems,
       problem: {
-        meta: await this.problemService.getProblemMeta(problem, canViewProblemStatistics),
-        tagsOfLocale: await this.problemService
-          .getProblemTagsByProblem(problem)
-          .then(problemTags =>
-            Promise.all(problemTags.map(problemTag => this.problemService.getProblemTagLocalized(problemTag, locale)))
-          ),
+        meta: await this.contestService.getProblemMetaForContest(problem, canViewProblemStatistics),
         localizedContentsOfLocale: {
           locale: resultLocale,
           title: removeProblemTitlePrefix(await this.problemService.getProblemLocalizedTitle(problem, resultLocale)),

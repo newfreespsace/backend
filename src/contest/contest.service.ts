@@ -18,6 +18,8 @@ import { ContestEntity, ContestType } from "./contest.entity";
 import { ContestSubmissionState } from "./contest-submission-state.enum";
 import { ContestPlayerEntity, ContestPlayerScoreDetail, ContestRanklistScope } from "./contest-player.entity";
 
+import { ProblemMetaDto } from "@/problem/dto";
+
 import { ContestMetaDto, ContestProblemDto, ContestRanklistRowDto, SaveContestRequestDto } from "./dto";
 
 export enum ContestPermissionType {
@@ -51,6 +53,13 @@ export class ContestService {
 
   async findContestById(contestId: number): Promise<ContestEntity> {
     return await this.contestRepository.findOneBy({ id: contestId });
+  }
+
+  async getProblemMetaForContest(problem: ProblemEntity, includeStatistics?: boolean): Promise<ProblemMetaDto> {
+    const meta = await this.problemService.getProblemMeta(problem, includeStatistics);
+    Reflect.deleteProperty(meta, "displayId");
+    Reflect.deleteProperty(meta, "isPublic");
+    return meta;
   }
 
   async userHasPermission(user: UserEntity, contest: ContestEntity, type: ContestPermissionType): Promise<boolean> {
@@ -298,7 +307,7 @@ export class ContestService {
       problems.map(async problem => {
         const detail = player?.scoreDetails?.[problem.id];
         const result: ContestProblemDto = {
-          meta: await this.problemService.getProblemMeta(problem, includeStatistics),
+          meta: await this.getProblemMetaForContest(problem, includeStatistics),
           title: removeProblemTitlePrefix(
             await this.problemService.getProblemLocalizedTitle(
               problem,
