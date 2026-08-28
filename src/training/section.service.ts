@@ -267,10 +267,25 @@ export class SectionService {
   }
 
   async delSectionById(id: number): Promise<void> {
-    const result = await this.sectionRepository.delete(id);
-    if (result.affected === 0) {
-      throw new NotFoundException(`section ${id} not found`);
-    }
+    await this.sectionRepository.manager.transaction(async manager => {
+      const sectionRepository = manager.getRepository(SectionEntity);
+      const section = await sectionRepository.findOneBy({ id });
+      if (!section) throw new NotFoundException(`section ${id} not found`);
+
+      await sectionRepository.delete(id);
+
+      const remainingSections = await sectionRepository.find({
+        where: { chapterId: section.chapterId },
+        order: { sortOrder: "ASC", id: "ASC" }
+      });
+      await Promise.all(
+        remainingSections.map((remainingSection, index) => {
+          const sortOrder = index + 1;
+          if (remainingSection.sortOrder === sortOrder) return Promise.resolve();
+          return sectionRepository.update(remainingSection.id, { sortOrder });
+        })
+      );
+    });
   }
 
   async reorderSections(chapterId: number, items: { id: number; sortOrder: number }[]): Promise<void> {

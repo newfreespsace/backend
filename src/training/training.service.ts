@@ -195,10 +195,24 @@ export class TrainingService {
   }
 
   async delTrainingById(id: number): Promise<void> {
-    const result = await this.trainingRepository.delete(id);
-    if (result.affected === 0) {
-      throw new NotFoundException(`training ${id} not found`);
-    }
+    await this.trainingRepository.manager.transaction(async manager => {
+      const trainingRepository = manager.getRepository(TrainingEntity);
+      const training = await trainingRepository.findOneBy({ id });
+      if (!training) throw new NotFoundException(`training ${id} not found`);
+
+      await trainingRepository.delete(id);
+
+      const remainingTrainings = await trainingRepository.find({
+        order: { sortOrder: "ASC", id: "ASC" }
+      });
+      await Promise.all(
+        remainingTrainings.map((remainingTraining, index) => {
+          const sortOrder = index + 1;
+          if (remainingTraining.sortOrder === sortOrder) return Promise.resolve();
+          return trainingRepository.update(remainingTraining.id, { sortOrder });
+        })
+      );
+    });
   }
 
   async reorderTrainings(items: ReorderItem[]): Promise<void> {

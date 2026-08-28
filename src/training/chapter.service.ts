@@ -85,10 +85,25 @@ export class ChapterService {
   }
 
   async delChapterById(id: number): Promise<void> {
-    const result = await this.chapterRepository.delete(id);
-    if (result.affected === 0) {
-      throw new NotFoundException(`chapter ${id} not found`);
-    }
+    await this.chapterRepository.manager.transaction(async manager => {
+      const chapterRepository = manager.getRepository(ChapterEntity);
+      const chapter = await chapterRepository.findOneBy({ id });
+      if (!chapter) throw new NotFoundException(`chapter ${id} not found`);
+
+      await chapterRepository.delete(id);
+
+      const remainingChapters = await chapterRepository.find({
+        where: { trainingId: chapter.trainingId },
+        order: { sortOrder: "ASC", id: "ASC" }
+      });
+      await Promise.all(
+        remainingChapters.map((remainingChapter, index) => {
+          const sortOrder = index + 1;
+          if (remainingChapter.sortOrder === sortOrder) return Promise.resolve();
+          return chapterRepository.update(remainingChapter.id, { sortOrder });
+        })
+      );
+    });
   }
 
   async reorderChapters(trainingId: number, items: ReorderItem[]): Promise<void> {
