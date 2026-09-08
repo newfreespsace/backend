@@ -10,6 +10,7 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\"",
     "check-style": "prettier --check \"src/**/*.ts\"",
+    "test:problem-review": "npm run build && node --test tests/problem-review.test.cjs",
     "lint": "eslint src --ext ts --cache",
     "start": "nest start",
     "start:debug": "nest start --debug --watch",

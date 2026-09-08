@@ -10,13 +10,50 @@ import {
   Max,
   IsNumber,
   ValidateNested,
-  IsIn
+  IsIn,
+  IsInt,
+  IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
+  ValidateBy
 } from "class-validator";
 import { Type } from "class-transformer";
 
 import { Locale } from "@/common/locale.type";
 
 import { UserPreference } from "../user-preference.interface";
+
+class UserPreferenceProblemReviewScheduleItemDto {
+  @IsInt()
+  @Min(1)
+  @Max(365)
+  availableAfterDays: number;
+
+  @IsInt()
+  @Min(2)
+  @Max(365)
+  @ValidateBy({
+    name: "reviewDeadlineAfterStart",
+    validator: {
+      validate: (value, args) => value > (args.object as UserPreferenceProblemReviewScheduleItemDto).availableAfterDays,
+      defaultMessage: () => "overdueAfterDays must be greater than availableAfterDays"
+    }
+  })
+  overdueAfterDays: number;
+}
+
+class UserPreferenceProblemReviewDto {
+  @IsBoolean()
+  enabled: boolean;
+
+  @IsArray()
+  @IsObject({ each: true })
+  @ArrayMinSize(1)
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => UserPreferenceProblemReviewScheduleItemDto)
+  schedule: UserPreferenceProblemReviewScheduleItemDto[];
+}
 
 class UserPreferenceLocaleDto {
   @IsEnum(Locale)
@@ -86,6 +123,12 @@ class UserPreferenceCodeDto {
 }
 
 export class UserPreferenceDto implements UserPreference {
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => UserPreferenceProblemReviewDto)
+  problemReview?: UserPreferenceProblemReviewDto;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => UserPreferenceLocaleDto)

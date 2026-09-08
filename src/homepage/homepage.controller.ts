@@ -113,11 +113,13 @@ export class HomepageController {
       friendLinks: homepageSettings.friendLinks.enabled ? homepageSettings.friendLinks : null,
       topUsers,
       latestUpdatedProblems,
-      reviewSummary: reviews && {
-        pendingCount: reviews.count,
-        overdueCount: reviews.overdueCount,
-        items: reviews.result
-      }
+      reviewSummary: reviews?.enabled
+        ? {
+            pendingCount: reviews.count,
+            overdueCount: reviews.overdueCount,
+            items: reviews.result
+          }
+        : null
     };
   }
 

@@ -3,7 +3,7 @@ import crypto from "crypto";
 import { Injectable, forwardRef, Inject } from "@nestjs/common";
 import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 
-import { Repository, DataSource, Like, MoreThan, EntityManager } from "typeorm";
+import { Repository, DataSource, Like, MoreThan, EntityManager, IsNull } from "typeorm";
 
 import { escapeLike } from "@/database/database.utils";
 import { LockService } from "@/redis/lock.service";
@@ -14,6 +14,8 @@ import { ConfigService } from "@/config/config.service";
 import { AuthEmailVerificationCodeService } from "@/auth/auth-email-verification-code.service";
 import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { delay, DELAY_FOR_SECURITY } from "@/common/delay";
+import { ProblemReviewEntity } from "@/problem-review/problem-review.entity";
+import { calculateReviewWindow, getProblemReviewPreference } from "@/problem-review/problem-review.schedule";
 
 import { UserEntity } from "./user.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "./user-privilege.service";
@@ -374,8 +376,39 @@ export class UserService {
   }
 
   async updateUserPreference(user: UserEntity, preference: UserPreference): Promise<void> {
-    const userPreference = await this.userPreferenceRepository.findOneBy({ userId: user.id });
-    userPreference.preference = preference;
-    await this.userPreferenceRepository.save(userPreference);
+    await this.connection.transaction(async manager => {
+      const preferenceRepository = manager.getRepository(UserPreferenceEntity);
+      // Accepted submissions take this same lock before reading the user's rules.
+      const userPreference = await preferenceRepository.findOne({
+        where: { userId: user.id },
+        lock: { mode: "pessimistic_write" }
+      });
+      const oldConfig = getProblemReviewPreference(userPreference.preference.problemReview);
+      const newConfig = getProblemReviewPreference(preference.problemReview);
+
+      if (JSON.stringify(oldConfig.schedule) !== JSON.stringify(newConfig.schedule)) {
+        const reviewRepository = manager.getRepository(ProblemReviewEntity);
+        const reviews = await reviewRepository.findBy({ userId: user.id, completedAt: IsNull() });
+        const now = new Date();
+        for (const review of reviews) {
+          if (review.completedReviewCount >= newConfig.schedule.length) {
+            review.completedAt = now;
+          } else {
+            Object.assign(
+              review,
+              calculateReviewWindow(
+                review.lastReviewedAt ?? review.firstAcceptedAt,
+                newConfig.schedule[review.completedReviewCount]
+              )
+            );
+          }
+          review.updatedAt = now;
+        }
+        if (reviews.length) await reviewRepository.save(reviews);
+      }
+
+      userPreference.preference = preference;
+      await preferenceRepository.save(userPreference);
+    });
   }
 }

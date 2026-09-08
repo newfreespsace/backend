@@ -1,6 +1,8 @@
 import { Locale } from "@/common/locale.type";
+import { ProblemReviewPreference } from "@/problem-review/problem-review.schedule";
 
 export interface UserPreference {
+  problemReview?: ProblemReviewPreference;
   locale?: {
     system?: Locale;
     content?: Locale;
