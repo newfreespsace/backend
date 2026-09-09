@@ -17,7 +17,8 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "postinstall": "patch-package",
-    "dev": "LYRIO_CONFIG_FILE=./config.yaml nest start --watch"
+    "dev": "LYRIO_CONFIG_FILE=./config.yaml nest start --watch",
+    "test:whiteboard": "npm run build && node --test tests/whiteboard.test.cjs"
   },
   "config": {
     "commitizen": {
