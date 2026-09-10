@@ -4,14 +4,25 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 
-import { SaveWhiteboardDto, WhiteboardIdDto, WhiteboardVersionDto } from "./whiteboard.dto";
+import { SaveLibraryDto, SaveWhiteboardDto, WhiteboardIdDto, WhiteboardVersionDto } from "./whiteboard.dto";
 import { WhiteboardService } from "./whiteboard.service";
+import { WhiteboardLibraryService } from "./library.service";
 
 @ApiTags("Whiteboard")
 @ApiBearerAuth()
 @Controller("whiteboard")
 export class WhiteboardController {
-  constructor(private readonly service: WhiteboardService) {}
+  constructor(private readonly service: WhiteboardService, private readonly library: WhiteboardLibraryService) {}
+
+  @Post("library/get")
+  getLibrary(@CurrentUser() user: UserEntity) {
+    return this.library.get(this.userId(user));
+  }
+
+  @Post("library/save")
+  saveLibrary(@CurrentUser() user: UserEntity, @Body() request: SaveLibraryDto) {
+    return this.library.save(this.userId(user), request.changes);
+  }
 
   private userId(user: UserEntity): number {
     if (!user) throw new ForbiddenException("permission denied");

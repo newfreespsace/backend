@@ -1,5 +1,11 @@
 import { IsInt, IsString, IsUUID, Max, MaxLength, Min, MinLength } from "class-validator";
 
+export class SaveLibraryDto {
+  @IsString()
+  @MaxLength(10 * 1024 * 1024)
+  changes: string;
+}
+
 export class WhiteboardIdDto {
   @IsUUID("4")
   id: string;
