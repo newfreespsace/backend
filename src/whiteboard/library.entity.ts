@@ -1,4 +1,5 @@
 import { Column, Entity, JoinColumn, ManyToOne, PrimaryColumn } from "typeorm";
+
 import { UserEntity } from "@/user/user.entity";
 
 @Entity("whiteboard_library")

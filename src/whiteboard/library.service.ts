@@ -1,6 +1,8 @@
 import { BadRequestException, ConflictException, Injectable, PayloadTooLargeException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
+
 import { Repository } from "typeorm";
+
 import { WhiteboardLibraryEntity } from "./library.entity";
 
 export const MAX_LIBRARY_BYTES = 10 * 1024 * 1024;
@@ -16,7 +18,7 @@ export function parseLibraryChanges(json: string): LibraryChange[] {
     for (const change of changes) {
       if (!change || typeof change.id !== "string" || !change.id || change.id.length > 128) throw new Error();
       if (change.item !== undefined) {
-        const item = change.item;
+        const { item } = change;
         if (
           !item ||
           item.id !== change.id ||
@@ -55,6 +57,8 @@ export class WhiteboardLibraryService {
   async save(userId: number, json: string) {
     const changes = parseLibraryChanges(json);
     // Retry against the latest snapshot. Independent edits on other devices are preserved.
+    // Each attempt depends on the previous database result, so these operations must stay sequential.
+    /* eslint-disable no-await-in-loop */
     for (let attempt = 0; attempt < 8; attempt++) {
       const previous = await this.repository.findOneBy({ userId });
       const items = new Map<string, LibraryItem>(
@@ -84,6 +88,7 @@ export class WhiteboardLibraryService {
         }
       }
     }
+    /* eslint-enable no-await-in-loop */
     throw new ConflictException("素材库正在其他设备上更新，请重试");
   }
 }
