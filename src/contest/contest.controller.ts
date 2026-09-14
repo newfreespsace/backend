@@ -1,5 +1,5 @@
 import { Body, Controller, Inject, Post, forwardRef } from "@nestjs/common";
-import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
+import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { removeProblemTitlePrefix } from "@/common/problem-title";
@@ -26,6 +26,8 @@ import {
   QueryContestsRequestDto,
   QueryContestsResponseDto,
   QueryContestsResponseError,
+  QueryContestsByProblemIdDto,
+  QueryContestsByProblemIdResponseDto,
   SaveContestRequestDto,
   SaveContestResponseDto,
   GetContestProblemRequestDto,
@@ -89,6 +91,15 @@ export class ContestController {
         filterNonpublic: canCreate
       }
     };
+  }
+
+  @Post("queryContestsByProblemId")
+  @ApiOkResponse({ type: QueryContestsByProblemIdResponseDto })
+  async queryContestsByProblemId(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: QueryContestsByProblemIdDto
+  ): Promise<QueryContestsByProblemIdResponseDto> {
+    return await this.contestService.queryContestsByProblemId(currentUser, request);
   }
 
   @Post("getContest")

@@ -3,6 +3,7 @@ export * from "./contest-problem.dto";
 export * from "./contest-ranklist-row.dto";
 export * from "./query-contests-request.dto";
 export * from "./query-contests-response.dto";
+export * from "./query-contests-by-problem-id.dto";
 export * from "./get-contest-request.dto";
 export * from "./get-contest-response.dto";
 export * from "./save-contest-request.dto";

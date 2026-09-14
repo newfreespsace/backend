@@ -1,4 +1,4 @@
-import { Inject, Injectable, forwardRef } from "@nestjs/common";
+import { ForbiddenException, Inject, Injectable, NotFoundException, forwardRef } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 
 import { In, Not, Repository } from "typeorm";
@@ -7,7 +7,7 @@ import { Locale } from "@/common/locale.type";
 import { removeProblemTitlePrefix } from "@/common/problem-title";
 import { GroupService } from "@/group/group.service";
 import { ProblemEntity } from "@/problem/problem.entity";
-import { ProblemService } from "@/problem/problem.service";
+import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
 import { ContestSubmissionPhase, SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { UserEntity } from "@/user/user.entity";
@@ -20,7 +20,14 @@ import { ContestPlayerEntity, ContestPlayerScoreDetail, ContestRanklistScope } f
 
 import { ProblemMetaDto } from "@/problem/dto";
 
-import { ContestMetaDto, ContestProblemDto, ContestRanklistRowDto, SaveContestRequestDto } from "./dto";
+import {
+  ContestMetaDto,
+  ContestProblemDto,
+  ContestRanklistRowDto,
+  QueryContestsByProblemIdDto,
+  QueryContestsByProblemIdResponseDto,
+  SaveContestRequestDto
+} from "./dto";
 
 export enum ContestPermissionType {
   View = "View",
@@ -119,6 +126,37 @@ export class ContestService {
       nonpublic ? !contest.isPublic : canViewNonpublic || this.isVisibleInListSync(user, contest, groupIds)
     );
     return [visible.slice(skipCount, skipCount + takeCount), visible.length];
+  }
+
+  async queryContestsByProblemId(
+    user: UserEntity,
+    request: QueryContestsByProblemIdDto
+  ): Promise<QueryContestsByProblemIdResponseDto> {
+    const problem = await this.problemService.findProblemById(request.problemId);
+    if (!problem) throw new NotFoundException(`problem ${request.problemId} not found`);
+    if (!(await this.problemService.userHasPermission(user, problem, ProblemPermissionType.View))) {
+      throw new ForbiddenException("permission denied");
+    }
+
+    const contests = await this.contestRepository.find({
+      order: {
+        startTime: "DESC",
+        id: "DESC"
+      }
+    });
+    const referencedContests = contests.filter(contest => contest.problemIds.includes(request.problemId));
+    const visibility = await Promise.all(
+      referencedContests.map(contest => this.userHasPermission(user, contest, ContestPermissionType.View))
+    );
+
+    return {
+      references: referencedContests
+        .filter((_, index) => visibility[index])
+        .map(contest => ({
+          contestId: contest.id,
+          contestTitle: contest.title
+        }))
+    };
   }
 
   private isManagerSync(user: UserEntity, contest: ContestEntity): boolean {
