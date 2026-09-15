@@ -42,6 +42,19 @@ jobs:
             git fetch origin master
             git reset --hard "$DEPLOY_SHA"
 
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              . "$NVM_DIR/nvm.sh"
+              nvm install
+              nvm use
+            fi
+
+            if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) === 22 ? 0 : 1)'; then
+              echo "Node.js 22 is required. Install NVM/Node 22 for the deployment user before deploying."
+              exit 1
+            fi
+
+            node --version
             yarn install --frozen-lockfile --production=false
             yarn build
 
