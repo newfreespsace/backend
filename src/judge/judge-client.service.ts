@@ -99,7 +99,7 @@ export class JudgeClientService {
     const str = await this.redis.get(REDIS_KEY_JUDGE_CLIENT_SYSTEM_INFO.format(judgeClient.id));
     try {
       return JSON.parse(str);
-    } catch (e) {
+    } catch {
       return null;
     }
   }

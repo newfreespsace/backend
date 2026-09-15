@@ -24,7 +24,7 @@ export class FileController {
     let content: Awaited<ReturnType<FileService["getProxyDownloadStream"]>>;
     try {
       content = await this.fileService.getProxyDownloadStream(token);
-    } catch (e) {
+    } catch {
       response.status(404).send("File not found");
       return;
     }

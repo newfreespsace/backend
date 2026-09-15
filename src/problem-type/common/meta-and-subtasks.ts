@@ -214,7 +214,7 @@ export function validateMetaAndSubtasks(
       (judgeInfo.subtasks || []).map((subtask, i) => i),
       edges
     );
-  } catch (e) {
+  } catch {
     throw ["CYCLICAL_SUBTASK_DEPENDENCY"];
   }
 

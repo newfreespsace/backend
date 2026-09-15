@@ -69,7 +69,7 @@ export class SubmissionStatisticsService {
     const str = await this.redisService.cacheGet(key);
     try {
       return JSON.parse(str);
-    } catch (e) {
+    } catch {
       return null;
     }
   }

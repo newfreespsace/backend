@@ -114,7 +114,7 @@ export class AuthSessionService {
     try {
       const [userId, sessionId] = this.decodeSessionKey(sessionKey);
       await this.revokeSession(userId, sessionId);
-    } catch (e) {
+    } catch {
       // Do nothing if we can't decide the session key.
     }
   }
@@ -133,7 +133,7 @@ export class AuthSessionService {
       }
 
       return [sessionId, user];
-    } catch (e) {
+    } catch {
       return [null, null];
     }
   }

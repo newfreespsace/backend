@@ -93,7 +93,7 @@ export class SubmissionProgressService {
     const str = await this.redis.get(REDIS_KEY_SUBMISSION_PROGRESS.format(submissionId));
     try {
       return JSON.parse(str);
-    } catch (e) {
+    } catch {
       return null;
     }
   }

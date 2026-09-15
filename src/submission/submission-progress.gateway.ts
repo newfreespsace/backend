@@ -106,7 +106,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
   decodeSubscription(subscriptionKey: string): SubmissionProgressSubscription {
     try {
       return jwt.verify(subscriptionKey, this.secret) as SubmissionProgressSubscription;
-    } catch (e) {
+    } catch {
       logger.log(`Invalid subscription key: ${subscriptionKey}`);
       return null;
     }
