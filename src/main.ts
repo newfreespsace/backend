@@ -50,6 +50,12 @@ async function initialize(): Promise<[packageInfo: any, configService: ConfigSer
     ...(process.env.NODE_ENV === "production" ? { logger: ["warn", "error"] } : {})
   });
   const configService = app.get(ConfigService);
+  if (configService.config.security.crossOrigin.enabled) {
+    app.enableCors({
+      origin: configService.config.security.crossOrigin.whiteList,
+      credentials: true
+    });
+  }
   app.setGlobalPrefix("api");
   app.useGlobalFilters(app.get(ErrorFilter), app.get(RecaptchaFilter));
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));

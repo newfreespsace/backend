@@ -37,6 +37,7 @@ import { TrainingModule } from "./training/training.module";
 import { ContestAccessGuard } from "./contest/contest-access.guard";
 import { WhiteboardModule } from "./whiteboard/whiteboard.module";
 import { ProblemReviewModule } from "./problem-review/problem-review.module";
+import { UsacoGuideModule } from "./usaco-guide/usaco-guide.module";
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { ProblemReviewModule } from "./problem-review/problem-review.module";
     forwardRef(() => SiteSettingModule),
     forwardRef(() => GalleryModule),
     forwardRef(() => ProblemReviewModule),
+    UsacoGuideModule,
     TrainingModule
   ],
   controllers: [AppController],

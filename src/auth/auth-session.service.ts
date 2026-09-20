@@ -3,6 +3,8 @@ import fs from "fs-extra";
 
 import { Injectable } from "@nestjs/common";
 
+import type { Response } from "express";
+
 import jwt from "jsonwebtoken";
 import { Redis } from "ioredis";
 import moment from "moment-timezone";
@@ -11,6 +13,8 @@ import { UserEntity } from "@/user/user.entity";
 import { ConfigService } from "@/config/config.service";
 import { UserService } from "@/user/user.service";
 import { RedisService } from "@/redis/redis.service";
+
+import { SESSION_COOKIE_NAME } from "./auth.constants";
 
 // Refer to scripts/session-manager.lua for session management details
 interface RedisWithSessionManager extends Redis {
@@ -55,6 +59,32 @@ export class AuthSessionService {
     this.redis.defineCommand("callSessionManager", {
       numberOfKeys: 0,
       lua: fs.readFileSync(join(__dirname, "scripts", "session-manager.lua")).toString("utf-8")
+    });
+  }
+
+  getAllowedBrowserOrigins(): string[] {
+    return this.configService.config.security.crossOrigin.enabled
+      ? this.configService.config.security.crossOrigin.whiteList
+      : [];
+  }
+
+  setSessionCookie(response: Response, sessionKey: string): void {
+    const payload = jwt.decode(sessionKey) as SessionTokenPayload;
+    response.cookie(SESSION_COOKIE_NAME, sessionKey, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      expires: payload?.exp ? new Date(payload.exp * 1000) : undefined
+    });
+  }
+
+  clearSessionCookie(response: Response): void {
+    response.clearCookie(SESSION_COOKIE_NAME, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/"
     });
   }
 

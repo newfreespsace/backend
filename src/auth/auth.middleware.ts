@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "async_hooks";
 
-import { NestMiddleware, Injectable } from "@nestjs/common";
+import { NestMiddleware, Injectable, ForbiddenException } from "@nestjs/common";
 
 import { Request, Response } from "express"; // eslint-disable-line import/no-extraneous-dependencies
 
@@ -8,6 +8,7 @@ import { UserEntity } from "@/user/user.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
 
 import { AuthSessionService } from "./auth-session.service";
+import { SESSION_COOKIE_NAME } from "./auth.constants";
 
 const asyncLocalStorage = new AsyncLocalStorage();
 
@@ -16,6 +17,24 @@ export interface Session {
   sessionId?: number;
   user?: UserEntity;
   userCanSkipRecaptcha: () => Promise<boolean>;
+}
+
+function getCookie(req: Request, name: string): string | undefined {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return undefined;
+
+  for (const cookie of cookieHeader.split(";")) {
+    const separator = cookie.indexOf("=");
+    if (separator === -1) continue;
+    if (cookie.slice(0, separator).trim() === name) {
+      try {
+        return decodeURIComponent(cookie.slice(separator + 1).trim());
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
 }
 
 export interface RequestWithSession extends Request {
@@ -31,7 +50,17 @@ export class AuthMiddleware implements NestMiddleware {
 
   async use(req: RequestWithSession, res: Response, next: () => void): Promise<void> {
     const authHeader = req.headers.authorization;
-    const sessionKey = authHeader && authHeader.split(" ")[1];
+    const bearerSessionKey = authHeader && authHeader.split(" ")[1];
+    const cookieSessionKey = getCookie(req, SESSION_COOKIE_NAME);
+    const sessionKey = bearerSessionKey || cookieSessionKey;
+
+    if (cookieSessionKey && !bearerSessionKey && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const { origin } = req.headers;
+      const allowedOrigins = this.authSessionService.getAllowedBrowserOrigins();
+      const requestOrigin = `${req.protocol}://${req.get("host")}`;
+      if (origin && origin !== requestOrigin && !allowedOrigins.includes(origin))
+        throw new ForbiddenException("invalid request origin");
+    }
     if (sessionKey) {
       const [sessionId, user] = await this.authSessionService.accessSession(sessionKey);
       if (user) {

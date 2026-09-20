@@ -34,6 +34,10 @@ security:
     enabled: true
     whiteList:
       - http://lyrio-ui.test
+      - http://localhost:3000
+      - http://localhost:5173
+      - https://nsoj.top
+      - https://guide.nsoj.top
   sessionSecret: don't leak this
   sessionTimezone: Asia/Shanghai
   sessionExpirationHour: 6

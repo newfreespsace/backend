@@ -1,5 +1,8 @@
-import { Controller, Post, Body, Req } from "@nestjs/common";
+import { Controller, Post, Body, Req, Res } from "@nestjs/common";
+
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+
+import type { Response } from "express";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
@@ -36,6 +39,7 @@ export class MigrationController {
   })
   async migrateUser(
     @Req() req: RequestWithSession,
+    @Res({ passthrough: true }) response: Response,
     @CurrentUser() currentUser: UserEntity,
     @Body() request: MigrateUserRequestDto
   ): Promise<MigrateUserResponseDto> {
@@ -94,9 +98,9 @@ export class MigrationController {
         : null
     );
 
-    return {
-      token: await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"])
-    };
+    const token = await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"]);
+    this.authSessionService.setSessionCookie(response, token);
+    return { token };
   }
 
   @Post("queryUserMigrationInfo")

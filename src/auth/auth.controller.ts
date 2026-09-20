@@ -1,7 +1,8 @@
-import { Controller, Get, Post, Body, Query, Req } from "@nestjs/common";
+import { Controller, Get, Post, Body, Query, Req, Res } from "@nestjs/common";
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Recaptcha } from "@nestlab/google-recaptcha";
+import type { Response } from "express";
 
 import { appGitRepoInfo } from "@/main";
 import { ConfigService } from "@/config/config.service";
@@ -78,8 +79,12 @@ export class AuthController {
     summary: "A (JSONP or JSON) request to get current user's info and server preference.",
     description: "In order to support JSONP, this API doesn't use HTTP Authorization header."
   })
-  async getSessionInfo(@Query() request: GetSessionInfoRequestDto): Promise<GetSessionInfoResponseDto> {
+  async getSessionInfo(
+    @Query() request: GetSessionInfoRequestDto,
+    @Res({ passthrough: true }) response: Response
+  ): Promise<GetSessionInfoResponseDto> {
     const [, user] = await this.authSessionService.accessSession(request.token);
+    if (user && request.token) this.authSessionService.setSessionCookie(response, request.token);
 
     const result: GetSessionInfoResponseDto = {
       serverPreference: await this.siteSettingService.getPreferenceConfigToBeSentToUser(),
@@ -116,6 +121,7 @@ export class AuthController {
   })
   async login(
     @Req() req: RequestWithSession,
+    @Res({ passthrough: true }) response: Response,
     @CurrentUser() currentUser: UserEntity,
     @Body() request: LoginRequestDto
   ): Promise<LoginResponseDto> {
@@ -179,8 +185,10 @@ export class AuthController {
 
     await this.auditService.log(user.id, "auth.login");
 
+    const token = await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"]);
+    this.authSessionService.setSessionCookie(response, token);
     return {
-      token: await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"]),
+      token,
       username: user.username
     };
   }
@@ -192,12 +200,14 @@ export class AuthController {
   })
   async logout(
     @CurrentUser() currentUser: UserEntity,
-    @Req() req: RequestWithSession
+    @Req() req: RequestWithSession,
+    @Res({ passthrough: true }) response: Response
   ): Promise<Record<string, unknown>> {
     const sessionKey = req?.session?.sessionKey;
     if (sessionKey) {
       await this.authSessionService.endSession(sessionKey);
     }
+    this.authSessionService.clearSessionCookie(response);
 
     if (currentUser) await this.auditService.log("auth.logout");
 
@@ -357,6 +367,7 @@ export class AuthController {
   })
   async resetPassword(
     @Req() req: RequestWithSession,
+    @Res({ passthrough: true }) response: Response,
     @CurrentUser() currentUser: UserEntity,
     @Body() request: ResetPasswordRequestDto
   ): Promise<ResetPasswordResponseDto> {
@@ -396,9 +407,9 @@ export class AuthController {
 
     if (!user.isActive) return { pendingActivation: true };
 
-    return {
-      token: await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"])
-    };
+    const token = await this.authSessionService.newSession(user, req.ip, req.headers["user-agent"]);
+    this.authSessionService.setSessionCookie(response, token);
+    return { token };
   }
 
   @Post("listUserSessions")
