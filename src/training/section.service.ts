@@ -123,19 +123,59 @@ export class SectionService {
   }
 
   async updateSection(id: number, updateSectionDto: UpdateSectionDto): Promise<SectionMetaDto> {
-    const { chapterId } = updateSectionDto;
-    if (chapterId !== undefined) {
-      const chapter = await this.chapterRepository.findOneBy({ id: chapterId });
-      if (!chapter) throw new NotFoundException(`chaper ${chapterId} not found`);
-    }
+    return await this.sectionRepository.manager.transaction(async manager => {
+      const chapterRepository = manager.getRepository(ChapterEntity);
+      const sectionRepository = manager.getRepository(SectionEntity);
+      const existingSection = await sectionRepository.findOneBy({ id });
+      if (!existingSection) throw new NotFoundException(`section ${id} not found`);
 
-    const section = await this.sectionRepository.preload({
-      id,
-      ...updateSectionDto
+      const targetChapterId = updateSectionDto.chapterId ?? existingSection.chapterId;
+      if (updateSectionDto.chapterId !== undefined) {
+        const chapter = await chapterRepository.findOneBy({ id: targetChapterId });
+        if (!chapter) throw new NotFoundException(`chapter ${targetChapterId} not found`);
+      }
+
+      const chapterChanged = targetChapterId !== existingSection.chapterId;
+      let targetSortOrder = existingSection.sortOrder;
+      if (chapterChanged) {
+        const targetSections = await sectionRepository.find({
+          where: { chapterId: targetChapterId },
+          order: { sortOrder: "ASC", id: "ASC" }
+        });
+        await Promise.all(
+          targetSections.map((targetSection, index) => {
+            const sortOrder = index + 1;
+            if (targetSection.sortOrder === sortOrder) return Promise.resolve();
+            return sectionRepository.update(targetSection.id, { sortOrder });
+          })
+        );
+        targetSortOrder = targetSections.length + 1;
+      }
+
+      const section = await sectionRepository.preload({
+        id,
+        ...updateSectionDto,
+        ...(chapterChanged ? { sortOrder: targetSortOrder } : {})
+      });
+      if (!section) throw new NotFoundException(`section ${id} not found`);
+
+      const updatedSection = await sectionRepository.save(section);
+      if (chapterChanged) {
+        const remainingSections = await sectionRepository.find({
+          where: { chapterId: existingSection.chapterId },
+          order: { sortOrder: "ASC", id: "ASC" }
+        });
+        await Promise.all(
+          remainingSections.map((remainingSection, index) => {
+            const sortOrder = index + 1;
+            if (remainingSection.sortOrder === sortOrder) return Promise.resolve();
+            return sectionRepository.update(remainingSection.id, { sortOrder });
+          })
+        );
+      }
+
+      return { ...toSectionMetaDto(updatedSection) };
     });
-    if (!section) throw new NotFoundException(`section ${id} not found`);
-    const updateSection = await this.sectionRepository.save(section);
-    return { ...toSectionMetaDto(updateSection) };
   }
 
   // async addProblemToSection(addProblemFileRequestDto: AddProblemToSectionDto): Promise<AddProblemToSectionResponseDto> {

@@ -48,21 +48,60 @@ export class ChapterService {
     return { ...toChapterMetaDto(savedChapter) };
   }
 
-  async updateChapter(id: number, updateTrainingDto: UpdateChapterDto): Promise<ChapterMetaDto> {
-    const { trainingId } = updateTrainingDto;
-    if (trainingId !== undefined) {
-      const training = await this.trainingRepository.findOneBy({ id: trainingId });
-      if (!training) throw new NotFoundException(`training ${trainingId} not found`);
-    }
+  async updateChapter(id: number, updateChapterDto: UpdateChapterDto): Promise<ChapterMetaDto> {
+    return await this.chapterRepository.manager.transaction(async manager => {
+      const chapterRepository = manager.getRepository(ChapterEntity);
+      const trainingRepository = manager.getRepository(TrainingEntity);
+      const existingChapter = await chapterRepository.findOneBy({ id });
+      if (!existingChapter) throw new NotFoundException(`chapter ${id} not found`);
 
-    const chapter = await this.chapterRepository.preload({
-      id,
-      ...updateTrainingDto
+      const targetTrainingId = updateChapterDto.trainingId ?? existingChapter.trainingId;
+      if (updateChapterDto.trainingId !== undefined) {
+        const training = await trainingRepository.findOneBy({ id: targetTrainingId });
+        if (!training) throw new NotFoundException(`training ${targetTrainingId} not found`);
+      }
+
+      const trainingChanged = targetTrainingId !== existingChapter.trainingId;
+      let targetSortOrder = existingChapter.sortOrder;
+      if (trainingChanged) {
+        const targetChapters = await chapterRepository.find({
+          where: { trainingId: targetTrainingId },
+          order: { sortOrder: "ASC", id: "ASC" }
+        });
+        await Promise.all(
+          targetChapters.map((targetChapter, index) => {
+            const sortOrder = index + 1;
+            if (targetChapter.sortOrder === sortOrder) return Promise.resolve();
+            return chapterRepository.update(targetChapter.id, { sortOrder });
+          })
+        );
+        targetSortOrder = targetChapters.length + 1;
+      }
+
+      const chapter = await chapterRepository.preload({
+        id,
+        ...updateChapterDto,
+        ...(trainingChanged ? { sortOrder: targetSortOrder } : {})
+      });
+      if (!chapter) throw new NotFoundException(`chapter ${id} not found`);
+
+      const updatedChapter = await chapterRepository.save(chapter);
+      if (trainingChanged) {
+        const remainingChapters = await chapterRepository.find({
+          where: { trainingId: existingChapter.trainingId },
+          order: { sortOrder: "ASC", id: "ASC" }
+        });
+        await Promise.all(
+          remainingChapters.map((remainingChapter, index) => {
+            const sortOrder = index + 1;
+            if (remainingChapter.sortOrder === sortOrder) return Promise.resolve();
+            return chapterRepository.update(remainingChapter.id, { sortOrder });
+          })
+        );
+      }
+
+      return { ...toChapterMetaDto(updatedChapter) };
     });
-    if (!chapter) throw new NotFoundException(`chapter ${id} not found`);
-
-    const updatedChapter = await this.chapterRepository.save(chapter);
-    return { ...toChapterMetaDto(updatedChapter) };
   }
 
   async getChapterById(id: number, currentUser: UserEntity): Promise<ChapterMetaDto> {
