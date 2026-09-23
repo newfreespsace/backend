@@ -21,10 +21,12 @@ import { ProblemFileEntity } from "./problem-file.entity";
 import { ProblemSampleEntity } from "./problem-sample.entity";
 import { ProblemJudgeInfoEntity } from "./problem-judge-info.entity";
 import { ProblemEntity } from "./problem.entity";
+import { ProblemDifficultyRatingEntity } from "./problem-difficulty-rating.entity";
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([ProblemEntity]),
+    TypeOrmModule.forFeature([ProblemDifficultyRatingEntity]),
     TypeOrmModule.forFeature([ProblemJudgeInfoEntity]),
     TypeOrmModule.forFeature([ProblemSampleEntity]),
     TypeOrmModule.forFeature([ProblemFileEntity]),

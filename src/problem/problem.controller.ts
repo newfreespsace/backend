@@ -83,7 +83,11 @@ import {
   DeleteProblemResponseError,
   ChangeProblemTypeRequestDto,
   ChangeProblemTypeResponseDto,
-  ChangeProblemTypeResponseError
+  ChangeProblemTypeResponseError,
+  GetProblemDifficultyRatingRequestDto,
+  SetProblemDifficultyRatingRequestDto,
+  ProblemDifficultyRatingResponseDto,
+  ProblemDifficultyRatingError
 } from "./dto";
 
 const REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD = "problem-testdata-daily-download:%s:%s";
@@ -567,6 +571,43 @@ export class ProblemController {
     await Promise.all(promises);
 
     return result;
+  }
+
+  @Post("getProblemDifficultyRating")
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Get the current user's rating and the weighted difficulty of a problem." })
+  async getProblemDifficultyRating(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: GetProblemDifficultyRatingRequestDto
+  ): Promise<ProblemDifficultyRatingResponseDto> {
+    const problem = await this.problemService.findProblemById(request.problemId);
+    if (!problem) return { error: ProblemDifficultyRatingError.NO_SUCH_PROBLEM };
+    if (
+      !currentUser ||
+      !(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View))
+    )
+      return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
+    return { rating: await this.problemService.getProblemDifficultyRating(problem.id, currentUser) };
+  }
+
+  @Post("setProblemDifficultyRating")
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Rate a problem's difficulty from 1 to 5; score 0 removes the rating." })
+  async setProblemDifficultyRating(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: SetProblemDifficultyRatingRequestDto
+  ): Promise<ProblemDifficultyRatingResponseDto> {
+    const problem = await this.problemService.findProblemById(request.problemId);
+    if (!problem) return { error: ProblemDifficultyRatingError.NO_SUCH_PROBLEM };
+    if (
+      !currentUser ||
+      !(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View))
+    )
+      return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
+    if (request.score !== 0 && !(await this.problemService.userCanRateDifficulty(currentUser, problem.id)))
+      return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
+    await this.problemService.setProblemDifficultyRating(problem.id, currentUser.id, request.score);
+    return { rating: await this.problemService.getProblemDifficultyRating(problem.id, currentUser) };
   }
 
   @Post("setProblemPermissions")

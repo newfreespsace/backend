@@ -1,4 +1,7 @@
 export * from "./problem-meta.dto";
+export * from "./problem-difficulty-rating.dto";
+export * from "./get-problem-difficulty-rating-request.dto";
+export * from "./set-problem-difficulty-rating-request.dto";
 export * from "./problem-content-section.dto";
 export * from "./problem-sample-data-member.dto";
 export * from "./problem-statement.dto";

@@ -17,6 +17,7 @@ import { ConfigService } from "@/config/config.service";
 import { RedisService } from "@/redis/redis.service";
 import { LockService } from "@/redis/lock.service";
 import { SubmissionService } from "@/submission/submission.service";
+import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { AuditLogObjectType, AuditService } from "@/audit/audit.service";
 import { ProblemTypeFactoryService } from "@/problem-type/problem-type-factory.service";
 import { FileEntity } from "@/file/file.entity";
@@ -31,6 +32,7 @@ import { ProblemFileType, ProblemFileEntity } from "./problem-file.entity";
 import { ProblemSampleEntity } from "./problem-sample.entity";
 import { ProblemJudgeInfoEntity } from "./problem-judge-info.entity";
 import { ProblemEntity, ProblemType } from "./problem.entity";
+import { ProblemDifficultyRatingEntity } from "./problem-difficulty-rating.entity";
 
 import { FileUploadInfoDto, SignedFileUploadRequestDto } from "@/file/dto";
 
@@ -68,6 +70,8 @@ export class ProblemService {
     private readonly connection: DataSource,
     @InjectRepository(ProblemEntity)
     private readonly problemRepository: Repository<ProblemEntity>,
+    @InjectRepository(ProblemDifficultyRatingEntity)
+    private readonly difficultyRatingRepository: Repository<ProblemDifficultyRatingEntity>,
     @InjectRepository(ProblemJudgeInfoEntity)
     private readonly problemJudgeInfoRepository: Repository<ProblemJudgeInfoEntity>,
     @InjectRepository(ProblemSampleEntity)
@@ -129,6 +133,7 @@ export class ProblemService {
   }
 
   async getProblemMeta(problem: ProblemEntity, includeStatistics?: boolean): Promise<ProblemMetaDto> {
+    const average = await this.getProblemDifficultyAverage(problem.id);
     const meta: ProblemMetaDto = {
       id: problem.id,
       displayId: problem.displayId,
@@ -136,7 +141,8 @@ export class ProblemService {
       publicTime: problem.publicTime,
       isPublic: problem.isPublic,
       ownerId: problem.ownerId,
-      locales: problem.locales
+      locales: problem.locales,
+      difficulty: average == null ? undefined : Math.round(average)
     };
 
     if (includeStatistics) {
@@ -145,6 +151,52 @@ export class ProblemService {
     }
 
     return meta;
+  }
+
+  async getProblemDifficultyAverage(problemId: number): Promise<number | null> {
+    // An accepted submission must still exist. Rejudging can therefore suspend a user's vote
+    // without deleting it; a later acceptance automatically makes that vote count again.
+    const result: { weightedSum: string; weightSum: string } = await this.difficultyRatingRepository
+      .createQueryBuilder("rating")
+      .innerJoin(UserEntity, "voter", "voter.id = rating.userId")
+      .select("SUM(rating.score * IF(voter.isAdmin, 3, 1))", "weightedSum")
+      .addSelect("SUM(IF(voter.isAdmin, 3, 1))", "weightSum")
+      .where("rating.problemId = :problemId", { problemId })
+      .andWhere(
+        "(voter.isAdmin = 1 OR EXISTS (SELECT 1 FROM submission accepted WHERE accepted.problemId = rating.problemId AND accepted.submitterId = rating.userId AND accepted.status = :acceptedStatus))",
+        { acceptedStatus: SubmissionStatus.Accepted }
+      )
+      .getRawOne();
+    return result?.weightSum ? Number(result.weightedSum) / Number(result.weightSum) : null;
+  }
+
+  async userCanRateDifficulty(user: UserEntity, problemId: number): Promise<boolean> {
+    return (
+      !!user &&
+      (user.isAdmin || (await this.submissionService.getUserProblemAcceptedSubmissionCount(user.id, problemId)) > 0)
+    );
+  }
+
+  async getProblemDifficultyRating(problemId: number, user: UserEntity) {
+    const [average, currentRating, canRate] = await Promise.all([
+      this.getProblemDifficultyAverage(problemId),
+      this.difficultyRatingRepository.findOneBy({ problemId, userId: user.id }),
+      this.userCanRateDifficulty(user, problemId)
+    ]);
+    return {
+      score: currentRating?.score,
+      canRate,
+      average: average ?? undefined,
+      difficulty: average == null ? undefined : Math.round(average)
+    };
+  }
+
+  async setProblemDifficultyRating(problemId: number, userId: number, score: number): Promise<void> {
+    if (score === 0) {
+      await this.difficultyRatingRepository.delete({ problemId, userId });
+    } else {
+      await this.difficultyRatingRepository.upsert({ problemId, userId, score }, ["problemId", "userId"]);
+    }
   }
 
   async userHasPermission(
