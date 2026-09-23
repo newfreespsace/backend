@@ -592,7 +592,7 @@ export class ProblemController {
 
   @Post("setProblemDifficultyRating")
   @ApiBearerAuth()
-  @ApiOperation({ summary: "Rate a problem's difficulty from 1 to 5; score 0 removes the rating." })
+  @ApiOperation({ summary: "Rate a problem's difficulty from 1 to 5." })
   async setProblemDifficultyRating(
     @CurrentUser() currentUser: UserEntity,
     @Body() request: SetProblemDifficultyRatingRequestDto
@@ -604,7 +604,7 @@ export class ProblemController {
       !(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View))
     )
       return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
-    if (request.score !== 0 && !(await this.problemService.userCanRateDifficulty(currentUser, problem.id)))
+    if (!(await this.problemService.userCanRateDifficulty(currentUser, problem.id)))
       return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
     await this.problemService.setProblemDifficultyRating(problem.id, currentUser.id, request.score);
     return { rating: await this.problemService.getProblemDifficultyRating(problem.id, currentUser) };

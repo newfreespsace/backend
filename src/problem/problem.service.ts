@@ -192,11 +192,7 @@ export class ProblemService {
   }
 
   async setProblemDifficultyRating(problemId: number, userId: number, score: number): Promise<void> {
-    if (score === 0) {
-      await this.difficultyRatingRepository.delete({ problemId, userId });
-    } else {
-      await this.difficultyRatingRepository.upsert({ problemId, userId, score }, ["problemId", "userId"]);
-    }
+    await this.difficultyRatingRepository.upsert({ problemId, userId, score }, ["problemId", "userId"]);
   }
 
   async userHasPermission(

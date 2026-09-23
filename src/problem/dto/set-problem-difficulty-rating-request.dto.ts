@@ -6,10 +6,9 @@ export class SetProblemDifficultyRatingRequestDto {
   @IsInt()
   readonly problemId: number;
 
-  // Zero removes the user's rating.
-  @ApiProperty({ minimum: 0, maximum: 5 })
+  @ApiProperty({ minimum: 1, maximum: 5 })
   @IsInt()
-  @Min(0)
+  @Min(1)
   @Max(5)
   readonly score: number;
 }
