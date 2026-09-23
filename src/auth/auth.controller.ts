@@ -125,7 +125,9 @@ export class AuthController {
     @CurrentUser() currentUser: UserEntity,
     @Body() request: LoginRequestDto
   ): Promise<LoginResponseDto> {
-    if (currentUser)
+    // A cookie may identify a user even when the NSOJ frontend has no local token.
+    // Let that frontend log in again and receive the token it needs.
+    if (currentUser && req.headers.authorization?.split(" ")[1])
       return {
         error: LoginResponseError.ALREADY_LOGGEDIN
       };
