@@ -26,3 +26,34 @@ export class ProblemDifficultyRatingResponseDto {
   @ApiProperty({ type: ProblemDifficultyRatingDto, required: false })
   rating?: ProblemDifficultyRatingDto;
 }
+
+export class ProblemDifficultyRatingEntryDto {
+  @ApiProperty()
+  userId: number;
+
+  @ApiProperty()
+  username: string;
+
+  @ApiProperty()
+  nickname: string;
+
+  @ApiProperty()
+  isAdmin: boolean;
+
+  @ApiProperty({ minimum: 1, maximum: 5 })
+  score: number;
+
+  @ApiProperty()
+  updatedAt: Date;
+
+  @ApiProperty()
+  counted: boolean;
+}
+
+export class ProblemDifficultyRatingsResponseDto {
+  @ApiProperty({ enum: ProblemDifficultyRatingError, required: false })
+  error?: ProblemDifficultyRatingError;
+
+  @ApiProperty({ type: [ProblemDifficultyRatingEntryDto], required: false })
+  ratings?: ProblemDifficultyRatingEntryDto[];
+}

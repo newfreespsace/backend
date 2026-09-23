@@ -87,6 +87,7 @@ import {
   GetProblemDifficultyRatingRequestDto,
   SetProblemDifficultyRatingRequestDto,
   ProblemDifficultyRatingResponseDto,
+  ProblemDifficultyRatingsResponseDto,
   ProblemDifficultyRatingError
 } from "./dto";
 
@@ -504,6 +505,13 @@ export class ProblemController {
           .then(discussionCount => (result.discussionCount = discussionCount))
       );
 
+    if (request.hasDifficultyRatings)
+      promises.push(
+        this.problemService
+          .hasProblemDifficultyRatings(problem.id)
+          .then(hasDifficultyRatings => (result.hasDifficultyRatings = hasDifficultyRatings))
+      );
+
     if (request.canViewDiscussion)
       promises.push(
         this.discussionService
@@ -608,6 +616,20 @@ export class ProblemController {
       return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
     await this.problemService.setProblemDifficultyRating(problem.id, currentUser.id, request.score);
     return { rating: await this.problemService.getProblemDifficultyRating(problem.id, currentUser) };
+  }
+
+  @Post("getProblemDifficultyRatings")
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Get each user's latest difficulty rating for a problem." })
+  async getProblemDifficultyRatings(
+    @CurrentUser() currentUser: UserEntity,
+    @Body() request: GetProblemDifficultyRatingRequestDto
+  ): Promise<ProblemDifficultyRatingsResponseDto> {
+    const problem = await this.problemService.findProblemById(request.problemId);
+    if (!problem) return { error: ProblemDifficultyRatingError.NO_SUCH_PROBLEM };
+    if (!(await this.problemService.userHasPermission(currentUser, problem, ProblemPermissionType.View)))
+      return { error: ProblemDifficultyRatingError.PERMISSION_DENIED };
+    return { ratings: await this.problemService.getProblemDifficultyRatings(problem.id) };
   }
 
   @Post("setProblemPermissions")

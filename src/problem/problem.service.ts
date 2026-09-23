@@ -42,7 +42,8 @@ import {
   ProblemLocalizedContentDto,
   ProblemFileDto,
   ProblemMetaDto,
-  LocalizedProblemTagDto
+  LocalizedProblemTagDto,
+  ProblemDifficultyRatingEntryDto
 } from "./dto";
 
 export enum ProblemPermissionType {
@@ -62,6 +63,10 @@ export enum ProblemPermissionLevel {
  * See `ProblemService.getPreprocessedJudgeInfo()`
  */
 const REDIS_KEY_PROBLEM_PREPROCESSED_JUDGE_INFO = "problem-preprocessed-judge-info-and-submittable:%d";
+
+const MIN_ACCEPTED_PROBLEM_COUNT_FOR_DIFFICULTY_RATING = 200;
+const DIFFICULTY_RATING_ELIGIBILITY_SQL =
+  "(voter.isAdmin = 1 OR (voter.acceptedProblemCount >= :minAcceptedProblemCount AND EXISTS (SELECT 1 FROM submission accepted WHERE accepted.problemId = rating.problemId AND accepted.submitterId = rating.userId AND accepted.status = :acceptedStatus)))";
 
 @Injectable()
 export class ProblemService {
@@ -162,18 +167,63 @@ export class ProblemService {
       .select("SUM(rating.score * IF(voter.isAdmin, 3, 1))", "weightedSum")
       .addSelect("SUM(IF(voter.isAdmin, 3, 1))", "weightSum")
       .where("rating.problemId = :problemId", { problemId })
-      .andWhere(
-        "(voter.isAdmin = 1 OR EXISTS (SELECT 1 FROM submission accepted WHERE accepted.problemId = rating.problemId AND accepted.submitterId = rating.userId AND accepted.status = :acceptedStatus))",
-        { acceptedStatus: SubmissionStatus.Accepted }
-      )
+      .andWhere(DIFFICULTY_RATING_ELIGIBILITY_SQL, {
+        minAcceptedProblemCount: MIN_ACCEPTED_PROBLEM_COUNT_FOR_DIFFICULTY_RATING,
+        acceptedStatus: SubmissionStatus.Accepted
+      })
       .getRawOne();
     return result?.weightSum ? Number(result.weightedSum) / Number(result.weightSum) : null;
+  }
+
+  async hasProblemDifficultyRatings(problemId: number): Promise<boolean> {
+    return (await this.difficultyRatingRepository.countBy({ problemId })) > 0;
+  }
+
+  async getProblemDifficultyRatings(problemId: number): Promise<ProblemDifficultyRatingEntryDto[]> {
+    const rows: {
+      userId: string;
+      username: string;
+      nickname: string;
+      isAdmin: number;
+      score: string;
+      updatedAtUnix: string;
+      counted: number;
+    }[] = await this.difficultyRatingRepository
+      .createQueryBuilder("rating")
+      .innerJoin(UserEntity, "voter", "voter.id = rating.userId")
+      .select("rating.userId", "userId")
+      .addSelect("voter.username", "username")
+      .addSelect("voter.nickname", "nickname")
+      .addSelect("voter.isAdmin", "isAdmin")
+      .addSelect("rating.score", "score")
+      // MySQL DATETIME has no timezone; a raw JavaScript Date can shift it using the server timezone.
+      .addSelect("UNIX_TIMESTAMP(rating.updatedAt)", "updatedAtUnix")
+      .addSelect(`IF(${DIFFICULTY_RATING_ELIGIBILITY_SQL}, 1, 0)`, "counted")
+      .where("rating.problemId = :problemId", { problemId })
+      .setParameters({
+        minAcceptedProblemCount: MIN_ACCEPTED_PROBLEM_COUNT_FOR_DIFFICULTY_RATING,
+        acceptedStatus: SubmissionStatus.Accepted
+      })
+      .orderBy("rating.updatedAt", "DESC")
+      .addOrderBy("rating.id", "DESC")
+      .getRawMany();
+    return rows.map(row => ({
+      userId: Number(row.userId),
+      username: row.username,
+      nickname: row.nickname,
+      isAdmin: !!Number(row.isAdmin),
+      score: Number(row.score),
+      updatedAt: new Date(Number(row.updatedAtUnix) * 1000),
+      counted: !!Number(row.counted)
+    }));
   }
 
   async userCanRateDifficulty(user: UserEntity, problemId: number): Promise<boolean> {
     return (
       !!user &&
-      (user.isAdmin || (await this.submissionService.getUserProblemAcceptedSubmissionCount(user.id, problemId)) > 0)
+      (user.isAdmin ||
+        (user.acceptedProblemCount >= MIN_ACCEPTED_PROBLEM_COUNT_FOR_DIFFICULTY_RATING &&
+          (await this.submissionService.getUserProblemAcceptedSubmissionCount(user.id, problemId)) > 0))
     );
   }
 

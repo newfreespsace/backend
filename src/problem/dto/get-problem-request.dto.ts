@@ -78,6 +78,11 @@ export class GetProblemRequestDto {
   @ApiProperty({ required: false })
   @IsBoolean()
   @IsOptional()
+  readonly hasDifficultyRatings?: boolean;
+
+  @ApiProperty({ required: false })
+  @IsBoolean()
+  @IsOptional()
   readonly discussionCount?: boolean;
 
   @ApiProperty({ required: false })

@@ -1,4 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
+
 import { IsInt, Max, Min } from "class-validator";
 
 export class SetProblemDifficultyRatingRequestDto {

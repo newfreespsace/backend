@@ -97,6 +97,9 @@ export class GetProblemResponseDto {
   @ApiProperty()
   discussionCount?: number;
 
+  @ApiProperty({ required: false })
+  hasDifficultyRatings?: boolean;
+
   @ApiProperty()
   canViewDiscussion?: boolean;
 
