@@ -100,9 +100,6 @@ export class GetProblemResponseDto {
   @ApiProperty({ required: false })
   hasDifficultyRatings?: boolean;
 
-  @ApiProperty()
-  canViewDiscussion?: boolean;
-
   @ApiProperty({ enum: ProblemPermissionType, isArray: true })
   permissionOfCurrentUser?: ProblemPermissionType[];
 

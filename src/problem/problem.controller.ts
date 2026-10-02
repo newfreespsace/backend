@@ -512,13 +512,6 @@ export class ProblemController {
           .then(hasDifficultyRatings => (result.hasDifficultyRatings = hasDifficultyRatings))
       );
 
-    if (request.canViewDiscussion)
-      promises.push(
-        this.discussionService
-          .userCanViewProblemDiscussion(currentUser, problem.id)
-          .then(canViewDiscussion => (result.canViewDiscussion = canViewDiscussion))
-      );
-
     if (request.permissionOfCurrentUser) {
       promises.push(
         this.problemService
