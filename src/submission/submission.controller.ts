@@ -17,6 +17,7 @@ import { ContestPermissionType, ContestService } from "@/contest/contest.service
 import { ContestEntity } from "@/contest/contest.entity";
 import { ContestSubmissionState } from "@/contest/contest-submission-state.enum";
 import { SiteSettingService } from "@/site-setting/site-setting.service";
+import { GroupService } from "@/group/group.service";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionStatus } from "./submission-status.enum";
@@ -75,7 +76,9 @@ export class SubmissionController {
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     @Inject(forwardRef(() => ContestService))
-    private readonly contestService: ContestService
+    private readonly contestService: ContestService,
+    @Inject(forwardRef(() => GroupService))
+    private readonly groupService: GroupService
   ) {}
 
   private getHiddenSubmissionStatus(): SubmissionStatus {
@@ -166,6 +169,8 @@ export class SubmissionController {
     contest?: ContestEntity
   ): Promise<boolean> {
     if (!submission.contestId) return false;
+    if (currentUser && (await this.groupService.isGroupAdminOfUser(currentUser.id, submission.submitterId)))
+      return false;
     const relatedContest = contest || (await this.contestService.findContestById(submission.contestId));
     if (!relatedContest) return false;
     return await this.contestService.shouldHideNoiResult(currentUser, relatedContest);
@@ -303,9 +308,10 @@ export class SubmissionController {
       return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
     }
 
-    if (!currentUser.isAdmin) {
-      filterSubmitter = currentUser;
-    }
+    const managedMemberIds = await this.groupService.getManagedMemberIds(currentUser.id);
+    const allowedSubmitterIds = currentUser.isAdmin ? null : Array.from(new Set([currentUser.id, ...managedMemberIds]));
+    if (allowedSubmitterIds && filterSubmitter && !allowedSubmitterIds.includes(filterSubmitter.id))
+      return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
 
     const hasManageProblemPrivilege = await this.userPrivilegeService.userHasPrivilege(
       currentUser,
@@ -324,7 +330,9 @@ export class SubmissionController {
       };
 
     const hideFilterContestResult =
-      filterContest && (await this.contestService.shouldHideNoiResult(currentUser, filterContest));
+      filterContest &&
+      managedMemberIds.length === 0 &&
+      (await this.contestService.shouldHideNoiResult(currentUser, filterContest));
     if (hideFilterContestResult) {
       if (!currentUser || (filterSubmitter && filterSubmitter.id !== currentUser.id)) {
         return {
@@ -347,7 +355,7 @@ export class SubmissionController {
     }
 
     const isSubmissionsOwned = filterSubmitter && currentUser && filterSubmitter.id === currentUser.id;
-    const excludeAdminSubmitters = !currentUser?.isAdmin;
+    const excludeAdminSubmitters = !currentUser.isAdmin && managedMemberIds.length === 0;
     const queryResult = await this.submissionService.querySubmissions(
       filterProblem ? filterProblem.id : null,
       filterContest ? filterContest.id : null,
@@ -357,11 +365,18 @@ export class SubmissionController {
       hideFilterContestResult ? null : request.status,
       request.minId,
       request.maxId,
-      !(hasManageProblemPrivilege || hasViewProblemPermission || hasViewContestPermission || isSubmissionsOwned),
+      !(
+        allowedSubmitterIds ||
+        hasManageProblemPrivilege ||
+        hasViewProblemPermission ||
+        hasViewContestPermission ||
+        isSubmissionsOwned
+      ),
       request.takeCount > this.configService.config.queryLimit.submissions
         ? this.configService.config.queryLimit.submissions
         : request.takeCount,
-      excludeAdminSubmitters
+      excludeAdminSubmitters,
+      allowedSubmitterIds
     );
 
     const submissionMetas: SubmissionMetaDto[] = new Array(queryResult.result.length);

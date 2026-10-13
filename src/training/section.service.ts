@@ -368,17 +368,22 @@ export class SectionService {
       currentUser,
       UserPrivilegeType.ManageProblem
     );
-    if (groupId && !canManageTraining) throw new ForbiddenException("permission denied");
+    const adminGroupIds = await this.groupService.getAdminGroupIdsByUserId(currentUser.id);
+    if (groupId && !canManageTraining && !adminGroupIds.includes(groupId))
+      throw new ForbiddenException("permission denied");
 
     const groups = groupId
       ? [await this.groupService.findGroupById(groupId)]
-      : (await this.groupService.getUserJoinedGroups(currentUser))[0];
+      : (await this.groupService.getUserJoinedGroups(currentUser))[0].filter(
+          group => canManageTraining || adminGroupIds.length === 0 || adminGroupIds.includes(group.id)
+        );
     if (groupId && !groups[0]) throw new NotFoundException(`group ${groupId} not found`);
 
     const sectionProblems = await section.problems;
     const problemIds = sectionProblems.map(sectionProblem => sectionProblem.problemId);
     const membershipsList = await Promise.all(groups.map(group => this.groupService.getGroupMemberList(group)));
     const memberships = membershipsList.flat();
+    const managedMemberIds = new Set(await this.groupService.getManagedMemberIds(currentUser.id));
     const groupAdminUserIds = new Set(
       memberships.filter(membership => membership.isGroupAdmin).map(membership => membership.userId)
     );
@@ -425,7 +430,8 @@ export class SectionService {
             problemId: Number(row.problemId),
             submissionId: Number(row.submissionId),
             status: row.status,
-            canView: currentUser.isAdmin || currentUser.id === Number(row.userId)
+            canView:
+              currentUser.isAdmin || currentUser.id === Number(row.userId) || managedMemberIds.has(Number(row.userId))
           });
         });
 

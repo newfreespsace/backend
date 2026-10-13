@@ -31,6 +31,7 @@ import { ConfigService } from "@/config/config.service";
 import { FileEntity } from "@/file/file.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
 import { ContestService } from "@/contest/contest.service";
+import { GroupService } from "@/group/group.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
 import { ProblemReviewService } from "@/problem-review/problem-review.service";
@@ -137,6 +138,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly userPrivilegeService: UserPrivilegeService,
     @Inject(forwardRef(() => ContestService))
     private readonly contestService: ContestService,
+    @Inject(forwardRef(() => GroupService))
+    private readonly groupService: GroupService,
     private readonly metricsService: MetricsService,
     @Inject(forwardRef(() => ProblemReviewService))
     private readonly problemReviewService: ProblemReviewService
@@ -182,13 +185,13 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     hasPrivilege?: boolean
   ): Promise<boolean> {
     switch (type) {
-      // Everyone can read a public submission
-      // Submitter and those who has the Modify permission of the submission's problem can View a non-public submission
+      // Group admins can read submissions by members of their managed groups.
       case SubmissionPermissionType.View:
         if (!user) return false;
-        if (!user.isAdmin && user.id !== submission.submitterId) return false;
-        if (submission.isPublic) return true;
         if (user.id === submission.submitterId) return true;
+        if (await this.groupService.isGroupAdminOfUser(user.id, submission.submitterId)) return true;
+        if (!user.isAdmin) return false;
+        if (submission.isPublic) return true;
         return await this.problemService.userHasPermission(
           user,
           problem ?? (await this.problemService.findProblemById(submission.problemId)),
@@ -244,9 +247,15 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     maxId: number,
     publicOnly: boolean,
     takeCount: number,
-    excludeAdminSubmitters: boolean
+    excludeAdminSubmitters: boolean,
+    allowedSubmitterIds?: number[]
   ): Promise<{ result: SubmissionEntity[]; hasSmallerId: boolean; hasLargerId: boolean }> {
     const queryBuilder = this.submissionRepository.createQueryBuilder();
+
+    if (allowedSubmitterIds) {
+      if (allowedSubmitterIds.length === 0) queryBuilder.andWhere("1 = 0");
+      else queryBuilder.andWhere("submitterId IN (:...allowedSubmitterIds)", { allowedSubmitterIds });
+    }
 
     if (publicOnly) {
       queryBuilder.andWhere("isPublic = :isPublic", {

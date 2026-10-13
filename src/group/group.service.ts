@@ -87,6 +87,39 @@ export class GroupService {
     ).map(memberShip => memberShip.groupId);
   }
 
+  async getAdminGroupIdsByUserId(userId: number): Promise<number[]> {
+    return (await this.groupMembershipRepository.findBy({ userId, isGroupAdmin: true })).map(
+      membership => membership.groupId
+    );
+  }
+
+  private managedMembersQuery(userId: number) {
+    return this.groupMembershipRepository
+      .createQueryBuilder("membership")
+      .innerJoin(
+        "group_membership",
+        "adminMembership",
+        "adminMembership.groupId = membership.groupId AND adminMembership.userId = :adminUserId AND adminMembership.isGroupAdmin = :isGroupAdmin",
+        { adminUserId: userId, isGroupAdmin: true }
+      );
+  }
+
+  async getManagedMemberIds(userId: number): Promise<number[]> {
+    const rows: { userId: number | string }[] = await this.managedMembersQuery(userId)
+      .select("membership.userId", "userId")
+      .distinct(true)
+      .getRawMany();
+    return rows.map(row => Number(row.userId));
+  }
+
+  async isGroupAdminOfUser(adminUserId: number, memberUserId: number): Promise<boolean> {
+    return (
+      (await this.managedMembersQuery(adminUserId)
+        .andWhere("membership.userId = :memberUserId", { memberUserId })
+        .getCount()) > 0
+    );
+  }
+
   async createGroup(name: string): Promise<[error: CreateGroupResponseError, group: GroupEntity]> {
     try {
       let group: GroupEntity;

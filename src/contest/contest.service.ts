@@ -77,6 +77,11 @@ export class ContestService {
     const manage =
       !!user && (user.isAdmin || manageContest || contest.holderId === user.id || contest.adminIds.includes(user.id));
     const view = await this.canViewContest(user, contest, manage);
+    const groupAdmin =
+      (type === ContestPermissionType.ViewRanklist || type === ContestPermissionType.ViewStatistics) &&
+      !!user &&
+      !!contest.groupId &&
+      (await this.groupService.isGroupAdmin(user.id, contest.groupId));
 
     switch (type) {
       case ContestPermissionType.View:
@@ -85,10 +90,17 @@ export class ContestService {
         return manage;
       case ContestPermissionType.ViewRanklist:
         return (
-          view && (manage || this.isEnded(contest) || (contest.type === ContestType.ACM && this.isRunning(contest)))
+          view &&
+          (manage ||
+            (groupAdmin && this.isRunning(contest)) ||
+            this.isEnded(contest) ||
+            (contest.type === ContestType.ACM && this.isRunning(contest)))
         );
       case ContestPermissionType.ViewStatistics:
-        return view && (manage || this.isEnded(contest) || !contest.hideStatistics);
+        return (
+          view &&
+          (manage || (groupAdmin && this.isRunning(contest)) || this.isEnded(contest) || !contest.hideStatistics)
+        );
       default:
         return false;
     }
@@ -96,6 +108,7 @@ export class ContestService {
 
   async shouldHideNoiResult(user: UserEntity, contest: ContestEntity): Promise<boolean> {
     if (contest.type !== ContestType.NOI || !this.isRunning(contest)) return false;
+    if (user && contest.groupId && (await this.groupService.isGroupAdmin(user.id, contest.groupId))) return false;
     return !(await this.userHasPermission(user, contest, ContestPermissionType.Manage));
   }
 
@@ -192,6 +205,7 @@ export class ContestService {
     if (user.isAdmin || (await this.userPrivilegeService.userHasPrivilege(user, UserPrivilegeType.ManageProblem))) {
       return [];
     }
+    if ((await this.groupService.getAdminGroupIdsByUserId(user.id)).length > 0) return [];
 
     const activeGroupContests = await this.getActiveGroupContestsForUser(user);
     if (activeGroupContests.length === 0) return [];
@@ -411,9 +425,16 @@ export class ContestService {
     ranklistScope = ContestRanklistScope.Official
   ): Promise<ContestRanklistRowDto[]> {
     const players = await this.contestPlayerRepository.findBy({ contestId: contest.id, ranklistScope });
+    const managedMemberIds =
+      !this.isEnded(contest) &&
+      contest.type !== ContestType.ACM &&
+      !(await this.userHasPermission(currentUser, contest, ContestPermissionType.Manage))
+        ? new Set(await this.groupService.getManagedMemberIds(currentUser.id))
+        : null;
     const rows = (
       await Promise.all(
         players.map(async player => {
+          if (managedMemberIds && !managedMemberIds.has(player.userId)) return null;
           const user = await this.userService.findUserById(player.userId);
           if (!user || (await this.userHasPermission(user, contest, ContestPermissionType.Manage))) return null;
 

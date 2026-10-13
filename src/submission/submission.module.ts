@@ -10,6 +10,7 @@ import { AuditModule } from "@/audit/audit.module";
 import { FileModule } from "@/file/file.module";
 import { MetricsModule } from "@/metrics/metrics.module";
 import { ContestModule } from "@/contest/contest.module";
+import { GroupModule } from "@/group/group.module";
 import { SiteSettingModule } from "@/site-setting/site-setting.module";
 import { ProblemReviewModule } from "@/problem-review/problem-review.module";
 
@@ -33,6 +34,7 @@ import { SubmissionStatisticsService } from "./submission-statistics.service";
     forwardRef(() => AuditModule),
     forwardRef(() => FileModule),
     forwardRef(() => ContestModule),
+    forwardRef(() => GroupModule),
     forwardRef(() => MetricsModule),
     forwardRef(() => SiteSettingModule),
     forwardRef(() => ProblemReviewModule)
