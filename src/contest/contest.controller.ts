@@ -309,6 +309,7 @@ export class ContestController {
         manageContest: isManager,
         running: this.contestService.isRunning(contest),
         ended: this.contestService.isEnded(contest),
+        canGoToProblemSet: !!currentUser?.isAdmin || (this.contestService.isEnded(contest) && problem.isPublic),
         canSubmit:
           submissionState === ContestSubmissionState.Official || submissionState === ContestSubmissionState.PostContest,
         submissionState,

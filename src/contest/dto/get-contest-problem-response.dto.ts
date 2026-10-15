@@ -35,6 +35,7 @@ export class GetContestProblemResponseDto {
     manageContest: boolean;
     running: boolean;
     ended: boolean;
+    canGoToProblemSet: boolean;
     canSubmit: boolean;
     submissionState: ContestSubmissionState;
     postContestOpensAt: Date;
