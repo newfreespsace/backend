@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 
 import { Repository } from "typeorm";
@@ -61,6 +61,14 @@ export class SiteSettingService {
   }
 
   async updatePreferencePatch(patch: Partial<PreferenceConfig>, user: UserEntity): Promise<PreferenceConfig> {
+    if (
+      patch.security &&
+      Object.prototype.hasOwnProperty.call(patch.security, "otherSubmissionCodeMinAcceptedProblems")
+    ) {
+      const threshold = patch.security.otherSubmissionCodeMinAcceptedProblems;
+      if (!Number.isSafeInteger(threshold) || threshold < 0)
+        throw new BadRequestException("otherSubmissionCodeMinAcceptedProblems must be a non-negative safe integer");
+    }
     const current = await this.siteSettingRepository.findOneBy({ key: SITE_PREFERENCE_KEY });
 
     const oldValue = (current?.value || {}) as Partial<PreferenceConfig>;

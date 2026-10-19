@@ -12,6 +12,8 @@ const { SubmissionController } = require("../dist/submission/submission.controll
 const { ContestService, ContestPermissionType } = require("../dist/contest/contest.service");
 const { ContestAccessGuard } = require("../dist/contest/contest-access.guard");
 const { SectionService } = require("../dist/training/section.service");
+const { SiteSettingService } = require("../dist/site-setting/site-setting.service");
+const { SiteSettingController } = require("../dist/site-setting/site-setting.controller");
 
 const teacher = { id: 1, username: "teacher", isAdmin: false };
 const member = { id: 2, username: "member", isAdmin: false };
@@ -83,13 +85,14 @@ function groupFixture() {
   return { service, memberships, queries, source };
 }
 
-function fixture({ pending = false } = {}) {
+function fixture({ pending = false, contest = runningContest, threshold = 400 } = {}) {
   const group = groupFixture();
   const contestService = create(ContestService, {
     groupService: group.service,
     userPrivilegeService: { userHasPrivilege: async user => !!user?.isAdmin },
-    findContestById: async () => runningContest,
-    getActiveGroupContestsForUser: async () => [runningContest]
+    findContestById: async () => contest,
+    queryContests: async () => [[contest], 1],
+    getActiveGroupContestsForUser: async () => (contestService.isRunning(contest) ? [contest] : [])
   });
   const record = { ...submission, ...(pending ? { status: "Pending", score: null } : {}) };
   const progress = { progressType: "Finished", score: 65, status: "PartiallyCorrect" };
@@ -97,6 +100,10 @@ function fixture({ pending = false } = {}) {
   let queryArgs;
   let subscription;
   const submissionService = create(SubmissionService, {
+    contestService,
+    siteSettingService: {
+      getPreference: async () => ({ security: { otherSubmissionCodeMinAcceptedProblems: threshold } })
+    },
     groupService: group.service,
     problemService: { userHasPermission: async () => false, findProblemById: async () => problem },
     userPrivilegeService: { userHasPrivilege: async user => !!user?.isAdmin },
@@ -255,6 +262,174 @@ test("ordinary assessment lists stay scoped to self and reject other submitter f
   assert.deepEqual(await f.controller.querySubmission(outsider, { submitter: member.username }), {
     error: "PERMISSION_DENIED"
   });
+});
+
+const endedContest = { ...runningContest, endTime: new Date(Date.now() - 1000) };
+
+test("configured solved-problem threshold includes the boundary and applies only to readable submissions", async () => {
+  for (const threshold of [0, 400, 600]) {
+    const { submissionService: service } = fixture({ threshold, contest: endedContest });
+    service.contestService.userHasPermission = async () => true;
+    service.problemService.userHasPermission = async () => true;
+    for (const count of [Math.max(0, threshold - 1), threshold, threshold + 1]) {
+      const user = { ...outsider, acceptedProblemCount: count };
+      const expected = count >= threshold;
+      assert.equal(await service.userHasPermission(user, submission, "View"), expected);
+      assert.equal(
+        await service.userHasPermission(user, { ...submission, contestId: null, isPublic: true }, "View"),
+        expected
+      );
+      assert.equal(
+        await service.userHasPermission(user, { ...submission, contestId: null, isPublic: false }, "View"),
+        false
+      );
+      for (const type of ["Cancel", "Rejudge", "ManagePublicness", "Delete"]) {
+        service.problemService.userHasPermission = async () => false;
+        assert.equal(await service.userHasPermission(user, submission, type), false);
+        service.problemService.userHasPermission = async () => true;
+      }
+    }
+  }
+});
+
+test("qualified users can read and download official and post-contest submissions after the contest ends", async () => {
+  const user = { ...outsider, acceptedProblemCount: 400 };
+  for (const contestPhase of ["official", "post_contest"]) {
+    const f = fixture({ contest: endedContest });
+    Object.assign(f.record, { contestPhase });
+    f.contestService.userHasPermission = async () => true;
+    const result = await f.controller.getSubmissionDetail(user, { submissionId: submission.id, locale: "zh-CN" });
+    assert.deepEqual(result.content, f.detail.content);
+    assert.equal(result.meta.score, 65);
+    assert.equal(result.meta.contestPhase, contestPhase);
+    assert.deepEqual(await f.controller.downloadSubmissionFile(user, { submissionId: submission.id }), {
+      url: "signed-answer-url"
+    });
+    for (const key of ["permissionRejudge", "permissionCancel", "permissionSetPublic", "permissionDelete"])
+      assert.equal(result[key], false);
+    const list = await f.controller.querySubmission(user, {
+      contestId: endedContest.id,
+      submitter: member.username,
+      locale: "zh-CN",
+      takeCount: 20
+    });
+    assert.equal(list.error, undefined);
+    assert.equal(list.permissionViewOthers, true);
+    assert.equal(f.queryArgs[3], member.id);
+    assert.equal(f.queryArgs[8], false);
+    assert.equal(f.queryArgs[10], false);
+    assert.deepEqual(f.queryArgs[12], [endedContest.id]);
+  }
+});
+
+test("qualification does not bypass running, upcoming, inaccessible or missing contests", async () => {
+  const user = { ...outsider, acceptedProblemCount: 1000 };
+  for (const contest of [runningContest, { ...runningContest, startTime: new Date(Date.now() + 30000) }]) {
+    const f = fixture({ contest });
+    f.contestService.userHasPermission = async () => true;
+    assert.equal(await f.submissionService.userHasPermission(user, submission, "View"), false);
+    f.record.isPublic = true;
+    assert.deepEqual(await f.controller.downloadSubmissionFile(user, { submissionId: submission.id }), {
+      error: "PERMISSION_DENIED"
+    });
+    const result = await f.controller.querySubmission(user, { contestId: contest.id, submitter: member.username });
+    assert.equal(result.error, "PERMISSION_DENIED");
+  }
+  const f = fixture({ contest: endedContest });
+  assert.equal(await f.submissionService.userHasPermission(user, submission, "View"), false, "different group");
+  f.contestService.findContestById = async () => null;
+  assert.equal(await f.submissionService.userHasPermission(user, submission, "View"), false);
+});
+
+test("global qualified lists include public practice submissions and only accessible ended contests", async () => {
+  const f = fixture({ contest: endedContest });
+  f.contestService.queryContests = async () => [[endedContest, { ...runningContest, id: 31 }], 2];
+  const result = await f.controller.querySubmission(
+    { ...outsider, acceptedProblemCount: 400 },
+    { locale: "zh-CN", takeCount: 20 }
+  );
+  assert.equal(result.permissionViewOthers, true);
+  assert.deepEqual(f.queryArgs[11], [outsider.id]);
+  assert.deepEqual(f.queryArgs[12], [endedContest.id]);
+});
+
+test("changing the saved threshold immediately changes viewing permissions", async () => {
+  const { submissionService: service } = fixture({ contest: endedContest });
+  const preference = { security: { otherSubmissionCodeMinAcceptedProblems: 400 } };
+  service.siteSettingService.getPreference = async () => preference;
+  service.contestService.userHasPermission = async () => true;
+  const user = { ...outsider, acceptedProblemCount: 400 };
+  assert.equal(await service.userHasPermission(user, submission, "View"), true);
+  preference.security.otherSubmissionCodeMinAcceptedProblems = 401;
+  assert.equal(await service.userHasPermission(user, submission, "View"), false);
+});
+
+test("site settings persist the threshold, preserve other settings and reject invalid values", async () => {
+  let setting = null;
+  const service = create(SiteSettingService, {
+    siteSettingRepository: {
+      findOneBy: async () => setting,
+      save: async entity => {
+        setting = entity;
+      }
+    },
+    configService: {
+      config: { preference: { security: { otherSubmissionCodeMinAcceptedProblems: 400, allowRegister: true } } }
+    }
+  });
+  assert.equal((await service.getPreference()).security.otherSubmissionCodeMinAcceptedProblems, 400);
+  const controller = new SiteSettingController(service);
+  const patch = value => ({ preference: { security: { otherSubmissionCodeMinAcceptedProblems: value } } });
+  assert.equal((await controller.updatePreference(outsider, patch(0))).error, "PERMISSION_DENIED");
+  for (const value of [-1, 0.5, "400", null, Number.MAX_SAFE_INTEGER + 1])
+    await assert.rejects(
+      controller.updatePreference({ id: 9, isAdmin: true }, patch(value)),
+      /non-negative safe integer/
+    );
+  assert.equal(setting, null);
+  for (const value of [0, 600]) {
+    const result = await controller.updatePreference({ id: 9, isAdmin: true }, patch(value));
+    assert.equal(result.preference.security.otherSubmissionCodeMinAcceptedProblems, value);
+    assert.equal(result.preference.security.allowRegister, true);
+    assert.equal(setting.updatedByUserId, 9);
+  }
+});
+
+test("qualified SQL scope keeps contest restrictions grouped with public practice and owned submissions", async () => {
+  const { source } = groupFixture();
+  for (const contestIds of [[], [endedContest.id]]) {
+    const builder = source.createQueryBuilder().from("submission", "submission");
+    const queries = [];
+    builder.getMany = async () => {
+      queries.push(builder.getQuery());
+      return [];
+    };
+    const service = create(SubmissionService, { submissionRepository: { createQueryBuilder: () => builder } });
+    await service.querySubmissions(
+      null,
+      endedContest.id,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      20,
+      false,
+      [outsider.id],
+      contestIds
+    );
+    assert.match(
+      queries[0],
+      /WHERE \(submitterId IN .* OR \(contestId IS NULL AND isPublic = true\).*\) AND contestId = :contestId/
+    );
+    assert.deepEqual(builder.getParameters().allowedSubmitterIds, [outsider.id]);
+    if (contestIds.length) {
+      assert.match(queries[0], /OR contestId IN \(:\.\.\.otherSubmissionContestIds\)/);
+      assert.deepEqual(builder.getParameters().otherSubmissionContestIds, contestIds);
+    } else assert.doesNotMatch(queries[0], /otherSubmissionContestIds/);
+  }
 });
 
 test("submission scope applies before pagination and is retained in pagination existence queries", async () => {

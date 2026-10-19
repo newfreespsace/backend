@@ -65,6 +65,7 @@ preference:
     discussionReplyDefaultPublic: true
     allowRegister: true
     hideSubmissionTestcaseDetailsForNormalUsers: false
+    otherSubmissionCodeMinAcceptedProblems: 400
   pagination:
     homepageUserList: 10
     homepageProblemList: 10

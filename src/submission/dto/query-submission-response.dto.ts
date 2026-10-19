@@ -17,6 +17,9 @@ export class QuerySubmissionResponseDto {
   submissions?: SubmissionMetaDto[];
 
   @ApiProperty()
+  permissionViewOthers?: boolean;
+
+  @ApiProperty()
   hasSmallerId?: boolean;
 
   @ApiProperty()

@@ -254,6 +254,12 @@ class PreferenceConfigSecurity {
   @IsBoolean()
   @ApiProperty()
   readonly hideSubmissionTestcaseDetailsForNormalUsers: boolean;
+
+  @IsInt()
+  @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
+  @ApiProperty({ default: 400 })
+  readonly otherSubmissionCodeMinAcceptedProblems: number = 400;
 }
 
 // These config items will be sent to client

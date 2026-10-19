@@ -309,8 +309,14 @@ export class SubmissionController {
     }
 
     const managedMemberIds = await this.groupService.getManagedMemberIds(currentUser.id);
+    const canViewOtherSubmissions = await this.submissionService.canViewOtherSubmissions(currentUser, filterContest);
     const allowedSubmitterIds = currentUser.isAdmin ? null : Array.from(new Set([currentUser.id, ...managedMemberIds]));
-    if (allowedSubmitterIds && filterSubmitter && !allowedSubmitterIds.includes(filterSubmitter.id))
+    if (
+      !canViewOtherSubmissions &&
+      allowedSubmitterIds &&
+      filterSubmitter &&
+      !allowedSubmitterIds.includes(filterSubmitter.id)
+    )
       return { error: QuerySubmissionResponseError.PERMISSION_DENIED };
 
     const hasManageProblemPrivilege = await this.userPrivilegeService.userHasPrivilege(
@@ -355,7 +361,17 @@ export class SubmissionController {
     }
 
     const isSubmissionsOwned = filterSubmitter && currentUser && filterSubmitter.id === currentUser.id;
-    const excludeAdminSubmitters = !currentUser.isAdmin && managedMemberIds.length === 0;
+    let otherSubmissionContestIds: number[];
+    if (canViewOtherSubmissions && !currentUser.isAdmin) {
+      if (filterContest) otherSubmissionContestIds = [filterContest.id];
+      else {
+        const [contests] = await this.contestService.queryContests(currentUser, 0, Number.MAX_SAFE_INTEGER, false);
+        otherSubmissionContestIds = contests
+          .filter(contest => this.contestService.isEnded(contest))
+          .map(contest => contest.id);
+      }
+    }
+    const excludeAdminSubmitters = !canViewOtherSubmissions && !currentUser.isAdmin && managedMemberIds.length === 0;
     const queryResult = await this.submissionService.querySubmissions(
       filterProblem ? filterProblem.id : null,
       filterContest ? filterContest.id : null,
@@ -376,7 +392,8 @@ export class SubmissionController {
         ? this.configService.config.queryLimit.submissions
         : request.takeCount,
       excludeAdminSubmitters,
-      allowedSubmitterIds
+      allowedSubmitterIds,
+      otherSubmissionContestIds
     );
 
     const submissionMetas: SubmissionMetaDto[] = new Array(queryResult.result.length);
@@ -427,6 +444,7 @@ export class SubmissionController {
 
     return {
       submissions: submissionMetas,
+      permissionViewOthers: canViewOtherSubmissions,
       progressSubscriptionKey:
         pendingSubmissionIds.length === 0
           ? null

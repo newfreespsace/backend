@@ -1,7 +1,7 @@
 import { Injectable, Inject, forwardRef } from "@nestjs/common";
 import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 
-import { Repository, DataSource, QueryBuilder } from "typeorm";
+import { Repository, DataSource, QueryBuilder, Brackets } from "typeorm";
 import { ValidationError } from "class-validator";
 import { v4 as uuid } from "uuid";
 import moment from "moment-timezone";
@@ -30,7 +30,9 @@ import { MinioSignFor, FileService } from "@/file/file.service";
 import { ConfigService } from "@/config/config.service";
 import { FileEntity } from "@/file/file.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
-import { ContestService } from "@/contest/contest.service";
+import { ContestService, ContestPermissionType } from "@/contest/contest.service";
+import { ContestEntity } from "@/contest/contest.entity";
+import { SiteSettingService } from "@/site-setting/site-setting.service";
 import { GroupService } from "@/group/group.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
@@ -134,6 +136,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly configService: ConfigService,
+    private readonly siteSettingService: SiteSettingService,
     @Inject(forwardRef(() => UserPrivilegeService))
     private readonly userPrivilegeService: UserPrivilegeService,
     @Inject(forwardRef(() => ContestService))
@@ -177,6 +180,17 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     return submissionIds.map(submissionId => map[submissionId]);
   }
 
+  async canViewOtherSubmissions(user: UserEntity, contest?: ContestEntity): Promise<boolean> {
+    if (!user) return false;
+    const preference = await this.siteSettingService.getPreference();
+    if (!(user.acceptedProblemCount >= preference.security.otherSubmissionCodeMinAcceptedProblems)) return false;
+    return (
+      !contest ||
+      (this.contestService.isEnded(contest) &&
+        (await this.contestService.userHasPermission(user, contest, ContestPermissionType.View)))
+    );
+  }
+
   async userHasPermission(
     user: UserEntity,
     submission: SubmissionEntity,
@@ -190,6 +204,20 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
         if (!user) return false;
         if (user.id === submission.submitterId) return true;
         if (await this.groupService.isGroupAdminOfUser(user.id, submission.submitterId)) return true;
+        if (!user.isAdmin && (await this.canViewOtherSubmissions(user))) {
+          if (submission.contestId) {
+            const contest = await this.contestService.findContestById(submission.contestId);
+            return !!contest && (await this.canViewOtherSubmissions(user, contest));
+          }
+          return (
+            submission.isPublic &&
+            (await this.problemService.userHasPermission(
+              user,
+              problem ?? (await this.problemService.findProblemById(submission.problemId)),
+              ProblemPermissionType.View
+            ))
+          );
+        }
         if (!user.isAdmin) return false;
         if (submission.isPublic) return true;
         return await this.problemService.userHasPermission(
@@ -248,13 +276,24 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     publicOnly: boolean,
     takeCount: number,
     excludeAdminSubmitters: boolean,
-    allowedSubmitterIds?: number[]
+    allowedSubmitterIds?: number[],
+    otherSubmissionContestIds?: number[]
   ): Promise<{ result: SubmissionEntity[]; hasSmallerId: boolean; hasLargerId: boolean }> {
     const queryBuilder = this.submissionRepository.createQueryBuilder();
 
     if (allowedSubmitterIds) {
       if (allowedSubmitterIds.length === 0) queryBuilder.andWhere("1 = 0");
-      else queryBuilder.andWhere("submitterId IN (:...allowedSubmitterIds)", { allowedSubmitterIds });
+      else
+        queryBuilder.andWhere(
+          new Brackets(scope => {
+            scope.where("submitterId IN (:...allowedSubmitterIds)", { allowedSubmitterIds });
+            if (otherSubmissionContestIds) {
+              scope.orWhere("(contestId IS NULL AND isPublic = true)");
+              if (otherSubmissionContestIds.length > 0)
+                scope.orWhere("contestId IN (:...otherSubmissionContestIds)", { otherSubmissionContestIds });
+            }
+          })
+        );
     }
 
     if (publicOnly) {
