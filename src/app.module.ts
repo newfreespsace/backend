@@ -1,6 +1,8 @@
 import { Module, forwardRef, NestModule, MiddlewareConsumer, RequestMethod } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 
+import { RemoteJudgeModule } from "@/remote-judge/remote-judge.module";
+
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { ErrorFilter } from "./error.filter";
@@ -65,6 +67,7 @@ import { UsacoGuideModule } from "./usaco-guide/usaco-guide.module";
     forwardRef(() => SiteSettingModule),
     forwardRef(() => GalleryModule),
     forwardRef(() => ProblemReviewModule),
+    RemoteJudgeModule,
     UsacoGuideModule,
     TrainingModule
   ],

@@ -290,13 +290,30 @@ export class ProblemController {
         error: CreateProblemResponseError.NO_SUCH_PROBLEM_TAG
       };
 
-    const problem = await this.problemService.createProblem(currentUser, request.type, request.statement, problemTags);
+    let problem: ProblemEntity;
+    try {
+      problem = await this.problemService.createProblem(
+        currentUser,
+        request.type,
+        request.statement,
+        problemTags,
+        request.submissionMethod,
+        request.remoteUrl,
+        request.remoteFullScore
+      );
+    } catch (error) {
+      if (["INVALID_REMOTE_URL", "REMOTE_SUBMIT_ANSWER_UNSUPPORTED"].includes(error.message))
+        return { error: error.message as CreateProblemResponseError };
+      throw error;
+    }
     if (!problem)
       return {
         error: CreateProblemResponseError.FAILED
       };
 
     await this.auditService.log("problem.create", AuditLogObjectType.Problem, problem.id, {
+      submissionMethod: problem.submissionMethod,
+      remoteProblem: problem.remoteProblem,
       type: request.type,
       statement: request.statement
     });
@@ -905,6 +922,8 @@ export class ProblemController {
       return {
         error: DownloadProblemFilesResponseError.PERMISSION_DENIED
       };
+
+    this.problemService.assertLocalFiles(problem);
 
     const problemFiles = await this.problemService.listProblemFiles(problem, request.type);
     const downloadList = problemFiles.filter(

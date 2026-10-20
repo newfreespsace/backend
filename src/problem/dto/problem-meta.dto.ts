@@ -2,9 +2,31 @@ import { ApiProperty } from "@nestjs/swagger";
 
 import { Locale } from "@/common/locale.type";
 
+import { SubmissionMethod } from "@/remote-judge/remote-judge.types";
+
 import { ProblemType } from "../problem.entity";
 
+export class RemoteProblemDto {
+  @ApiProperty()
+  contestId: string;
+
+  @ApiProperty()
+  taskId: string;
+
+  @ApiProperty()
+  url: string;
+
+  @ApiProperty({ required: false })
+  fullScore?: number;
+}
+
 export class ProblemMetaDto {
+  @ApiProperty({ enum: SubmissionMethod })
+  submissionMethod: SubmissionMethod;
+
+  @ApiProperty({ type: RemoteProblemDto, required: false })
+  remoteProblem?: RemoteProblemDto;
+
   @ApiProperty()
   id: number;
 

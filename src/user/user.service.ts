@@ -53,6 +53,7 @@ export class UserService {
     private readonly submissionService: SubmissionService,
     @Inject(forwardRef(() => UserPrivilegeService))
     private readonly userPrivilegeService: UserPrivilegeService,
+    @Inject(forwardRef(() => AuditService))
     private readonly auditService: AuditService
   ) {
     this.auditService.registerObjectTypeQueryHandler(AuditLogObjectType.User, async (userId, locale, currentUser) => {

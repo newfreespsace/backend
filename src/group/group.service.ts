@@ -30,6 +30,7 @@ export class GroupService {
     private readonly groupMembershipRepository: Repository<GroupMembershipEntity>,
     @Inject(forwardRef(() => UserService))
     private readonly userService: UserService,
+    @Inject(forwardRef(() => AuditService))
     private readonly auditService: AuditService
   ) {
     this.auditService.registerObjectTypeQueryHandler(AuditLogObjectType.Group, async groupId => {

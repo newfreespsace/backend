@@ -13,6 +13,8 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\"",
     "check-style": "prettier --check \"src/**/*.ts\"",
+    "test:bootstrap": "npm run build && node --test tests/bootstrap-dependencies.test.cjs",
+    "test:remote-judge": "npm run build && node --test tests/remote-judge.test.cjs tests/atcoder-direct.test.cjs tests/remote-judge-settings.test.cjs",
     "test:problem-review": "npm run build && node --test tests/problem-review.test.cjs",
     "test:group-admin": "npm run build && node --test tests/group-admin-permissions.test.cjs",
     "lint": "eslint src --ext ts --cache",

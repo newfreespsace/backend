@@ -3,6 +3,8 @@ import { Entity, PrimaryGeneratedColumn, Index, ManyToOne, Column, JoinColumn, O
 import { UserEntity } from "@/user/user.entity";
 import { Locale } from "@/common/locale.type";
 
+import { RemoteProblem, SubmissionMethod } from "@/remote-judge/remote-judge.types";
+
 import { ProblemJudgeInfoEntity } from "./problem-judge-info.entity";
 import { ProblemSampleEntity } from "./problem-sample.entity";
 
@@ -32,6 +34,16 @@ export class ProblemEntity {
    */
   @Column({ type: "enum", enum: ProblemType })
   type: ProblemType;
+
+  @Column({ type: "enum", enum: SubmissionMethod, default: SubmissionMethod.Local })
+  submissionMethod: SubmissionMethod;
+
+  @Column({ type: "varchar", length: 180, nullable: true })
+  @Index()
+  remoteProblemKey: string;
+
+  @Column({ type: "json", nullable: true })
+  remoteProblem: RemoteProblem;
 
   @Column({ type: "boolean" })
   isPublic: boolean;

@@ -39,7 +39,12 @@ export class ContestAccessGuard implements CanActivate {
       return activeContestIds.has(contestId);
     }
 
-    if (path === "submission/submit" || path === "submission/querySubmission") {
+    if (
+      path === "remoteJudge/status" ||
+      path === "remoteJudge/activate" ||
+      path === "submission/submit" ||
+      path === "submission/querySubmission"
+    ) {
       return activeContestIds.has(contestId);
     }
 

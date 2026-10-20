@@ -3,6 +3,8 @@ import { Entity, PrimaryGeneratedColumn, Index, ManyToOne, Column, JoinColumn, O
 import { UserEntity } from "@/user/user.entity";
 import { ProblemEntity } from "@/problem/problem.entity";
 
+import { RemoteSubmissionInfo } from "@/remote-judge/remote-judge.types";
+
 import { SubmissionStatus } from "./submission-status.enum";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
 
@@ -25,6 +27,13 @@ export enum ContestSubmissionPhase {
 export class SubmissionEntity {
   @PrimaryGeneratedColumn()
   id: number;
+
+  @Column({ type: "varchar", length: 180, nullable: true })
+  @Index({ unique: true })
+  remoteKey: string;
+
+  @Column({ type: "json", nullable: true })
+  remote: RemoteSubmissionInfo;
 
   // An uuid to identify the judge task of the submission
   // (different for each rejudge, cleared on finish judging)

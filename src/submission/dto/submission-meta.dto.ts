@@ -10,6 +10,9 @@ import { ContestSubmissionPhase } from "../submission.entity";
 
 // The basic meta doesn't contains information obtained from related database tables, such as problem and submitter meta
 export class SubmissionBasicMetaDto {
+  @ApiProperty({ required: false, type: Object })
+  remote?: import("@/remote-judge/remote-judge.types").RemoteSubmissionInfo;
+
   @ApiProperty()
   id: number;
 

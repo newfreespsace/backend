@@ -138,3 +138,14 @@ eventReport:
   proxyUrl: null
 vendor:
   ip2region: null
+
+# Remote submissions are made by the user on the original website.
+# This module only verifies account ownership and synchronizes results.
+remoteJudge:
+  enabled: true
+  intervalSeconds: 30 # per active account; shared provider limits still apply
+  activeMinutes: 10  # idle accounts stop polling after this window
+# Configure AtCoder direct result sync in the admin Site Settings page.
+# NSOJ_ATCODER_SESSION remains a fallback for sites without a saved setting.
+# See REMOTE_JUDGE.md for dedicated account setup.
+# Keep the actual session out of this file and the frontend.

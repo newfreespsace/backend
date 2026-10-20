@@ -88,6 +88,7 @@ export class SubmissionController {
   private sanitizeNoiSubmissionMeta<T extends SubmissionBasicMetaDto>(meta: T): T {
     return {
       ...meta,
+      remote: undefined,
       score: null,
       status: this.getHiddenSubmissionStatus(),
       timeUsed: null,
@@ -409,6 +410,7 @@ export class SubmissionController {
 
         const submissionMeta: SubmissionMetaDto = {
           id: submission.id,
+          remote: submission.remote,
           isPublic: submission.isPublic,
           contestId: submission.contestId,
           contestProblemIndex: submission.contestProblemIndex,
@@ -549,6 +551,7 @@ export class SubmissionController {
 
     const meta: SubmissionMetaDto = {
       id: submission.id,
+      remote: submission.remote,
       isPublic: submission.isPublic,
       contestId: submission.contestId,
       contestProblemIndex: submission.contestProblemIndex,
@@ -701,6 +704,7 @@ export class SubmissionController {
       submissions.map(async (submission, i) => {
         submissionMetas[i] = {
           id: submission.id,
+          remote: submission.remote,
           isPublic: submission.isPublic,
           codeLanguage: submission.codeLanguage,
           answerSize: submission.answerSize,

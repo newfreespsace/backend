@@ -1,7 +1,9 @@
-import { Injectable, forwardRef, Inject } from "@nestjs/common";
+import { BadRequestException, Injectable, forwardRef, Inject } from "@nestjs/common";
 import { InjectDataSource, InjectRepository } from "@nestjs/typeorm";
 
 import { DataSource, Repository, EntityManager, Brackets, In, FindOptionsWhere } from "typeorm";
+
+import { parseRemoteProblem, SubmissionMethod } from "@/remote-judge/remote-judge.types";
 
 import { UserEntity } from "@/user/user.entity";
 import { GroupEntity } from "@/group/group.entity";
@@ -101,6 +103,7 @@ export class ProblemService {
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly lockService: LockService,
+    @Inject(forwardRef(() => AuditService))
     private readonly auditService: AuditService
   ) {
     this.auditService.registerObjectTypeQueryHandler(AuditLogObjectType.Problem, async (problemId, locale) => {
@@ -143,6 +146,8 @@ export class ProblemService {
       id: problem.id,
       displayId: problem.displayId,
       type: problem.type,
+      submissionMethod: problem.submissionMethod || SubmissionMethod.Local,
+      remoteProblem: problem.remoteProblem,
       publicTime: problem.publicTime,
       isPublic: problem.isPublic,
       ownerId: problem.ownerId,
@@ -466,13 +471,29 @@ export class ProblemService {
     owner: UserEntity,
     type: ProblemType,
     statement: ProblemStatementDto,
-    tags: ProblemTagEntity[]
+    tags: ProblemTagEntity[],
+    submissionMethod?: SubmissionMethod,
+    remoteUrl?: string,
+    remoteFullScore?: number
   ): Promise<ProblemEntity> {
+    const method = submissionMethod || SubmissionMethod.Local;
+    let remoteProblem;
+    try {
+      remoteProblem = parseRemoteProblem(method, remoteUrl);
+    } catch {
+      throw new BadRequestException("INVALID_REMOTE_URL");
+    }
+    if (method !== SubmissionMethod.Local && type === ProblemType.SubmitAnswer)
+      throw new BadRequestException("REMOTE_SUBMIT_ANSWER_UNSUPPORTED");
+    if (remoteProblem && remoteFullScore) remoteProblem.fullScore = remoteFullScore;
     let problem: ProblemEntity;
     await this.connection.transaction("READ COMMITTED", async transactionalEntityManager => {
       problem = new ProblemEntity();
       problem.displayId = null;
       problem.type = type;
+      problem.submissionMethod = method;
+      problem.remoteProblem = remoteProblem;
+      problem.remoteProblemKey = remoteProblem ? `${remoteProblem.contestId}:${remoteProblem.taskId}` : null;
       problem.isPublic = false;
       problem.ownerId = owner.id;
       problem.locales = statement.localizedContents.map(localizedContent => localizedContent.locale);
@@ -583,6 +604,7 @@ export class ProblemService {
     submittable: boolean,
     ignoreLimitsOnValidation: boolean
   ): Promise<string[]> {
+    this.assertLocalFiles(problem);
     const testData = await this.getProblemFiles(problem, ProblemFileType.TestData);
     try {
       this.problemTypeFactoryService
@@ -792,18 +814,25 @@ export class ProblemService {
     return null;
   }
 
+  assertLocalFiles(problem: ProblemEntity): void {
+    if (problem.submissionMethod && problem.submissionMethod !== SubmissionMethod.Local)
+      throw new BadRequestException("REMOTE_FILES_DISABLED");
+  }
+
   // Manage problem file actions should be locked to make sure the limit check works.
   private async lockManageProblemFile<T>(
     problemId: number,
     type: ProblemFileType,
     callback: (problem: ProblemEntity) => Promise<T>
   ): Promise<T> {
-    return await this.lockProblemById(
-      problemId,
-      "Read",
-      async problem =>
-        await this.lockService.lock(`ManageProblemFile_${type}_${problem.id}`, async () => await callback(problem))
-    );
+    return await this.lockProblemById(problemId, "Read", async problem => {
+      if (!problem) throw new BadRequestException("NO_SUCH_PROBLEM");
+      this.assertLocalFiles(problem);
+      return await this.lockService.lock(
+        `ManageProblemFile_${type}_${problem.id}`,
+        async () => await callback(problem)
+      );
+    });
   }
 
   /**
@@ -912,6 +941,7 @@ export class ProblemService {
     type: ProblemFileType,
     transcationalEntityManager?: EntityManager
   ): Promise<ProblemFileEntity[]> {
+    if (problem.submissionMethod && problem.submissionMethod !== SubmissionMethod.Local) return [];
     const problemFiles = transcationalEntityManager
       ? await transcationalEntityManager.findBy(ProblemFileEntity, {
           problemId: problem.id,
@@ -926,6 +956,7 @@ export class ProblemService {
   }
 
   async listProblemFiles(problem: ProblemEntity, type: ProblemFileType, withSize = false): Promise<ProblemFileDto[]> {
+    if (problem.submissionMethod && problem.submissionMethod !== SubmissionMethod.Local) return [];
     return await this.connection.transaction("REPEATABLE READ", async transcationalEntityManager => {
       const problemFiles = await this.getProblemFiles(problem, type, transcationalEntityManager);
 
@@ -1180,6 +1211,12 @@ export class ProblemService {
    * @param problem Must be locked by `ProblemService.lockProblemById(id, "Write")`.
    */
   async changeProblemType(problem: ProblemEntity, type: ProblemType): Promise<boolean> {
+    if (
+      problem.submissionMethod &&
+      problem.submissionMethod !== SubmissionMethod.Local &&
+      type === ProblemType.SubmitAnswer
+    )
+      throw new BadRequestException("REMOTE_SUBMIT_ANSWER_UNSUPPORTED");
     if (await this.submissionService.problemHasAnySubmission(problem)) return false;
     problem.type = type;
     await this.connection.transaction("READ COMMITTED", async transactionalEntityManager => {

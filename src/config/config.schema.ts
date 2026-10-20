@@ -602,7 +602,30 @@ class VendorConfig {
   readonly ip2region: VendorIp2RegionConfig;
 }
 
+class RemoteJudgeConfig {
+  @IsOptional()
+  @IsBoolean()
+  readonly enabled?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(15)
+  @Max(3600)
+  readonly intervalSeconds?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  readonly activeMinutes?: number;
+}
+
 export class AppConfig {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RemoteJudgeConfig)
+  readonly remoteJudge?: RemoteJudgeConfig;
+
   @ValidateNested()
   @Type(() => ServerConfig)
   readonly server: ServerConfig;

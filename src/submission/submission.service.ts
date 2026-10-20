@@ -1,10 +1,12 @@
-import { Injectable, Inject, forwardRef } from "@nestjs/common";
+import { BadRequestException, Injectable, Inject, forwardRef } from "@nestjs/common";
 import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 
 import { Repository, DataSource, QueryBuilder, Brackets } from "typeorm";
 import { ValidationError } from "class-validator";
 import { v4 as uuid } from "uuid";
 import moment from "moment-timezone";
+
+import { remoteCodeLanguage, RemoteSubmissionInfo, SubmissionMethod } from "@/remote-judge/remote-judge.types";
 
 import { logger } from "@/logger";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
@@ -133,6 +135,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     private readonly submissionProgressService: SubmissionProgressService,
     private readonly submissionStatisticsService: SubmissionStatisticsService,
     private readonly judgeGateway: JudgeGateway,
+    @Inject(forwardRef(() => AuditService))
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly configService: ConfigService,
@@ -240,6 +243,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
 
       // Those who has the Modify permission of the submission's problem can Rejudge a submission
       case SubmissionPermissionType.Rejudge:
+        if (submission.remote) return false;
         return await this.problemService.userHasPermission(
           user,
           problem ?? (await this.problemService.findProblemById(submission.problemId)),
@@ -414,6 +418,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       submission: SubmissionEntity
     ]
   > {
+    if (problem.submissionMethod && problem.submissionMethod !== SubmissionMethod.Local)
+      throw new BadRequestException("USE_REMOTE_SUBMISSION");
     const problemTypeService = this.problemTypeFactoryService.type(problem.type);
 
     if ([ProblemType.Traditional, ProblemType.Interaction].includes(problem.type)) {
@@ -487,9 +493,88 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     return [null, fileUploadErrorOrRequest, null];
   }
 
+  /** Called by the sync worker after checking source, account ownership and contest access. */
+  async importRemoteSubmission(
+    user: UserEntity,
+    problem: ProblemEntity,
+    remote: RemoteSubmissionInfo,
+    contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase }
+  ): Promise<void> {
+    const key = `${remote.platform}:${remote.id}:${problem.id}`;
+    await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
+      let submission = await this.submissionRepository.findOneBy({ remoteKey: key });
+      if (submission && submission.submitterId !== user.id) return;
+      // The historical index can lag behind an original-site result (including rejudges).
+      if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return;
+      if (!submission) {
+        submission = new SubmissionEntity();
+        Object.assign(submission, {
+          remoteKey: key,
+          remote,
+          taskId: null,
+          isPublic: problem.isPublic,
+          codeLanguage: remoteCodeLanguage(remote.language),
+          answerSize: null,
+          timeUsed: null,
+          memoryUsed: null,
+          score: null,
+          status: SubmissionStatus.Pending,
+          totalOccupiedTime: 0,
+          submitTime: new Date(remote.submittedAt * 1000),
+          problemId: problem.id,
+          contestId: contest?.id || null,
+          contestProblemIndex: contest?.problemIndex || null,
+          contestPhase: contest?.phase || null,
+          submitterId: user.id
+        });
+        await this.connection.transaction(async manager => {
+          await manager.save(submission);
+          await manager.save(
+            Object.assign(new SubmissionDetailEntity(), {
+              submissionId: submission.id,
+              content: { code: "", language: remoteCodeLanguage(remote.language) || "", compileAndRunOptions: {} },
+              fileUuid: null,
+              result: null
+            })
+          );
+          await manager.increment(ProblemEntity, { id: problem.id }, "submissionCount", 1);
+          await manager.increment(UserEntity, { id: user.id }, "submissionCount", 1);
+        });
+      }
+      if (remote.status === SubmissionStatus.Pending) return;
+      if (
+        submission.status === remote.status &&
+        submission.remote?.verdict === remote.verdict &&
+        submission.remote?.points === remote.points &&
+        submission.remote?.resultSource === remote.resultSource
+      )
+        return;
+      submission.remote = { ...remote, historical: submission.remote?.historical ?? remote.historical };
+      const fullScore = problem.remoteProblem?.fullScore;
+      const score =
+        remote.status === SubmissionStatus.Accepted
+          ? 100
+          : fullScore && remote.points != null
+          ? Math.max(0, Math.min(99, Math.round((remote.points * 100) / fullScore)))
+          : 0;
+      await this.lockService.lock(`Submission_${submission.id}`, async () => {
+        const progress: SubmissionProgress = {
+          progressType: SubmissionProgressType.Finished,
+          status: remote.status,
+          score,
+          totalOccupiedTime: 0
+        };
+        await this.onSubmissionFinished(submission, problem, progress);
+        // Historical results still update an already open detail page; their first-AC marker remains false.
+        await this.submissionProgressService.emitSubmissionEvent(submission.id, SubmissionEventType.Progress, progress);
+      });
+    });
+  }
+
   async getSubmissionBasicMeta(submission: SubmissionEntity): Promise<SubmissionBasicMetaDto> {
     return {
       id: submission.id,
+      remote: submission.remote,
       isPublic: submission.isPublic,
       contestId: submission.contestId,
       contestProblemIndex: submission.contestProblemIndex,
@@ -647,6 +732,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
   }
 
   async rejudgeSubmission(submission: SubmissionEntity): Promise<void> {
+    if (submission.remote) throw new BadRequestException("REMOTE_REJUDGE_UNSUPPORTED");
     // eslint-disable-next-line @typescript-eslint/no-shadow
     await this.lockSubmission(submission, true, async submission => {
       if (!submission) return;
@@ -752,7 +838,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
         submission.problemId,
         "NON_AC_TO_AC"
       );
-      await this.problemReviewService.onAcceptedSubmission(submission);
+      if (!submission.remote?.historical) await this.problemReviewService.onAcceptedSubmission(submission);
       return isFirstAccepted;
     } else if (oldAccepted && !newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, -1);
@@ -786,8 +872,13 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       const timeAndMemory = this.problemTypeFactoryService
         .type(problem.type)
         .getTimeAndMemoryUsedFromFinishedSubmissionProgress(submissionDetail.result);
-      submission.timeUsed = timeAndMemory.timeUsed;
-      submission.memoryUsed = timeAndMemory.memoryUsed;
+      submission.timeUsed = submission.remote ? submission.remote.time : timeAndMemory.timeUsed;
+      // Local results and summary columns use KiB; original remote metadata is retained in bytes.
+      submission.memoryUsed = submission.remote
+        ? submission.remote.memory == null
+          ? null
+          : Math.ceil(submission.remote.memory / 1024)
+        : timeAndMemory.memoryUsed;
 
       // Save the judge-owned result before adding the UI-only first-accept marker.
       await this.connection.transaction(async transactionalEntityManager => {
@@ -797,7 +888,8 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
 
       logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
 
-      progress.isFirstAccepted = await this.onSubmissionUpdated(oldSubmission, submission);
+      const firstAccepted = await this.onSubmissionUpdated(oldSubmission, submission);
+      progress.isFirstAccepted = !submission.remote?.historical && firstAccepted;
     };
 
     // Two pending submissions for the same user/problem may finish together. Serialize
