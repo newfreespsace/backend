@@ -38,6 +38,7 @@ import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote
 import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
+import { RemoteTaskOutcome } from "./remote-judge-monitor.types";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -401,11 +402,17 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     problems: ProblemEntity[],
     watches: RemoteWatchEntity[]
   ) {
-    if (!Number.isSafeInteger(row.submittedAt) || row.submittedAt <= 0 || row.submittedAt > Date.now() / 1000 + 60)
+    if (!Number.isSafeInteger(row.submittedAt) || row.submittedAt <= 0 || row.submittedAt > Date.now() / 1000 + 60) {
+      for (const problem of problems)
+        if (problem.remoteProblem?.contestId === row.contestId && problem.remoteProblem?.taskId === row.taskId)
+          this.monitor?.finishProblem(account.platform, problem.id, false);
       return;
+    }
     for (const candidate of problems) {
       if (candidate.remoteProblem?.contestId !== row.contestId || candidate.remoteProblem?.taskId !== row.taskId)
         continue;
+      let synchronized = false;
+      this.monitor?.beginProblem(account.platform, candidate.id);
       await this.problems.lockProblemById(candidate.id, "Read", async problem => {
         if (
           !problem ||
@@ -458,9 +465,11 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           contestContext ||
           (restricted.length === 0 &&
             (await this.problems.userHasPermission(user, problem, ProblemPermissionType.View)))
-        )
-          await this.submissions.importRemoteSubmission(user, problem, remote, contestContext);
+        ) {
+          synchronized = await this.submissions.importRemoteSubmission(user, problem, remote, contestContext);
+        }
       });
+      this.monitor?.finishProblem(account.platform, candidate.id, synchronized);
     }
   }
 
@@ -506,17 +515,17 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     }
     const bufferKey = scan?.bufferKey || randomBytes(12).toString("hex");
     // Keep only submissions for linked NSOJ problems, rather than staging an account's entire source archive.
-    const linked = new Set(
-      (await this.remoteProblems(SubmissionMethod.Codeforces, page.submissions)).map(
-        problem => problem.remoteProblemKey
-      )
-    );
+    const linkedProblems = await this.remoteProblems(SubmissionMethod.Codeforces, page.submissions);
+    const linked = new Set(linkedProblems.map(problem => problem.remoteProblemKey));
     await this.codeforcesImportBuffer.stage(
       account.id,
       bufferKey,
       page.submissions.filter(row => linked.has(`${row.contestId}:${row.taskId}`))
     );
-    if (page.more) return { ...page, submissions: [], scan: { ...page.scan, bufferKey } };
+    if (page.more) {
+      this.monitor?.setTaskProblems(SubmissionMethod.Codeforces, linkedProblems, page.submissions, "Collecting");
+      return { ...page, submissions: [], scan: { ...page.scan, bufferKey } };
+    }
     const importScan: RemoteAccountEntity["scan"] = {
       ...scan,
       bufferKey,
@@ -568,10 +577,19 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             ? "Collecting"
             : "Syncing"
         );
+        const outcome: RemoteTaskOutcome = {
+          state: "Skipped",
+          continuation: "None",
+          processed: 0,
+          nextSyncAt: null,
+          error: null,
+          sourceError: null
+        };
         try {
           const user = await this.users.findUserById(account.userId);
           if (!user?.isActive) {
             await this.accounts.update({ id: account.id }, { activeUntil: new Date(0), catchUpRequested: false });
+            outcome.continuation = "Inactive";
             return;
           }
           if (platform === SubmissionMethod.Codeforces && account.codeforcesSummaryVersion === 0) {
@@ -583,7 +601,10 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           const liveTargets = new Map<string, AtcoderLiveTarget>();
           if (platform === SubmissionMethod.AtCoder) {
             // Keep the account due while paused so a newly saved session takes effect on the next turn.
-            if (!(await this.provider.hasAtcoderDirectSession())) return;
+            if (!(await this.provider.hasAtcoderDirectSession())) {
+              outcome.continuation = "Paused";
+              return;
+            }
             watches = await this.watches.findBy({ accountId: account.id });
             const recent = watches.filter(watch => +watch.until >= Date.now() - 86400000);
             const ids = [...new Set(recent.map(watch => watch.problemId))];
@@ -606,10 +627,15 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               ? await this.codeforcesImportPage(account)
               : await this.provider.getPage(account, [...liveTargets.values()]);
           const problems = await this.remoteProblems(platform, page.submissions);
+          if (page.submissions.length) this.monitor?.setTaskProblems(platform, problems, page.submissions);
           watches ??= await this.watches.findBy({ accountId: account.id });
           if (page.submissions.length) this.monitor?.setTaskPhase(platform, "Importing");
-          for (const row of page.submissions) await this.importResult(account, user, row, problems, watches);
+          for (const row of page.submissions) {
+            await this.importResult(account, user, row, problems, watches);
+            outcome.processed++;
+          }
           await page.acknowledge?.();
+          const nextSyncAt = new Date(Date.now() + (page.more ? 1000 : this.settings.intervalSeconds * 1000));
           await this.accounts.update(
             { id: account.id },
             {
@@ -625,7 +651,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
                     codeforcesSourceRetryAt: page.sourceRetryAt || null
                   }
                 : {}),
-              nextSyncAt: new Date(Date.now() + (page.more ? 1000 : this.settings.intervalSeconds * 1000)),
+              nextSyncAt,
               // A return-to-site request arriving during this sync must survive its completion.
               catchUpRequested:
                 page.more || page.pending
@@ -633,17 +659,36 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
                   : () => `IF(catchUpVersion = ${Number(account.catchUpVersion) || 0}, 0, 1)`
             }
           );
+          Object.assign(outcome, {
+            state: "Succeeded",
+            continuation: page.more
+              ? "More"
+              : page.pending
+              ? "Pending"
+              : +account.activeUntil > Date.now()
+              ? "Polling"
+              : "None",
+            nextSyncAt: nextSyncAt.toISOString(),
+            sourceError: page.sourceError || null
+          });
         } catch (error) {
           const failures = account.failures + 1;
+          const nextSyncAt = new Date(
+            Date.now() + Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7))
+          );
+          Object.assign(outcome, {
+            state: "Failed",
+            continuation: "Retry",
+            nextSyncAt: nextSyncAt.toISOString(),
+            error: /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED"
+          });
           await this.accounts.update(
             { id: account.id },
             {
               failures,
               lastError: /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED",
               lastErrorAt: new Date(),
-              nextSyncAt: new Date(
-                Date.now() + Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7))
-              )
+              nextSyncAt
             }
           );
           logger.warn(
@@ -652,7 +697,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             }`
           );
         } finally {
-          this.monitor?.finishTask(platform);
+          this.monitor?.finishTask(platform, outcome);
         }
       });
     } finally {
