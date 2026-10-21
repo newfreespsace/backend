@@ -104,6 +104,8 @@ node scripts/check-atcoder-source.cjs 'https://atcoder.jp/contests/比赛ID/subm
 
 如果自己的提交也返回 403，可以在命令末尾添加 `--diagnose`。诊断模式依次请求一次不携带会话的公共首页，以及携带同一会话的账号设置、该比赛自己的提交列表、提交详情，相邻请求间隔至少 1.6 秒。输出 `checks` 中各页面的状态、是否找到登录标记、是否识别到提交列表，以及是否符合常见 CloudFront 错误页面特征；不输出原始响应头、账号信息或页面内容。`loggedInMarkerFound: false` 只表示未找到已知的退出登录标记，不能单凭它判定会话失效；`PAGE_ACCESSIBLE` 也只表示页面 HTTP 200。公共首页也被拒绝时优先检查服务器的原站访问；列表正常且有登录标记、仅详情被拒绝时，重点检查详情页路径的访问限制。诊断脚本不尝试绕过原站验证。
 
+读取阶段的错误发生在原站请求之前。脚本只输出固定错误码及已知的文件或数据库错误编号，不输出原始异常中的配置、密码、SQL 值或会话。`CONFIG_READ_FAILED (ENOENT)` 表示指定配置文件不存在，`EACCES` 表示无读取权限；`CONFIG_PARSE_FAILED` 表示 YAML 解析失败；`CONFIG_INVALID` 表示数据库字段或会话加密密钥字段不符合预期。`BACKEND_BUILD_MISSING` 表示缺少 `dist/site-setting/site-setting.service.js`，需要在该后端目录构建；`DEPENDENCY_LOAD_FAILED`、`BACKEND_MODULE_LOAD_FAILED` 表示依赖或编译模块加载失败。`DATABASE_CONNECT_FAILED` 会附带可识别的连接错误码，如 `ECONNREFUSED` 或 `ER_ACCESS_DENIED_ERROR`；`SESSION_QUERY_FAILED` 表示站点会话查询失败，例如 `ER_NO_SUCH_TABLE`；`SESSION_DATA_INVALID` 表示存储内容异常；`REMOTE_SESSION_UNREADABLE` 表示无法解密；`REMOTE_AUTH_REQUIRED` 表示没有可用的会话值。请传入与实际后端服务一致的配置文件；脚本更新本身不要求重启后端。
+
 ## 验证
 
 ```sh

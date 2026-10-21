@@ -3,6 +3,60 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const safeCodes = new Set([
+  "INVALID_SUBMISSION_URL",
+  "REMOTE_AUTH_REQUIRED",
+  "REMOTE_SESSION_UNREADABLE",
+  "REMOTE_RESPONSE_TOO_LARGE",
+  "CONFIG_READ_FAILED",
+  "CONFIG_PARSE_FAILED",
+  "CONFIG_INVALID",
+  "DEPENDENCY_LOAD_FAILED",
+  "BACKEND_BUILD_MISSING",
+  "BACKEND_MODULE_LOAD_FAILED",
+  "DATABASE_CONNECT_FAILED",
+  "SESSION_QUERY_FAILED",
+  "SESSION_DATA_INVALID"
+]);
+const safeDetails = new Set([
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "MODULE_NOT_FOUND",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ER_ACCESS_DENIED_ERROR",
+  "ER_DBACCESS_DENIED_ERROR",
+  "ER_BAD_DB_ERROR",
+  "ER_NO_SUCH_TABLE",
+  "ER_BAD_FIELD_ERROR",
+  "ER_TABLEACCESS_DENIED_ERROR",
+  "ER_PARSE_ERROR",
+  "ER_CON_COUNT_ERROR",
+  "ER_TOO_MANY_USER_CONNECTIONS",
+  "ER_NOT_SUPPORTED_AUTH_MODE",
+  "HANDSHAKE_SSL_ERROR"
+]);
+
+async function readStep(code, action) {
+  try {
+    return await action();
+  } catch (error) {
+    if (safeCodes.has(error?.message)) throw error;
+    const failure = new Error(code);
+    if (safeDetails.has(error?.code)) failure.detail = error.code;
+    throw failure;
+  }
+}
+
+function formatFailure(stage, error) {
+  const code = safeCodes.has(error?.message) ? error.message : "CHECK_FAILED";
+  const detail = safeDetails.has(error?.detail) ? ` (${error.detail})` : "";
+  return `${stage}失败：${code}${detail}`;
+}
+
 function submissionUrl(input) {
   const url = new URL(input);
   if (
@@ -18,30 +72,59 @@ function submissionUrl(input) {
 }
 
 async function loadSession(configPath) {
-  const yaml = require("js-yaml");
-  const mysql = require("mysql2/promise");
-  const config = yaml.load(fs.readFileSync(configPath, "utf8"));
-  require("reflect-metadata");
-  const { SiteSettingService } = require("../dist/site-setting/site-setting.service");
-  const db = config.services.database;
-  const connection = await mysql.createConnection({
-    host: db.host,
-    port: Number(db.port),
-    user: db.username,
-    password: db.password,
-    database: db.database,
-    connectTimeout: 10000
+  const yaml = await readStep("DEPENDENCY_LOAD_FAILED", () => require("js-yaml"));
+  const text = await readStep("CONFIG_READ_FAILED", () => fs.readFileSync(configPath, "utf8"));
+  const config = await readStep("CONFIG_PARSE_FAILED", () => yaml.load(text));
+  const db = config?.services?.database;
+  if (
+    !db ||
+    !["mysql", "mariadb"].includes(db.type) ||
+    ![db.host, db.username, db.password, db.database, config?.security?.sessionSecret].every(
+      value => typeof value === "string"
+    ) ||
+    !Number.isInteger(Number(db.port)) ||
+    Number(db.port) < 1 ||
+    Number(db.port) > 65535
+  )
+    throw new Error("CONFIG_INVALID");
+  const mysql = await readStep("DEPENDENCY_LOAD_FAILED", () => require("mysql2/promise"));
+  const compiledService = path.resolve(__dirname, "../dist/site-setting/site-setting.service.js");
+  if (!fs.existsSync(compiledService)) throw new Error("BACKEND_BUILD_MISSING");
+  const { SiteSettingService } = await readStep("BACKEND_MODULE_LOAD_FAILED", () => {
+    require("reflect-metadata");
+    return require(compiledService);
   });
+  const connection = await readStep("DATABASE_CONNECT_FAILED", () =>
+    mysql.createConnection({
+      host: db.host,
+      port: Number(db.port),
+      user: db.username,
+      password: db.password,
+      database: db.database,
+      connectTimeout: 10000
+    })
+  );
   try {
-    const [rows] = await connection.execute("SELECT value FROM site_setting WHERE `key` = ? LIMIT 1", [
-      "remote-judge:atcoder-session"
-    ]);
+    const [rows] = await readStep("SESSION_QUERY_FAILED", () =>
+      connection.execute("SELECT `value` FROM `site_setting` WHERE `key` = ? LIMIT 1", ["remote-judge:atcoder-session"])
+    );
     const setting = rows[0];
-    if (typeof setting?.value === "string") setting.value = JSON.parse(setting.value);
+    if (typeof setting?.value === "string")
+      setting.value = await readStep("SESSION_DATA_INVALID", () => JSON.parse(setting.value));
     const service = new SiteSettingService({ findOneBy: async () => setting || null }, { config });
-    return await service.getAtcoderSession();
+    const session = await readStep("SESSION_DATA_INVALID", () => service.getAtcoderSession());
+    if (!session || /[;\s]/.test(session)) throw new Error("REMOTE_AUTH_REQUIRED");
+    return session;
   } finally {
-    await connection.end();
+    try {
+      await connection.end();
+    } catch {
+      try {
+        connection.destroy();
+      } catch {
+        // Preserve the read/decryption error if connection cleanup also fails.
+      }
+    }
   }
 }
 
@@ -171,18 +254,10 @@ async function main() {
     if (!result.sourceReadable) process.exitCode = 2;
   } catch (error) {
     // Raw errors can contain a cookie, SQL values or config contents. Print fixed codes only.
-    const safeCode = [
-      "INVALID_SUBMISSION_URL",
-      "REMOTE_AUTH_REQUIRED",
-      "REMOTE_SESSION_UNREADABLE",
-      "REMOTE_RESPONSE_TOO_LARGE"
-    ].includes(error.message)
-      ? error.message
-      : "CHECK_FAILED";
-    console.error(`${stage}失败：${safeCode}`);
+    console.error(formatFailure(stage, error));
     process.exitCode = 1;
   }
 }
 
-module.exports = { submissionUrl, checkSource, diagnoseSource };
+module.exports = { submissionUrl, checkSource, diagnoseSource, loadSession, formatFailure };
 if (require.main === module) void main();
