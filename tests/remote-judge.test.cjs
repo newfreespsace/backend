@@ -166,9 +166,11 @@ function submissionFixture() {
   const stored = new Map(),
     details = new Map();
   const emitted = [];
+  const writes = [];
   let nextId = 1;
   const counts = { submissions: 0, userSubmissions: 0, accepted: 0, userAccepted: 0, review: 0, events: 0, contest: 0 };
   const save = async item => {
+    writes.push(item.constructor.name);
     if (item instanceof SubmissionEntity) {
       if (!item.id) item.id = nextId++;
       stored.set(item.id, structuredClone(item));
@@ -220,7 +222,7 @@ function submissionFixture() {
       emitted.push(progress);
     }
   };
-  return { service, stored, details, counts, emitted };
+  return { service, stored, details, counts, emitted, writes };
 }
 
 test("concurrent and repeated sync creates one real submission, with original timestamp and resource usage", async () => {
@@ -247,6 +249,70 @@ test("concurrent and repeated sync creates one real submission, with original ti
   await service.importRemoteSubmission({ id: 2 }, problem(), remote());
   assert.equal([...stored.values()][0].submitterId, 1);
   assert.equal(stored.size, 1);
+});
+
+test("source and test summary backfills update existing records without leaking code or recounting results", async () => {
+  const { service, stored, details, counts, writes } = submissionFixture();
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote());
+  const before = { ...counts };
+  const code = "// private source\nint main() {}\n";
+  await service.importRemoteSubmission(
+    { id: 1 },
+    problem(),
+    remote({ sourceCode: code, passedTestCount: 17, testset: "TESTS" })
+  );
+  const saved = [...stored.values()][0];
+  assert.equal(details.get(saved.id).content.code, code);
+  assert.equal(saved.remote.sourceAvailable, true);
+  assert.equal(saved.remote.passedTestCount, 17);
+  assert.equal(saved.remote.testset, "TESTS");
+  assert.equal(saved.remote.sourceCode, undefined);
+  assert.doesNotMatch(JSON.stringify(await service.getSubmissionBasicMeta(saved)), /private source/);
+  assert.deepEqual(counts, before);
+  const writeCount = writes.length;
+  await service.importRemoteSubmission(
+    { id: 1 },
+    problem(),
+    remote({ sourceCode: code, passedTestCount: 17, testset: "TESTS" })
+  );
+  assert.equal(writes.length, writeCount, "unchanged source and summaries must not be rewritten each poll");
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote({ passedTestCount: 0, testset: "PRETESTS" }));
+  assert.equal(details.get(saved.id).content.code, code);
+  assert.equal([...stored.values()][0].remote.passedTestCount, 0);
+  assert.equal([...stored.values()][0].remote.sourceAvailable, true);
+  await service.importRemoteSubmission({ id: 2 }, problem(), remote({ sourceCode: "attacker" }));
+  assert.equal(details.get(saved.id).content.code, code);
+});
+
+test("pending and compilation-error submissions retain code; oversized sources never enter metadata", async () => {
+  const { service, stored, details } = submissionFixture();
+  await service.importRemoteSubmission(
+    { id: 1 },
+    problem(),
+    remote({
+      status: Status.Pending,
+      verdict: "TESTING",
+      sourceCode: "bad code",
+      passedTestCount: 0,
+      testset: "PRETESTS"
+    })
+  );
+  assert.equal(details.get(1).content.code, "bad code");
+  await service.importRemoteSubmission(
+    { id: 1 },
+    problem(),
+    remote({ status: Status.CompilationError, verdict: "COMPILATION_ERROR" })
+  );
+  assert.equal(stored.get(1).status, Status.CompilationError);
+  assert.equal(details.get(1).content.code, "bad code");
+  await service.importRemoteSubmission(
+    { id: 1 },
+    problem(),
+    remote({ id: "102", sourceCode: "x".repeat(1024 * 1024 + 1) })
+  );
+  assert.equal(details.get(2).content.code, "");
+  assert.equal(stored.get(2).remote.sourceAvailable, undefined);
+  assert.equal(stored.get(2).remote.sourceCode, undefined);
 });
 
 test("pending becomes final once; historical results update live pages without review or celebration", async () => {

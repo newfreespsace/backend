@@ -8,6 +8,7 @@ import randomstring from "randomstring";
 import { ConfigService } from "@/config/config.service";
 import { ClusterService } from "@/cluster/cluster.service";
 import { RequestWithSession } from "@/auth/auth.middleware";
+import { redactRequestBody } from "@/common/redact-request-body";
 
 const logger = new Logger("EventReporter");
 
@@ -104,7 +105,10 @@ export class EventReportService {
         if (userInfo) requestInfo += `User: ${userInfo}\n`;
 
         if (request.body) {
-          requestBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body, null, 2);
+          requestBody =
+            typeof request.body === "string"
+              ? "[Request body omitted]"
+              : JSON.stringify(redactRequestBody(request.body), null, 2);
         }
       }
 

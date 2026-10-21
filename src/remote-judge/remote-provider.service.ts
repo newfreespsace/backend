@@ -1,3 +1,5 @@
+import { createHash, randomBytes } from "crypto";
+
 import { forwardRef, Inject, Injectable } from "@nestjs/common";
 
 import * as cheerio from "cheerio";
@@ -13,6 +15,7 @@ import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
+import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 
 export interface AtcoderLiveTarget {
   contestId: string;
@@ -36,6 +39,34 @@ interface CodeforcesSubmissionRow {
   timeConsumedMillis?: number;
   memoryConsumedBytes?: number;
   points?: number;
+  passedTestCount?: number;
+  testset?: string;
+  source?: string;
+  sourceCode?: string;
+  sourceBase64?: string;
+}
+
+function decodeCodeforcesSource(row: CodeforcesSubmissionRow): string | undefined {
+  if (typeof row.sourceBase64 !== "string")
+    return typeof row.source === "string"
+      ? row.source
+      : typeof row.sourceCode === "string"
+      ? row.sourceCode
+      : undefined;
+  const encoded = row.sourceBase64;
+  const maximumBytes = 1024 * 1024;
+  if (encoded.length > Math.ceil(maximumBytes / 3) * 4) throw new Error("REMOTE_CF_SOURCE_TOO_LARGE");
+  // Buffer.from(base64) accepts malformed input silently; reject it before storing code.
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error("REMOTE_CF_SOURCE_INVALID");
+  const bytes = Buffer.from(encoded, "base64");
+  const canonical = bytes.toString("base64");
+  if (encoded !== canonical && encoded !== canonical.replace(/=+$/, "")) throw new Error("REMOTE_CF_SOURCE_INVALID");
+  if (bytes.length > maximumBytes) throw new Error("REMOTE_CF_SOURCE_TOO_LARGE");
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error("REMOTE_CF_SOURCE_INVALID");
+  }
 }
 
 export interface RemotePage {
@@ -45,6 +76,8 @@ export interface RemotePage {
   more: boolean;
   pending: boolean;
   acknowledge?: () => Promise<void>;
+  sourceError?: string;
+  sourceRetryAt?: Date;
 }
 
 @Injectable()
@@ -52,7 +85,8 @@ export class RemoteProviderService {
   constructor(
     private readonly redisService: RedisService,
     private readonly lockService: LockService,
-    @Inject(forwardRef(() => SiteSettingService)) private readonly siteSettingService: SiteSettingService
+    @Inject(forwardRef(() => SiteSettingService)) private readonly siteSettingService: SiteSettingService,
+    private readonly codeforcesCredentials: CodeforcesCredentialsService
   ) {}
 
   // Shared Redis limits cover sync workers and binding requests across all backend processes.
@@ -60,7 +94,12 @@ export class RemoteProviderService {
     return !!(await this.siteSettingService.getAtcoderSession());
   }
 
-  private async request(platform: SubmissionMethod, url: string, authenticated = false): Promise<string> {
+  private async request(
+    platform: SubmissionMethod,
+    url: string,
+    authenticated?: boolean,
+    credentials?: CodeforcesCredentials
+  ): Promise<string> {
     const headers: Record<string, string> = {
       "User-Agent": "NSOJ-Result-Sync/1.0",
       Accept: "application/json,text/html"
@@ -81,7 +120,26 @@ export class RemoteProviderService {
         const wait = await redis.pttl(key);
         if (wait > 0) await delay(wait);
         await redis.set(key, "1", "PX", platform === SubmissionMethod.Codeforces ? 2200 : 1500);
-        const response = await fetch(url, {
+        let address = url;
+        if (credentials) {
+          const target = new URL(url);
+          if (
+            platform !== SubmissionMethod.Codeforces ||
+            target.origin !== "https://codeforces.com" ||
+            target.pathname !== "/api/user.status"
+          )
+            throw new Error("REMOTE_CF_AUTH_FAILED");
+          target.searchParams.set("apiKey", credentials.apiKey);
+          target.searchParams.set("time", String(Math.floor(Date.now() / 1000)));
+          target.searchParams.sort();
+          const prefix = randomBytes(3).toString("hex");
+          const signature = createHash("sha512")
+            .update(`${prefix}/user.status?${target.searchParams}#${credentials.apiSecret}`)
+            .digest("hex");
+          target.searchParams.set("apiSig", prefix + signature);
+          address = target.toString();
+        }
+        const response = await fetch(address, {
           redirect: "manual",
           signal: AbortSignal.timeout(20000),
           headers
@@ -108,19 +166,32 @@ export class RemoteProviderService {
       });
   }
 
-  private async codeforces<T>(method: string, params: Record<string, string>): Promise<T[]> {
+  private async codeforces<T>(
+    method: string,
+    params: Record<string, string>,
+    credentials?: CodeforcesCredentials
+  ): Promise<T[]> {
     let response;
     try {
       response = JSON.parse(
         await this.request(
           SubmissionMethod.Codeforces,
-          `https://codeforces.com/api/${method}?${new URLSearchParams(params)}`
+          `https://codeforces.com/api/${method}?${new URLSearchParams(params)}`,
+          false,
+          credentials
         )
       );
     } catch (error) {
       throw new Error(/^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_API_FAILED");
     }
-    if (response.status !== "OK" || !Array.isArray(response.result)) throw new Error("REMOTE_API_FAILED");
+    if (response?.status !== "OK" || !Array.isArray(response.result))
+      throw new Error(
+        response?.comment === "Call limit exceeded"
+          ? "REMOTE_RATE_LIMITED"
+          : credentials
+          ? "REMOTE_CF_AUTH_FAILED"
+          : "REMOTE_API_FAILED"
+      );
     return response.result;
   }
 
@@ -252,12 +323,52 @@ export class RemoteProviderService {
   }
 
   private async codeforcesPage(account: RemoteAccountEntity): Promise<RemotePage> {
-    const scan = account.scan || { offset: 1, head: 0 };
-    const rows = await this.codeforces<CodeforcesSubmissionRow>("user.status", {
+    let scan = account.scan || { offset: 1, head: 0 };
+    let { cursor } = account;
+    const params = {
       handle: account.handle,
       from: String(scan.offset),
       count: "100"
-    });
+    };
+    let rows: CodeforcesSubmissionRow[];
+    let sourceError: string;
+    let sourceRetryAt: Date;
+    let sourceAuthorized = false;
+    const sources = new Map<CodeforcesSubmissionRow, string>();
+    if (
+      account.codeforcesSourceEnabled &&
+      (!account.codeforcesSourceRetryAt || account.codeforcesSourceRetryAt <= new Date())
+    ) {
+      try {
+        const credentials = await this.codeforcesCredentials.get(account.id);
+        if (!credentials) throw new Error("REMOTE_CF_CREDENTIALS_UNREADABLE");
+        rows = await this.codeforces<CodeforcesSubmissionRow>(
+          "user.status",
+          { ...params, from: account.codeforcesSourceError ? "1" : params.from, includeSources: "true" },
+          credentials
+        );
+        for (const row of rows) {
+          const source = decodeCodeforcesSource(row);
+          if (source !== undefined) sources.set(row, source);
+        }
+        if (rows.length && sources.size === 0) throw new Error("REMOTE_CF_SOURCE_MISSING");
+        sourceAuthorized = true;
+        if (account.codeforcesSourceError) {
+          // Recovering credentials must revisit pages skipped during public-only result sync.
+          scan = { offset: 1, head: 0 };
+          cursor = "0";
+        }
+      } catch (error) {
+        rows = undefined;
+        sourceError = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_CF_SOURCE_UNAVAILABLE";
+        sourceRetryAt = new Date(Date.now() + 300000);
+      }
+    } else if (account.codeforcesSourceEnabled) {
+      sourceError = account.codeforcesSourceError;
+      sourceRetryAt = account.codeforcesSourceRetryAt;
+    }
+    // Public result sync remains available when source authorization fails.
+    rows ??= await this.codeforces<CodeforcesSubmissionRow>("user.status", params);
     const submissions: RemoteSubmission[] = rows
       .filter(
         row =>
@@ -276,17 +387,40 @@ export class RemoteProviderService {
         time: Number.isFinite(row.timeConsumedMillis) ? row.timeConsumedMillis : null,
         memory: Number.isFinite(row.memoryConsumedBytes) ? row.memoryConsumedBytes : null,
         points: Number.isFinite(row.points) ? row.points : undefined,
+        passedTestCount:
+          Number.isSafeInteger(row.passedTestCount) && row.passedTestCount >= 0 ? row.passedTestCount : undefined,
+        testset: [
+          "SAMPLES",
+          "PRETESTS",
+          "TESTS",
+          "CHALLENGES",
+          "TESTS1",
+          "TESTS2",
+          "TESTS3",
+          "TESTS4",
+          "TESTS5",
+          "TESTS6",
+          "TESTS7",
+          "TESTS8",
+          "TESTS9",
+          "TESTS10"
+        ].includes(row.testset)
+          ? row.testset
+          : undefined,
+        sourceCode: sourceAuthorized ? sources.get(row) : undefined,
         url: `https://codeforces.com/contest/${row.problem.contestId}/submission/${row.id}`
       }));
     const head = Math.max(scan.head, ...rows.map(row => Number(row.id)), 0);
     const pendingIds = submissions.filter(row => row.status === SubmissionStatus.Pending).map(row => Number(row.id));
     const pendingMin = Math.min(scan.pendingMin || Infinity, ...pendingIds);
-    const more = rows.length === 100 && Number(rows[rows.length - 1].id) > Number(account.cursor);
+    const more = rows.length === 100 && Number(rows[rows.length - 1].id) > Number(cursor);
     return {
       submissions,
+      sourceError,
+      sourceRetryAt,
       more,
       pending: Number.isFinite(pendingMin),
-      cursor: more ? account.cursor : String(Number.isFinite(pendingMin) ? Math.min(head, pendingMin - 1) : head),
+      cursor: more ? cursor : String(Number.isFinite(pendingMin) ? Math.min(head, pendingMin - 1) : head),
       scan: more
         ? { offset: scan.offset + rows.length, head, pendingMin: Number.isFinite(pendingMin) ? pendingMin : undefined }
         : null

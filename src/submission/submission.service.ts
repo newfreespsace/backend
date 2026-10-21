@@ -497,15 +497,24 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
   async importRemoteSubmission(
     user: UserEntity,
     problem: ProblemEntity,
-    remote: RemoteSubmissionInfo,
+    incoming: RemoteSubmissionInfo & { sourceCode?: string },
     contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase }
   ): Promise<void> {
+    const { sourceCode: providedSource, ...remote } = incoming;
+    const sourceCode =
+      typeof providedSource === "string" &&
+      providedSource.length > 0 &&
+      Buffer.byteLength(providedSource, "utf8") <= 1024 * 1024
+        ? providedSource
+        : undefined;
     const key = `${remote.platform}:${remote.id}:${problem.id}`;
     await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
       let submission = await this.submissionRepository.findOneBy({ remoteKey: key });
       if (submission && submission.submitterId !== user.id) return;
       // The historical index can lag behind an original-site result (including rejudges).
       if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return;
+      // Only the content endpoint may return code. Never put it in submission metadata or events.
+      remote.sourceAvailable = !!sourceCode || submission?.remote?.sourceAvailable || undefined;
       if (!submission) {
         submission = new SubmissionEntity();
         Object.assign(submission, {
@@ -532,7 +541,11 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           await manager.save(
             Object.assign(new SubmissionDetailEntity(), {
               submissionId: submission.id,
-              content: { code: "", language: remoteCodeLanguage(remote.language) || "", compileAndRunOptions: {} },
+              content: {
+                code: sourceCode || "",
+                language: remoteCodeLanguage(remote.language) || "",
+                compileAndRunOptions: {}
+              },
               fileUuid: null,
               result: null
             })
@@ -541,15 +554,42 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           await manager.increment(UserEntity, { id: user.id }, "submissionCount", 1);
         });
       }
-      if (remote.status === SubmissionStatus.Pending) return;
-      if (
+      const resultUnchanged =
         submission.status === remote.status &&
         submission.remote?.verdict === remote.verdict &&
         submission.remote?.points === remote.points &&
-        submission.remote?.resultSource === remote.resultSource
-      )
-        return;
-      submission.remote = { ...remote, historical: submission.remote?.historical ?? remote.historical };
+        submission.remote?.resultSource === remote.resultSource &&
+        submission.remote?.time === remote.time &&
+        submission.remote?.memory === remote.memory;
+      const nextRemote = {
+        ...remote,
+        passedTestCount: remote.passedTestCount ?? submission.remote?.passedTestCount,
+        testset: remote.testset ?? submission.remote?.testset,
+        historical: submission.remote?.historical ?? remote.historical
+      };
+      const needsSourceSave = !!sourceCode && !submission.remote?.sourceAvailable;
+      const metadataChanged = (Object.keys(nextRemote) as (keyof RemoteSubmissionInfo)[]).some(
+        field => nextRemote[field] !== submission.remote?.[field]
+      );
+      if (needsSourceSave || metadataChanged) {
+        await this.lockService.lock(`Submission_${submission.id}`, async () => {
+          const detail = needsSourceSave ? await this.getSubmissionDetail(submission) : null;
+          if (detail)
+            detail.content = {
+              ...(detail.content as object),
+              code: sourceCode,
+              language: remoteCodeLanguage(remote.language) || "",
+              compileAndRunOptions: {}
+            };
+          submission.remote = nextRemote;
+          await this.connection.transaction(async manager => {
+            await manager.save(submission);
+            if (detail) await manager.save(detail);
+          });
+        });
+      }
+      if (remote.status === SubmissionStatus.Pending || resultUnchanged) return;
+      submission.remote = nextRemote;
       const fullScore = problem.remoteProblem?.fullScore;
       const score =
         remote.status === SubmissionStatus.Accepted

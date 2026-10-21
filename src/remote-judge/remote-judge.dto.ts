@@ -30,6 +30,22 @@ export class RemoteContextDto {
   contestProblemIndex?: number;
 }
 
+export class SetCodeforcesCredentialsDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  apiKey?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  apiSecret?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  clear?: boolean;
+}
+
 export class SetSubmissionMethodDto {
   @IsOptional()
   @IsBoolean()

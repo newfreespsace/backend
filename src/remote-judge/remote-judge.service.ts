@@ -28,8 +28,14 @@ import { logger } from "@/logger";
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteWatchEntity } from "./remote-watch.entity";
 import { AtcoderLiveTarget, RemoteProviderService } from "./remote-provider.service";
-import { BindRemoteAccountDto, RemoteContextDto, SetSubmissionMethodDto } from "./remote-judge.dto";
+import {
+  BindRemoteAccountDto,
+  RemoteContextDto,
+  SetSubmissionMethodDto,
+  SetCodeforcesCredentialsDto
+} from "./remote-judge.dto";
 import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote-judge.types";
+import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -49,7 +55,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     private readonly problems: ProblemService,
     private readonly submissions: SubmissionService,
     private readonly contests: ContestService,
-    private readonly audit: AuditService
+    private readonly audit: AuditService,
+    private readonly codeforcesCredentials: CodeforcesCredentialsService
   ) {}
 
   private get settings() {
@@ -91,6 +98,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         nextSyncAt: account.nextSyncAt,
         activeUntil: account.activeUntil,
         lastError: account.lastError,
+        codeforcesSourceEnabled: !!account.codeforcesSourceEnabled,
+        codeforcesSourceError: account.codeforcesSourceError,
+        codeforcesSourceRetryAt: account.codeforcesSourceRetryAt,
         importingHistory:
           this.settings.enabled &&
           !account.lastError &&
@@ -161,6 +171,47 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           await this.accounts.delete({ id: account.id });
         });
       await this.redisService.getClient().del(`remote-bind:${user.id}:${platform}`);
+      return await this.list(user);
+    });
+  }
+
+  async setCodeforcesCredentials(user: UserEntity, request: SetCodeforcesCredentialsDto) {
+    const credentials = {
+      apiKey: typeof request.apiKey === "string" ? request.apiKey.trim() : undefined,
+      apiSecret: typeof request.apiSecret === "string" ? request.apiSecret.trim() : undefined
+    };
+    if (
+      (request.clear !== undefined && typeof request.clear !== "boolean") ||
+      (request.clear && (request.apiKey !== undefined || request.apiSecret !== undefined)) ||
+      (!request.clear && !validCodeforcesCredentials(credentials))
+    )
+      throw new BadRequestException("INVALID_CF_CREDENTIALS");
+    return await this.lockService.lock(`RemoteAccountUser_${user.id}_${SubmissionMethod.Codeforces}`, async () => {
+      const account = await this.accounts.findOneBy({ userId: user.id, platform: SubmissionMethod.Codeforces });
+      if (!account) throw new BadRequestException("CF_ACCOUNT_REQUIRED");
+      await this.lockService.lock(`RemoteAccount_${account.id}`, async () => {
+        await this.accounts.update(
+          { id: account.id },
+          {
+            codeforcesCredentials: request.clear ? null : this.codeforcesCredentials.encrypt(account, credentials),
+            codeforcesSourceEnabled: !request.clear,
+            codeforcesSourceError: null,
+            codeforcesSourceRetryAt: null,
+            ...(!request.clear
+              ? {
+                  cursor: "0",
+                  scan: null,
+                  codeforcesSummaryVersion: 1,
+                  catchUpRequested: true,
+                  catchUpVersion: () => "catchUpVersion + 1",
+                  nextSyncAt: new Date(),
+                  failures: 0,
+                  lastError: null
+                }
+              : {})
+          }
+        );
+      });
       return await this.list(user);
     });
   }
@@ -437,6 +488,11 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             await this.accounts.update({ id: account.id }, { activeUntil: new Date(0), catchUpRequested: false });
             return;
           }
+          if (platform === SubmissionMethod.Codeforces && account.codeforcesSummaryVersion === 0) {
+            // Existing accounts backfill summaries once on their next active sync.
+            await this.accounts.update({ id: account.id }, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
+            Object.assign(account, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
+          }
           let watches: RemoteWatchEntity[];
           const liveTargets = new Map<string, AtcoderLiveTarget>();
           if (platform === SubmissionMethod.AtCoder) {
@@ -478,6 +534,12 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               lastSyncedAt: new Date(),
               lastError: null,
               failures: 0,
+              ...(platform === SubmissionMethod.Codeforces
+                ? {
+                    codeforcesSourceError: page.sourceError || null,
+                    codeforcesSourceRetryAt: page.sourceRetryAt || null
+                  }
+                : {}),
               nextSyncAt: new Date(Date.now() + (page.more ? 1000 : this.settings.intervalSeconds * 1000)),
               // A return-to-site request arriving during this sync must survive its completion.
               catchUpRequested:

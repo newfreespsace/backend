@@ -25,11 +25,16 @@ export interface RemoteSubmission {
   time: number | null;
   memory: number | null;
   points?: number;
+  passedTestCount?: number;
+  testset?: string;
+  // Transport-only: strip before storing or returning public remote metadata.
+  sourceCode?: string;
+  sourceAvailable?: boolean;
   resultSource?: "OriginalSite" | "AtCoderProblems";
   url: string;
 }
 
-export interface RemoteSubmissionInfo extends RemoteSubmission {
+export interface RemoteSubmissionInfo extends Omit<RemoteSubmission, "sourceCode"> {
   platform: SubmissionMethod;
   handle: string;
   historical: boolean;

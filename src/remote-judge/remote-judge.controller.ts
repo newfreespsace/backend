@@ -5,7 +5,13 @@ import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 
 import { RemoteJudgeService } from "./remote-judge.service";
-import { BindRemoteAccountDto, RemoteContextDto, RemotePlatformDto, SetSubmissionMethodDto } from "./remote-judge.dto";
+import {
+  BindRemoteAccountDto,
+  RemoteContextDto,
+  RemotePlatformDto,
+  SetSubmissionMethodDto,
+  SetCodeforcesCredentialsDto
+} from "./remote-judge.dto";
 
 @ApiTags("RemoteJudge")
 @ApiBearerAuth()
@@ -47,6 +53,11 @@ export class RemoteJudgeController {
   @Post("activate")
   activate(@CurrentUser() user: UserEntity, @Body() request: RemoteContextDto) {
     return this.service.activate(user, request);
+  }
+
+  @Post("setCodeforcesCredentials")
+  setCodeforcesCredentials(@CurrentUser() user: UserEntity, @Body() request: SetCodeforcesCredentialsDto) {
+    return this.run(() => this.service.setCodeforcesCredentials(user, request));
   }
 
   @Post("status")

@@ -15,6 +15,7 @@ import { RemoteWatchEntity } from "./remote-watch.entity";
 import { RemoteProviderService } from "./remote-provider.service";
 import { RemoteJudgeService } from "./remote-judge.service";
 import { RemoteJudgeController } from "./remote-judge.controller";
+import { CodeforcesCredentialsService } from "./codeforces-credentials.service";
 
 @Module({
   imports: [
@@ -28,7 +29,7 @@ import { RemoteJudgeController } from "./remote-judge.controller";
     SiteSettingModule,
     AuditModule
   ],
-  providers: [RemoteProviderService, RemoteJudgeService],
+  providers: [RemoteProviderService, RemoteJudgeService, CodeforcesCredentialsService],
   controllers: [RemoteJudgeController]
 })
 export class RemoteJudgeModule {}

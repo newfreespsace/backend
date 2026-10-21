@@ -58,4 +58,19 @@ export class RemoteAccountEntity {
 
   @Column({ type: "varchar", length: 80, nullable: true })
   lastError: string;
+
+  @Column({ type: "json", nullable: true, select: false })
+  codeforcesCredentials: { iv: string; tag: string; ciphertext: string };
+
+  @Column({ type: "boolean", default: false })
+  codeforcesSourceEnabled: boolean;
+
+  @Column({ type: "varchar", length: 80, nullable: true })
+  codeforcesSourceError: string;
+
+  @Column({ type: "datetime", nullable: true })
+  codeforcesSourceRetryAt: Date;
+
+  @Column({ type: "integer", default: 0 })
+  codeforcesSummaryVersion: number;
 }
