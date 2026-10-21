@@ -98,9 +98,11 @@ yarn dev
 node scripts/check-atcoder-source.cjs 'https://atcoder.jp/contests/比赛ID/submissions/提交ID' ./config.yaml
 ```
 
-脚本使用配置文件中的数据库连接，只查询站点已保存的 AtCoder 会话并沿用现有解密逻辑；不启动后端、不执行表结构同步、不连接 Redis，也不写入数据库。若站点从未保存或清除过会话，可使用当前终端的旧 `NSOJ_ATCODER_SESSION` 配置。网络检查仅请求一次原站提交详情，不跟随重定向，不输出 Cookie、源码或完整 HTML，不更新站点会话健康状态。
+脚本使用配置文件中的数据库连接，只查询站点已保存的 AtCoder 会话并沿用现有解密逻辑；不启动后端、不执行表结构同步、不连接 Redis，也不写入数据库。若站点从未保存或清除过会话，可使用当前终端的旧 `NSOJ_ATCODER_SESSION` 配置。默认仅请求一次原站提交详情，不跟随重定向，不输出 Cookie、源码或完整 HTML，不更新站点会话健康状态。
 
 `SOURCE_FOUND` 且 `sourceReadable: true` 说明该服务器与当前会话可以读取这条提交的源码。`LOGIN_REQUIRED` 表示需要检查会话；`ACCESS_DENIED` 是 HTTP 403；`RATE_LIMITED` 是 HTTP 429；`SOURCE_NOT_FOUND` 表示当前页面未找到非空 `#submission-code`，可能涉及查看权限、验证页或页面结构变化，不能仅凭它判定会话失效。一次成功只证明这条提交可读，不保证比赛中或其他权限条件下的提交也可读。
+
+如果自己的提交也返回 403，可以在命令末尾添加 `--diagnose`。诊断模式依次请求一次不携带会话的公共首页，以及携带同一会话的账号设置、该比赛自己的提交列表、提交详情，相邻请求间隔至少 1.6 秒。输出 `checks` 中各页面的状态、是否找到登录标记、是否识别到提交列表，以及是否符合常见 CloudFront 错误页面特征；不输出原始响应头、账号信息或页面内容。`loggedInMarkerFound: false` 只表示未找到已知的退出登录标记，不能单凭它判定会话失效；`PAGE_ACCESSIBLE` 也只表示页面 HTTP 200。公共首页也被拒绝时优先检查服务器的原站访问；列表正常且有登录标记、仅详情被拒绝时，重点检查详情页路径的访问限制。诊断脚本不尝试绕过原站验证。
 
 ## 验证
 
