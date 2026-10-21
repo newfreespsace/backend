@@ -472,7 +472,7 @@ test("binding proof is NSOJ- plus six letters and verifies unchanged on both pla
     service.lockService = locks();
     service.configService = { config: {} };
     service.redisService = {
-      getClient: () => ({
+      getSharedClient: () => ({
         set: async (key, value, mode, seconds) => {
           if (key === `remote-bind:1:${platform}`) {
             assert.equal(mode, "EX");
@@ -516,7 +516,7 @@ test("two users cannot bind the same remote handle with different capitalization
   service.configService = { config: {} };
   service.provider = { verifyProfile: async () => true };
   service.redisService = {
-    getClient: () => ({
+    getSharedClient: () => ({
       get: async key => JSON.stringify({ handle: key.includes(":1:") ? "Coder" : "coder", code: "secret" }),
       set: async () => "OK",
       del: async () => {}
@@ -630,7 +630,7 @@ function workerFixture(candidate) {
       Object.assign(candidate, value);
     }
   };
-  service.redisService = { getClient: () => ({ set: async () => "OK", eval: async () => 1 }) };
+  service.redisService = { getSharedClient: () => ({ set: async () => "OK", eval: async () => 1 }) };
   service.lockService = locks();
   service.codeforcesImportBuffer = importBufferFixture().service;
   service.users = { findUserById: async () => ({ id: 1, isActive: true }) };

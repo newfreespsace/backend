@@ -115,7 +115,7 @@ export class RemoteProviderService {
       throw new Error("REMOTE_UNAVAILABLE");
     return await this.lockService
       .lock(`RemoteProvider_${platform}`, async () => {
-        const redis = this.redisService.getClient();
+        const redis = this.redisService.getSharedClient();
         const key = `remote-provider-rate:${platform}`;
         const wait = await redis.pttl(key);
         if (wait > 0) await delay(wait);
@@ -247,7 +247,7 @@ export class RemoteProviderService {
   }
 
   private async atcoderLivePage(account: RemoteAccountEntity, targets: AtcoderLiveTarget[]) {
-    const redis = this.redisService.getClient();
+    const redis = this.redisService.getSharedClient();
     const ordered = [...targets].sort((a, b) => a.contestId.localeCompare(b.contestId));
     const rotationKey = `remote-atcoder-rotation:${account.id}`;
     const index = (Number(await redis.get(rotationKey)) || 0) % ordered.length;

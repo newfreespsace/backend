@@ -43,6 +43,14 @@ remoteJudge:
 
 服务端需要能访问 codeforces.com、atcoder.jp。验证阶段和真实账号首次同步仍需要在部署环境做联调。
 
+### Redis 连接与运行检查
+
+远端请求限流、同步任务领取、账号绑定和 AtCoder 分页进度均复用 `RedisService.getSharedClient()` 的普通命令连接，不按请求或同步轮次创建新连接。订阅、阻塞队列及自定义命令继续使用各服务独立持有的连接。此前远端代码误将每次调用都会建立连接的 `getClient()` 用于循环内，导致连接持续累积；触及 Redis 客户端上限后会出现 `ERR max number of clients reached`，并可能因大量重连和错误日志拖慢后端。
+
+部署修复并重启后端可释放旧进程遗留的连接，无需提高 Redis `maxclients` 或删除数据。可在服务器执行 `redis-cli INFO clients`，观察 `connected_clients` 是否随同步长期增长；使用 `redis-cli INFO stats` 检查 `rejected_connections` 是否继续增加，该值为累计值，修复后不要求归零。如 Redis 配置了认证，使用现有认证方式连接，不将密码写入日志或分享出来。多工作进程和其他 Redis 使用者会使连接基数不同，应关注增长趋势。
+
+后端请求日志及错误报告会遮盖 URL、查询参数和请求体中的登录 token、CF API Key/Secret 与 AtCoder 会话，保留实际请求供认证和控制器使用。
+
 ### Codeforces 源码同步
 
 1. 用户登录当前绑定的 CF 账号，在 `https://codeforces.com/settings/api` 生成自己的 API Key 与 Secret。

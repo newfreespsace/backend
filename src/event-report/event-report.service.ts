@@ -8,7 +8,7 @@ import randomstring from "randomstring";
 import { ConfigService } from "@/config/config.service";
 import { ClusterService } from "@/cluster/cluster.service";
 import { RequestWithSession } from "@/auth/auth.middleware";
-import { redactRequestBody } from "@/common/redact-request-body";
+import { redactRequestBody, redactRequestUrl } from "@/common/redact-request-body";
 
 const logger = new Logger("EventReporter");
 
@@ -96,7 +96,7 @@ export class EventReportService {
       let requestInfo = "";
       let requestBody = "";
       if (request) {
-        const url = request.originalUrl;
+        const url = redactRequestUrl(request.originalUrl);
         const { ip } = request;
         const user = request.session?.user;
         const userInfo = user ? `#${user.id} ${user.username}` : "";

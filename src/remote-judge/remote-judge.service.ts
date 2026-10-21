@@ -114,7 +114,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
 
   async beginBinding(user: UserEntity, request: BindRemoteAccountDto) {
     if (!/^[a-zA-Z0-9_.-]{3,64}$/.test(request.handle)) throw new BadRequestException("INVALID_HANDLE");
-    const redis = this.redisService.getClient();
+    const redis = this.redisService.getSharedClient();
     if (!(await redis.set(`remote-bind-rate:${user.id}`, "1", "EX", 30, "NX")))
       throw new BadRequestException("BIND_COOLDOWN");
     // Keep the proof short enough for remote profile fields: NSOJ- plus six uppercase letters.
@@ -130,7 +130,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
 
   async verifyBinding(user: UserEntity, platform: SubmissionMethod) {
     return await this.lockService.lock(`RemoteAccountUser_${user.id}_${platform}`, async () => {
-      const redis = this.redisService.getClient();
+      const redis = this.redisService.getSharedClient();
       const key = `remote-bind:${user.id}:${platform}`;
       const pending = JSON.parse(await redis.get(key));
       if (!pending) throw new BadRequestException("VERIFICATION_EXPIRED");
@@ -172,7 +172,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         await this.lockService.lock(`RemoteAccount_${account.id}`, async () => {
           await this.accounts.delete({ id: account.id });
         });
-      await this.redisService.getClient().del(`remote-bind:${user.id}:${platform}`);
+      await this.redisService.getSharedClient().del(`remote-bind:${user.id}:${platform}`);
       return await this.list(user);
     });
   }
@@ -548,7 +548,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
       .orderBy("account.nextSyncAt", "ASC")
       .getOne();
     if (!candidate) return;
-    const redis = this.redisService.getClient();
+    const redis = this.redisService.getSharedClient();
     const token = randomBytes(12).toString("hex");
     const claim = `remote-sync-claim:${candidate.id}`;
     if (!(await redis.set(claim, token, "PX", 120000, "NX"))) return;

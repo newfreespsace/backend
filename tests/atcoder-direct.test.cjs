@@ -72,7 +72,7 @@ function fixture(handler) {
     recordAtcoderSessionCheck: async (session, error) => checks.push({ session, error })
   };
   provider.redisService = {
-    getClient: () => ({
+    getSharedClient: () => ({
       get: async key => values.get(key) ?? null,
       set: async (key, value) => {
         values.set(key, value);

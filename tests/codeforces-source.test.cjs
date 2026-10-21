@@ -41,7 +41,7 @@ function providerFixture() {
   const provider = Object.create(RemoteProviderService.prototype);
   provider.codeforcesCredentials = { get: async () => credentials };
   provider.lockService = { lock: async (_, fn) => fn() };
-  provider.redisService = { getClient: () => ({ pttl: async () => 0, set: async () => "OK" }) };
+  provider.redisService = { getSharedClient: () => ({ pttl: async () => 0, set: async () => "OK" }) };
   return provider;
 }
 
@@ -294,4 +294,38 @@ test("request logging and error reports redact CF credentials without mutating t
   assert.doesNotMatch(JSON.stringify(report), /testKey123|testSecret456|private-session/);
   assert.equal(request.body.apiKey, credentials.apiKey);
   assert.equal(request.body.apiSecret, credentials.apiSecret);
+});
+
+test("session tokens in URLs, repeated encoded query fields and bodies never enter logs or error reports", async () => {
+  const request = {
+    method: "GET",
+    originalUrl:
+      "/api/auth/getSessionInfo?jsonp=1&token=test-login-secret&%74oken=test-encoded-secret&TOKEN=test-repeat-secret&bad%=keep",
+    query: { jsonp: "1", token: ["test-login-secret", "test-encoded-secret"], TOKEN: "test-repeat-secret" },
+    body: { nested: { token: "test-body-secret" } }
+  };
+  const before = structuredClone(request);
+  const originalLog = console.log;
+  let logged;
+  try {
+    console.log = (...args) => {
+      logged = JSON.stringify(args);
+    };
+    new RequestLogMiddleware().use(request, {}, () => {});
+  } finally {
+    console.log = originalLog;
+  }
+  assert.doesNotMatch(logged, /test-(login|encoded|repeat|body)-secret/);
+  assert.match(logged, /jsonp=1/);
+  assert.match(logged, /bad%=keep/);
+  assert.match(logged, /REDACTED/);
+  const reporter = Object.create(EventReportService.prototype);
+  reporter.enabled = true;
+  reporter.configService = { config: { preference: { siteName: "Test" } } };
+  let report;
+  reporter.clusterSerivce = { postMessageToMaster: (_, message) => (report = message) };
+  await reporter.report({ type: "Error", request });
+  assert.doesNotMatch(JSON.stringify(report), /test-(login|encoded|repeat|body)-secret/);
+  assert.match(report.message, /getSessionInfo\?jsonp=1/);
+  assert.deepEqual(request, before);
 });

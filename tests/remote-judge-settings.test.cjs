@@ -81,7 +81,11 @@ test("live site configuration takes precedence across processes and clearing dis
   process.env.NSOJ_ATCODER_SESSION = "test-environment-session";
   assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionSource, "environment");
   const redis = { pttl: async () => 0, set: async () => "OK" };
-  const provider = new RemoteProviderService({ getClient: () => redis }, { lock: async (_, fn) => fn() }, otherProcess);
+  const provider = new RemoteProviderService(
+    { getSharedClient: () => redis },
+    { lock: async (_, fn) => fn() },
+    otherProcess
+  );
   const cookies = [];
   global.fetch = async (_, options) => {
     cookies.push(options.headers.Cookie);

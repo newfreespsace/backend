@@ -45,7 +45,16 @@ export class RedisService implements OnModuleInit {
   }
 
   /**
-   * Get a Redis client object to execute Redis commands directly.
+   * Reuse the service connection for ordinary, nonblocking Redis commands.
+   * Do not use this connection for subscriptions, blocking commands or connection state changes.
+   */
+  getSharedClient(): Redis {
+    return this.client;
+  }
+
+  /**
+   * Create an independent connection for subscriptions, blocking consumers or custom commands.
+   * Allocate once per owning service, never per request or sync turn.
    *
    * Please use `cacheGet` and `cacheSet` for caching since they handle the expire time automatically.
    */
