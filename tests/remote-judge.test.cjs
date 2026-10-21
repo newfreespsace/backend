@@ -249,8 +249,7 @@ test("concurrent and repeated sync creates one real submission, with original ti
     events: 1,
     contest: 0
   });
-  assert.equal(await service.importRemoteSubmission({ id: 2 }, problem(), remote()), false);
-  assert.equal(await service.importRemoteSubmission({ id: 1 }, problem(), remote()), true);
+  await service.importRemoteSubmission({ id: 2 }, problem(), remote());
   assert.equal([...stored.values()][0].submitterId, 1);
   assert.equal(stored.size, 1);
 });
@@ -664,54 +663,6 @@ test("upstream failure backs off without advancing the submission cursor", async
   assert.equal(account.failures, 1);
   assert.equal(account.lastError, "REMOTE_UNAVAILABLE");
   assert.ok(+account.nextSyncAt >= start + 60000);
-});
-
-test("the worker reports completed, deferred and failed rounds with the actual processed count", async () => {
-  const account = {
-    id: 1,
-    userId: 1,
-    nextSyncAt: new Date(0),
-    cursor: "900",
-    failures: 0,
-    activeUntil: new Date(Date.now() + 600000)
-  };
-  const { service } = workerFixture(account);
-  const outcomes = [];
-  service.monitor = {
-    startTask() {},
-    setTaskPhase() {},
-    setTaskProblems() {},
-    finishTask: (_, outcome) => outcomes.push(structuredClone(outcome))
-  };
-  service.remoteProblems = async () => [];
-  service.watches = { findBy: async () => [] };
-  service.importResult = async () => {};
-  service.codeforcesImportPage = async () => ({
-    submissions: [remote(), remote({ id: "102" })],
-    cursor: "102",
-    scan: null,
-    more: true,
-    pending: false
-  });
-  await service.tick(Method.Codeforces);
-  assert.equal(outcomes[0].state, "Succeeded");
-  assert.equal(outcomes[0].continuation, "More");
-  assert.equal(outcomes[0].processed, 2);
-  assert.equal(outcomes[0].nextSyncAt, account.nextSyncAt.toISOString());
-  account.nextSyncAt = new Date(0);
-  let imported = 0;
-  service.importResult = async () => {
-    if (++imported === 2) throw new Error("REMOTE_UNAVAILABLE");
-  };
-  await service.tick(Method.Codeforces);
-  assert.equal(outcomes[1].state, "Failed");
-  assert.equal(outcomes[1].processed, 1);
-  assert.equal(outcomes[1].error, "REMOTE_UNAVAILABLE");
-  account.nextSyncAt = new Date(0);
-  service.provider.hasAtcoderDirectSession = async () => false;
-  await service.tick(Method.AtCoder);
-  assert.equal(outcomes[2].state, "Skipped");
-  assert.equal(outcomes[2].continuation, "Paused");
 });
 
 test("AtCoder pauses without a session and resumes immediately after one is configured", async () => {

@@ -36,7 +36,6 @@ export class CodeforcesImportBufferService {
           batch,
           remoteId: row.id,
           submittedAt: row.submittedAt,
-          problemKey: `${row.contestId}:${row.taskId}`,
           payload: row
         },
         ["accountId", "batch", "remoteId"]

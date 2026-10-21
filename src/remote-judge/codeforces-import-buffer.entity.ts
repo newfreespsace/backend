@@ -6,7 +6,6 @@ import { RemoteSubmission } from "./remote-judge.types";
 // Private staging area: collect all pages before assigning ordinary submission IDs.
 @Entity("codeforces_import_buffer")
 @Index(["accountId", "batch", "submittedAt", "remoteId"])
-@Index(["accountId", "batch", "problemKey"])
 export class CodeforcesImportBufferEntity {
   @ManyToOne(() => RemoteAccountEntity, { onDelete: "CASCADE" })
   @JoinColumn()
@@ -23,9 +22,6 @@ export class CodeforcesImportBufferEntity {
 
   @Column({ type: "double" })
   submittedAt: number;
-
-  @Column({ type: "varchar", length: 180, nullable: true })
-  problemKey: string;
 
   @Column({ type: "json", select: false })
   payload: RemoteSubmission;

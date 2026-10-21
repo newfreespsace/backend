@@ -499,7 +499,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     problem: ProblemEntity,
     incoming: RemoteSubmissionInfo & { sourceCode?: string },
     contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase }
-  ): Promise<boolean> {
+  ): Promise<void> {
     const { sourceCode: providedSource, ...remote } = incoming;
     const sourceCode =
       typeof providedSource === "string" &&
@@ -508,12 +508,11 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
         ? providedSource
         : undefined;
     const key = `${remote.platform}:${remote.id}:${problem.id}`;
-    return await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
+    await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
       let submission = await this.submissionRepository.findOneBy({ remoteKey: key });
-      if (submission && submission.submitterId !== user.id) return false;
+      if (submission && submission.submitterId !== user.id) return;
       // The historical index can lag behind an original-site result (including rejudges).
-      if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems")
-        return false;
+      if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return;
       // Only the content endpoint may return code. Never put it in submission metadata or events.
       remote.sourceAvailable = !!sourceCode || submission?.remote?.sourceAvailable || undefined;
       if (!submission) {
@@ -589,7 +588,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           });
         });
       }
-      if (remote.status === SubmissionStatus.Pending || resultUnchanged) return true;
+      if (remote.status === SubmissionStatus.Pending || resultUnchanged) return;
       submission.remote = nextRemote;
       const fullScore = problem.remoteProblem?.fullScore;
       const score =
@@ -609,7 +608,6 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
         // Historical results still update an already open detail page; their first-AC marker remains false.
         await this.submissionProgressService.emitSubmissionEvent(submission.id, SubmissionEventType.Progress, progress);
       });
-      return true;
     });
   }
 
