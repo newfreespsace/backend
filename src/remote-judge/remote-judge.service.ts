@@ -1,5 +1,5 @@
 /* eslint-disable no-await-in-loop -- Preserve ordered, bounded database writes and account updates during sync. */
-import { randomBytes } from "crypto";
+import { randomBytes, randomInt } from "crypto";
 
 import { BadRequestException, ForbiddenException, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 
@@ -115,8 +115,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     const redis = this.redisService.getClient();
     if (!(await redis.set(`remote-bind-rate:${user.id}`, "1", "EX", 30, "NX")))
       throw new BadRequestException("BIND_COOLDOWN");
-    // CF Organization allows 30 characters. Base64url keeps 128 random bits in 27 characters, including the prefix.
-    const code = `NSOJ-${randomBytes(16).toString("base64url")}`;
+    // Keep the proof short enough for remote profile fields: NSOJ- plus six uppercase letters.
+    const code = `NSOJ-${Array.from({ length: 6 }, () => String.fromCharCode(65 + randomInt(26))).join("")}`;
     await redis.set(
       `remote-bind:${user.id}:${request.platform}`,
       JSON.stringify({ handle: request.handle, code }),

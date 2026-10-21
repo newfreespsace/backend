@@ -461,7 +461,7 @@ test("contest context selects by original time, checks membership and rejects hi
   assert.equal(imported.length, 0);
 });
 
-test("binding proof fits the 30-character profile limit and verifies unchanged on both platforms", async () => {
+test("binding proof is NSOJ- plus six letters and verifies unchanged on both platforms", async () => {
   for (const platform of [Method.Codeforces, Method.AtCoder]) {
     const service = Object.create(RemoteJudgeService.prototype);
     const pending = new Map();
@@ -489,8 +489,8 @@ test("binding proof fits the 30-character profile limit and verifies unchanged o
       save: async value => saved.push(value)
     };
     const { code, expiresIn } = await service.beginBinding({ id: 1 }, { platform, handle: "Coder" });
-    assert.ok(code.length <= 30, `Profile proof is too long: ${code.length}`);
-    assert.match(code, /^NSOJ-[A-Za-z0-9_-]+$/);
+    assert.equal(code.length, 11);
+    assert.match(code, /^NSOJ-[A-Z]{6}$/);
     assert.equal(expiresIn, 900);
     assert.deepEqual(JSON.parse(pending.get(`remote-bind:1:${platform}`)), { handle: "Coder", code });
 
