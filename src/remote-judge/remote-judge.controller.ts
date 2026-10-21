@@ -1,10 +1,11 @@
-import { BadRequestException, ForbiddenException, Body, Controller, Post } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Body, Controller, Get, Post } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 
 import { RemoteJudgeService } from "./remote-judge.service";
+import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
@@ -17,7 +18,12 @@ import {
 @ApiBearerAuth()
 @Controller("remoteJudge")
 export class RemoteJudgeController {
-  constructor(private readonly service: RemoteJudgeService) {}
+  constructor(private readonly service: RemoteJudgeService, private readonly monitor: RemoteJudgeMonitorService) {}
+
+  @Get("monitor")
+  getMonitor(@CurrentUser() user: UserEntity) {
+    return this.monitor.getSnapshot(user);
+  }
 
   private async run<T>(operation: () => Promise<T>): Promise<T | { error: string }> {
     try {

@@ -18,6 +18,7 @@ import { RemoteJudgeController } from "./remote-judge.controller";
 import { CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferEntity } from "./codeforces-import-buffer.entity";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
+import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 
 @Module({
   imports: [
@@ -31,7 +32,13 @@ import { CodeforcesImportBufferService } from "./codeforces-import-buffer.servic
     SiteSettingModule,
     AuditModule
   ],
-  providers: [RemoteProviderService, RemoteJudgeService, CodeforcesCredentialsService, CodeforcesImportBufferService],
+  providers: [
+    RemoteProviderService,
+    RemoteJudgeService,
+    CodeforcesCredentialsService,
+    CodeforcesImportBufferService,
+    RemoteJudgeMonitorService
+  ],
   controllers: [RemoteJudgeController]
 })
 export class RemoteJudgeModule {}
