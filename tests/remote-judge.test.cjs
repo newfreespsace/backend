@@ -604,6 +604,19 @@ test("AtCoder account status does not claim third-party historical import is run
   assert.equal(accounts[1].importingHistory, true);
 });
 
+test("failed or paused CF history scans do not claim import is running", async () => {
+  const service = Object.create(RemoteJudgeService.prototype);
+  service.configService = { config: {} };
+  const account = { platform: Method.Codeforces, cursor: "0", scan: { offset: 101 }, catchUpRequested: true };
+  service.accounts = { findBy: async () => [account] };
+  assert.equal((await service.list({ id: 1 })).accounts[0].importingHistory, true);
+  account.lastError = "REMOTE_UNAVAILABLE";
+  assert.equal((await service.list({ id: 1 })).accounts[0].importingHistory, false);
+  account.lastError = null;
+  service.configService.config = { remoteJudge: { enabled: false } };
+  assert.equal((await service.list({ id: 1 })).accounts[0].importingHistory, false);
+});
+
 test("direct sync only queries recent watched contests and commits its checkpoint after imports", async () => {
   const account = { id: 1, userId: 1, nextSyncAt: new Date(0), cursor: "900", failures: 0 };
   const { service } = workerFixture(account);

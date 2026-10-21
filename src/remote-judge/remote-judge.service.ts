@@ -92,6 +92,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         activeUntil: account.activeUntil,
         lastError: account.lastError,
         importingHistory:
+          this.settings.enabled &&
+          !account.lastError &&
           account.platform === SubmissionMethod.Codeforces &&
           (!!account.scan || (account.cursor === "0" && account.catchUpRequested))
       }))

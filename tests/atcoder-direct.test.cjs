@@ -259,6 +259,26 @@ test("without a configured session or watched contest no upstream requests are s
   assert.equal(calls.length, 0);
 });
 
+test("HTTP failures distinguish access denial and rate limits without assuming a CAPTCHA", async () => {
+  const { provider } = fixture();
+  for (const [status, error] of [
+    [403, "REMOTE_ACCESS_DENIED"],
+    [429, "REMOTE_RATE_LIMITED"],
+    [503, "REMOTE_UNAVAILABLE"]
+  ]) {
+    global.fetch = async () => new Response("", { status });
+    await assert.rejects(
+      provider.getPage({ platform: Method.Codeforces, handle: "coder", cursor: "0" }),
+      new RegExp(error)
+    );
+  }
+  global.fetch = async () => new Response("<html>Verification</html>", { status: 200 });
+  await assert.rejects(
+    provider.getPage({ platform: Method.Codeforces, handle: "coder", cursor: "0" }),
+    /REMOTE_API_FAILED/
+  );
+});
+
 test("session cookies only reach the original HTTPS host and redirects are never followed", async () => {
   const { provider } = fixture();
   const requests = [];

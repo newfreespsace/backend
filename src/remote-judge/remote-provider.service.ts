@@ -91,7 +91,14 @@ export class RemoteProviderService {
           if (location.origin === "https://atcoder.jp" && location.pathname === "/login")
             throw new Error("REMOTE_AUTH_REQUIRED");
         }
-        if (!response.ok) throw new Error(response.status === 429 ? "REMOTE_RATE_LIMITED" : "REMOTE_UNAVAILABLE");
+        if (!response.ok)
+          throw new Error(
+            response.status === 429
+              ? "REMOTE_RATE_LIMITED"
+              : response.status === 403
+              ? "REMOTE_ACCESS_DENIED"
+              : "REMOTE_UNAVAILABLE"
+          );
         const text = await response.text();
         if (text.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
         return text;

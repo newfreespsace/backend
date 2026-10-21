@@ -143,6 +143,7 @@ export class SiteSettingService {
     if (!current || current !== session) return;
     const safeError = [
       "REMOTE_AUTH_REQUIRED",
+      "REMOTE_ACCESS_DENIED",
       "REMOTE_RATE_LIMITED",
       "REMOTE_PARSE_FAILED",
       "REMOTE_UNAVAILABLE"
