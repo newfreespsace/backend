@@ -16,10 +16,12 @@ import { RemoteProviderService } from "./remote-provider.service";
 import { RemoteJudgeService } from "./remote-judge.service";
 import { RemoteJudgeController } from "./remote-judge.controller";
 import { CodeforcesCredentialsService } from "./codeforces-credentials.service";
+import { CodeforcesImportBufferEntity } from "./codeforces-import-buffer.entity";
+import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([RemoteAccountEntity, RemoteWatchEntity]),
+    TypeOrmModule.forFeature([RemoteAccountEntity, RemoteWatchEntity, CodeforcesImportBufferEntity]),
     RedisModule,
     UserModule,
     ProblemModule,
@@ -29,7 +31,7 @@ import { CodeforcesCredentialsService } from "./codeforces-credentials.service";
     SiteSettingModule,
     AuditModule
   ],
-  providers: [RemoteProviderService, RemoteJudgeService, CodeforcesCredentialsService],
+  providers: [RemoteProviderService, RemoteJudgeService, CodeforcesCredentialsService, CodeforcesImportBufferService],
   controllers: [RemoteJudgeController]
 })
 export class RemoteJudgeModule {}

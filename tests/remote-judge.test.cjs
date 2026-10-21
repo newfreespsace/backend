@@ -16,6 +16,8 @@ const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.servic
 const { RemotePlatformDto, SetSubmissionMethodDto } = require("../dist/remote-judge/remote-judge.dto");
 const { RemoteAccountEntity } = require("../dist/remote-judge/remote-account.entity");
 const { RemoteWatchEntity } = require("../dist/remote-judge/remote-watch.entity");
+const { CodeforcesImportBufferService } = require("../dist/remote-judge/codeforces-import-buffer.service");
+const { CodeforcesImportBufferEntity } = require("../dist/remote-judge/codeforces-import-buffer.entity");
 const { SubmissionService } = require("../dist/submission/submission.service");
 const { SubmissionEntity, ContestSubmissionPhase } = require("../dist/submission/submission.entity");
 const { SubmissionDetailEntity } = require("../dist/submission/submission-detail.entity");
@@ -66,6 +68,7 @@ const problem = () => ({
   type: ProblemType.Traditional,
   submissionMethod: Method.Codeforces,
   isPublic: true,
+  remoteProblemKey: "4:A",
   remoteProblem: parseRemoteProblem(Method.Codeforces, "https://codeforces.com/problemset/problem/4/A")
 });
 
@@ -575,6 +578,34 @@ test("returning to a problem extends activity without bypassing cooldown or repe
   assert.ok(account.activeUntil > new Date());
 });
 
+function importBufferFixture() {
+  const service = Object.create(CodeforcesImportBufferService.prototype);
+  const stored = new Map();
+  const key = row => `${row.accountId}:${row.batch}:${row.remoteId}`;
+  const matches = (row, where) =>
+    Object.entries(where).every(([name, value]) => {
+      if (value?.type === "not") return row[name] !== value.value;
+      if (value?.type === "in") return value.value.includes(row[name]);
+      return row[name] === value;
+    });
+  service.entries = {
+    upsert: async row => stored.set(key(row), structuredClone(row)),
+    delete: async where => {
+      for (const [id, row] of stored) if (matches(row, where)) stored.delete(id);
+    },
+    find: async options => {
+      assert.deepEqual(options.order, { submittedAt: "ASC", remoteId: "ASC" });
+      assert.equal(options.take, 101);
+      return [...stored.values()]
+        .filter(row => matches(row, options.where))
+        .sort((a, b) => a.submittedAt - b.submittedAt || Number(a.remoteId) - Number(b.remoteId))
+        .slice(0, options.take)
+        .map(row => structuredClone(row));
+    }
+  };
+  return { service, stored };
+}
+
 function workerFixture(candidate) {
   const service = Object.create(RemoteJudgeService.prototype);
   const updates = [],
@@ -601,6 +632,7 @@ function workerFixture(candidate) {
   };
   service.redisService = { getClient: () => ({ set: async () => "OK", eval: async () => 1 }) };
   service.lockService = locks();
+  service.codeforcesImportBuffer = importBufferFixture().service;
   service.users = { findUserById: async () => ({ id: 1, isActive: true }) };
   service.provider = {
     getPage: async () => {
@@ -737,6 +769,240 @@ test("direct sync only queries recent watched contests and commits its checkpoin
   assert.deepEqual(events, []);
   assert.equal(account.cursor, "950");
   assert.equal(account.failures, 1);
+});
+
+test("CF records across more than two pages allocate NSOJ IDs oldest first and resume after a failed import", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    handle: "coder",
+    nextSyncAt: new Date(0),
+    cursor: "0",
+    scan: null,
+    failures: 0
+  };
+  const allRows = Array.from({ length: 205 }, (_, i) => {
+    const id = 205 - i;
+    return remote({
+      id: String(id),
+      submittedAt: 1700000000 + Math.floor(id / 2),
+      historical: true,
+      sourceCode: `// ${id}`
+    });
+  });
+  const buffer = importBufferFixture();
+  const imported = submissionFixture();
+  const offsets = [];
+  let failOnce = true;
+  const makeWorker = () => {
+    const { service } = workerFixture(account);
+    service.codeforcesImportBuffer = buffer.service;
+    service.watches = { findBy: async () => [] };
+    service.connection = { getRepository: () => ({ findBy: async () => [problem()] }) };
+    service.provider.getPage = async current => {
+      const offset = current.scan?.offset || 1;
+      offsets.push(offset);
+      const rows = allRows.slice(offset - 1, offset + 99);
+      const more = offset + rows.length <= allRows.length;
+      return {
+        submissions: rows,
+        cursor: more ? "0" : "205",
+        more,
+        pending: false,
+        scan: more ? { offset: offset + rows.length, head: 205 } : null,
+        sourceError: "REMOTE_CF_SOURCE_MISSING",
+        sourceRetryAt: new Date(1700000000000)
+      };
+    };
+    service.importResult = async (_, user, row) => {
+      if (row.id === "6" && failOnce) {
+        failOnce = false;
+        throw new Error("interrupted import");
+      }
+      await imported.service.importRemoteSubmission(user, problem(), row);
+    };
+    return service;
+  };
+  // Collection is bounded to one upstream page per turn. Nothing is imported until the oldest page is known.
+  await makeWorker().tick(Method.Codeforces);
+  assert.equal(imported.stored.size, 0);
+  assert.equal(buffer.stored.size, 100);
+  account.nextSyncAt = new Date(0);
+  await makeWorker().tick(Method.Codeforces);
+  assert.equal(imported.stored.size, 0);
+  assert.equal(buffer.stored.size, 200);
+  account.nextSyncAt = new Date(0);
+  await makeWorker().tick(Method.Codeforces);
+  assert.equal(imported.stored.size, 5);
+  assert.equal(buffer.stored.size, 205, "failed imports retain every staged record");
+  assert.equal(account.cursor, "0");
+  assert.equal(account.scan.importCursor, "205");
+  // A new worker uses only persisted scan/buffer state, without requesting the upstream pages again.
+  for (let i = 0; i < 3; i++) {
+    account.nextSyncAt = new Date(0);
+    await makeWorker().tick(Method.Codeforces);
+  }
+  assert.deepEqual(offsets, [1, 101, 201]);
+  assert.deepEqual(
+    [...imported.stored.values()].map(row => Number(row.remote.id)),
+    Array.from({ length: 205 }, (_, i) => i + 1)
+  );
+  assert.equal(imported.counts.submissions, 205);
+  assert.equal(imported.details.get(1).content.code, "// 1");
+  assert.equal(buffer.stored.size, 0);
+  assert.equal(account.scan, null);
+  assert.equal(account.cursor, "205");
+  assert.equal(account.codeforcesSourceError, "REMOTE_CF_SOURCE_MISSING");
+});
+
+test("multi-page CF collection only stages submissions for linked NSOJ problems", async () => {
+  const account = { id: 1, userId: 1, platform: Method.Codeforces, nextSyncAt: new Date(0), cursor: "0", failures: 0 };
+  const { service } = workerFixture(account);
+  const buffer = importBufferFixture();
+  service.codeforcesImportBuffer = buffer.service;
+  service.watches = { findBy: async () => [] };
+  service.connection = { getRepository: () => ({ findBy: async () => [problem()] }) };
+  service.provider.getPage = async current =>
+    current.scan?.offset === 101
+      ? {
+          submissions: [remote({ id: "1", submittedAt: 1699999999 })],
+          cursor: "200",
+          scan: null,
+          more: false,
+          pending: false
+        }
+      : {
+          submissions: [
+            remote({ id: "200" }),
+            ...Array.from({ length: 99 }, (_, i) =>
+              remote({ id: String(199 - i), contestId: "999", sourceCode: "unlinked-source" })
+            )
+          ],
+          cursor: "0",
+          scan: { offset: 101, head: 200 },
+          more: true,
+          pending: false
+        };
+  const imported = [];
+  service.importResult = async (_, __, row) => imported.push(row.id);
+  await service.tick(Method.Codeforces);
+  assert.equal(buffer.stored.size, 1);
+  assert.equal([...buffer.stored.values()][0].payload.id, "200");
+  assert.doesNotMatch(JSON.stringify([...buffer.stored.values()]), /unlinked-source/);
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(imported, ["1", "200"]);
+  assert.equal(buffer.stored.size, 0);
+});
+
+test("a failed collection write retries the same upstream page before importing any newer record", async () => {
+  const account = { id: 1, userId: 1, platform: Method.Codeforces, nextSyncAt: new Date(0), cursor: "0", failures: 0 };
+  const { service } = workerFixture(account);
+  const buffer = importBufferFixture();
+  const upsert = buffer.service.entries.upsert;
+  let failOnce = true;
+  buffer.service.entries.upsert = async row => {
+    if (row.remoteId === "3" && failOnce) {
+      failOnce = false;
+      throw new Error("staging write interrupted");
+    }
+    await upsert(row);
+  };
+  service.codeforcesImportBuffer = buffer.service;
+  service.watches = { findBy: async () => [] };
+  service.connection = { getRepository: () => ({ findBy: async () => [problem()] }) };
+  const offsets = [];
+  service.provider.getPage = async current => {
+    const offset = current.scan?.offset || 1;
+    offsets.push(offset);
+    return offset === 1
+      ? {
+          submissions: [remote({ id: "5" }), remote({ id: "4" })],
+          cursor: "0",
+          scan: { offset: 3, head: 5 },
+          more: true,
+          pending: false
+        }
+      : {
+          submissions: [remote({ id: "3" }), remote({ id: "2" }), remote({ id: "1" })],
+          cursor: "5",
+          scan: null,
+          more: false,
+          pending: false
+        };
+  };
+  const imported = [];
+  service.importResult = async (_, __, row) => imported.push(row.id);
+  await service.tick(Method.Codeforces);
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(imported, []);
+  assert.equal(account.scan.offset, 3);
+  assert.equal(account.cursor, "0");
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(offsets, [1, 3, 3]);
+  assert.deepEqual(imported, ["1", "2", "3", "4", "5"]);
+  assert.equal(account.cursor, "5");
+  assert.equal(buffer.stored.size, 0);
+});
+
+test("single-page CF imports use original time then numeric ID, while abandoned staging is cleared", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    nextSyncAt: new Date(0),
+    cursor: "0",
+    failures: 0,
+    scan: { offset: 101, head: 10 }
+  };
+  const { service } = workerFixture(account);
+  const buffer = importBufferFixture();
+  service.codeforcesImportBuffer = buffer.service;
+  await buffer.service.stage(1, "old-batch", [remote()]);
+  service.watches = { findBy: async () => [] };
+  service.connection = { getRepository: () => ({ findBy: async () => [problem()] }) };
+  service.provider.getPage = async current => {
+    assert.equal(current.scan, null, "pre-update pagination restarts from the first page");
+    return {
+      submissions: [remote({ id: "10", submittedAt: 1700000001 }), remote({ id: "9" }), remote({ id: "8" })],
+      cursor: "10",
+      scan: null,
+      more: false,
+      pending: false
+    };
+  };
+  const imported = [];
+  service.importResult = async (_, __, row) => imported.push(row.id);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(imported, ["8", "9", "10"]);
+  assert.equal(buffer.stored.size, 0);
+  assert.equal(account.cursor, "10");
+});
+
+test("CF staging deduplicates overlapping pages, isolates accounts and only acknowledges successful pages", async () => {
+  const { service, stored } = importBufferFixture();
+  await service.stage(1, "old", [remote({ id: "999" })]);
+  await service.stage(2, "other", [remote({ id: "999" })]);
+  await service.stage(1, "batch", [remote({ id: "10" }), remote({ id: "2" })]);
+  await service.stage(1, "batch", [
+    remote({ id: "2", passedTestCount: 3 }),
+    remote({ id: "1", submittedAt: 1699999999 })
+  ]);
+  const page = await service.read(1, "batch");
+  assert.deepEqual(
+    page.submissions.map(row => row.id),
+    ["1", "2", "10"]
+  );
+  assert.equal(page.submissions[1].passedTestCount, 3);
+  assert.equal(page.more, false);
+  assert.equal(stored.size, 4);
+  assert.equal((await service.read(1, "batch")).submissions.length, 3);
+  await page.acknowledge();
+  assert.equal(stored.size, 1);
+  assert.equal((await service.read(2, "other")).submissions.length, 1);
 });
 
 test("ordinary visits request one catch-up without starting continuous tracking", async () => {
@@ -910,4 +1176,8 @@ test("database metadata keeps existing problems local and remote submission keys
       )
   );
   assert.equal(dataSource.getMetadata(RemoteWatchEntity).foreignKeys.length, 2);
+  const buffer = dataSource.getMetadata(CodeforcesImportBufferEntity);
+  assert.equal(buffer.findColumnWithPropertyName("payload").isSelect, false);
+  assert.equal(buffer.foreignKeys[0].onDelete, "CASCADE");
+  assert.equal(buffer.findColumnWithPropertyName("remoteId").type, "bigint");
 });

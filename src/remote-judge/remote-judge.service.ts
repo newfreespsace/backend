@@ -27,7 +27,7 @@ import { logger } from "@/logger";
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteWatchEntity } from "./remote-watch.entity";
-import { AtcoderLiveTarget, RemoteProviderService } from "./remote-provider.service";
+import { AtcoderLiveTarget, RemotePage, RemoteProviderService } from "./remote-provider.service";
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
@@ -36,6 +36,7 @@ import {
 } from "./remote-judge.dto";
 import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote-judge.types";
 import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
+import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -56,7 +57,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     private readonly submissions: SubmissionService,
     private readonly contests: ContestService,
     private readonly audit: AuditService,
-    private readonly codeforcesCredentials: CodeforcesCredentialsService
+    private readonly codeforcesCredentials: CodeforcesCredentialsService,
+    private readonly codeforcesImportBuffer: CodeforcesImportBufferService
   ) {}
 
   private get settings() {
@@ -460,6 +462,78 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async bufferedCodeforcesPage(
+    account: RemoteAccountEntity,
+    scan: RemoteAccountEntity["scan"],
+    source: Pick<RemotePage, "sourceError" | "sourceRetryAt">
+  ): Promise<RemotePage> {
+    const page = await this.codeforcesImportBuffer.read(account.id, scan.bufferKey);
+    return {
+      ...page,
+      sourceError: source.sourceError,
+      sourceRetryAt: source.sourceRetryAt,
+      cursor: page.more ? account.cursor : scan.importCursor,
+      scan: page.more ? scan : null,
+      pending: !!scan.importPending
+    };
+  }
+
+  private async remoteProblems(platform: SubmissionMethod, submissions: RemoteSubmission[]): Promise<ProblemEntity[]> {
+    const sourceKeys = [...new Set(submissions.map(row => `${row.contestId}:${row.taskId}`))];
+    return sourceKeys.length
+      ? await this.connection.getRepository(ProblemEntity).findBy({
+          submissionMethod: platform,
+          remoteProblemKey: In(sourceKeys)
+        })
+      : [];
+  }
+
+  private async codeforcesImportPage(account: RemoteAccountEntity): Promise<RemotePage> {
+    if (account.scan?.bufferKey && account.scan.importCursor !== undefined)
+      return await this.bufferedCodeforcesPage(account, account.scan, {
+        sourceError: account.codeforcesSourceError,
+        sourceRetryAt: account.codeforcesSourceRetryAt
+      });
+    // Restart legacy in-flight scans so every page participates in the ordered batch.
+    const scan = account.scan?.bufferKey ? account.scan : null;
+    const page = await this.provider.getPage({ ...account, scan });
+    if (!scan && !page.more) {
+      await this.codeforcesImportBuffer.discard(account.id);
+      page.submissions.sort((a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id));
+      return page;
+    }
+    const bufferKey = scan?.bufferKey || randomBytes(12).toString("hex");
+    // Keep only submissions for linked NSOJ problems, rather than staging an account's entire source archive.
+    const linked = new Set(
+      (await this.remoteProblems(SubmissionMethod.Codeforces, page.submissions)).map(
+        problem => problem.remoteProblemKey
+      )
+    );
+    await this.codeforcesImportBuffer.stage(
+      account.id,
+      bufferKey,
+      page.submissions.filter(row => linked.has(`${row.contestId}:${row.taskId}`))
+    );
+    if (page.more) return { ...page, submissions: [], scan: { ...page.scan, bufferKey } };
+    const importScan: RemoteAccountEntity["scan"] = {
+      ...scan,
+      bufferKey,
+      importCursor: page.cursor,
+      importPending: page.pending
+    };
+    // Persist the collection/import boundary before allocating any submission IDs.
+    await page.acknowledge?.();
+    await this.accounts.update(
+      { id: account.id },
+      {
+        scan: importScan,
+        codeforcesSourceError: page.sourceError || null,
+        codeforcesSourceRetryAt: page.sourceRetryAt || null
+      }
+    );
+    return await this.bufferedCodeforcesPage(account, importScan, page);
+  }
+
   private async tick(platform: SubmissionMethod): Promise<void> {
     const now = new Date();
     const candidate = await this.accounts
@@ -515,14 +589,11 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               liveTargets.set(contestId, { contestId, since: Math.min(previous?.since ?? since, since) });
             }
           }
-          const page = await this.provider.getPage(account, [...liveTargets.values()]);
-          const sourceKeys = [...new Set(page.submissions.map(row => `${row.contestId}:${row.taskId}`))];
-          const problems = sourceKeys.length
-            ? await this.connection.getRepository(ProblemEntity).findBy({
-                submissionMethod: platform,
-                remoteProblemKey: In(sourceKeys)
-              })
-            : [];
+          const page =
+            platform === SubmissionMethod.Codeforces
+              ? await this.codeforcesImportPage(account)
+              : await this.provider.getPage(account, [...liveTargets.values()]);
+          const problems = await this.remoteProblems(platform, page.submissions);
           watches ??= await this.watches.findBy({ accountId: account.id });
           for (const row of page.submissions) await this.importResult(account, user, row, problems, watches);
           await page.acknowledge?.();

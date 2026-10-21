@@ -51,7 +51,14 @@ export class RemoteAccountEntity {
   cursor: string;
 
   @Column({ type: "json", nullable: true })
-  scan: { offset: number; head: number; pendingMin?: number };
+  scan: {
+    offset: number;
+    head: number;
+    pendingMin?: number;
+    bufferKey?: string;
+    importCursor?: string;
+    importPending?: boolean;
+  };
 
   @Column({ type: "integer", default: 0 })
   failures: number;
