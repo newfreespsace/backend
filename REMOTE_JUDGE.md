@@ -118,6 +118,16 @@ node scripts/check-atcoder-source.cjs 'https://atcoder.jp/contests/比赛ID/subm
 
 读取阶段的错误发生在原站请求之前。脚本只输出固定错误码及已知的文件或数据库错误编号，不输出原始异常中的配置、密码、SQL 值或会话。`CONFIG_READ_FAILED (ENOENT)` 表示指定配置文件不存在，`EACCES` 表示无读取权限；`CONFIG_PARSE_FAILED` 表示 YAML 解析失败；`CONFIG_INVALID` 表示数据库字段或会话加密密钥字段不符合预期。`BACKEND_BUILD_MISSING` 表示缺少 `dist/site-setting/site-setting.service.js`，需要在该后端目录构建；`DEPENDENCY_LOAD_FAILED`、`BACKEND_MODULE_LOAD_FAILED` 表示依赖或编译模块加载失败。`DATABASE_CONNECT_FAILED` 会附带可识别的连接错误码，如 `ECONNREFUSED` 或 `ER_ACCESS_DENIED_ERROR`；`SESSION_QUERY_FAILED` 表示站点会话查询失败，例如 `ER_NO_SUCH_TABLE`；`SESSION_DATA_INVALID` 表示存储内容异常；`REMOTE_SESSION_UNREADABLE` 表示无法解密；`REMOTE_AUTH_REQUIRED` 表示没有可用的会话值。请传入与实际后端服务一致的配置文件；脚本更新本身不要求重启后端。
 
+如果同一条提交在服务器上通过浏览器复制的 cURL 可以读取源码、通过探测脚本却返回 403，可运行请求对照：
+
+```sh
+node scripts/check-atcoder-source.cjs 'https://atcoder.jp/contests/比赛ID/submissions/提交ID' ./config.yaml --compare-requests
+```
+
+该模式固定使用后台已保存的同一会话，最多依次请求四次详情：`default_with_lang` 为原始请求，`default_without_lang` 仅移除查询参数，`browser_user_agent` 在无参数请求上仅替换 User-Agent，`browser_headers` 再加入本次排查所用浏览器的请求头。相邻请求至少间隔 1.6 秒，遇到 429 停止。输出仅包含固定方案名及原有检查字段，不返回 Cookie、源码或原始 HTML，不修改后台正式同步行为。浏览器头配置是诊断样本，不保证今后持续有效。全部失败时，仍需考虑浏览器额外 Cookie、已保存会话与浏览器会话的差异、cURL 与 Node 请求客户端差异等因素，不能据此直接断定 IP 被封。
+
+诊断登录标记同时识别 `/logout` 和带 `continue` 等查询参数的同站退出链接；旧版精确匹配 `/logout` 可能漏报真实登录页面。脚本更新不需要重启后端。
+
 ## 验证
 
 ```sh
