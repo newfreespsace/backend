@@ -353,6 +353,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException("INVALID_REMOTE_URL");
     }
     if (source && request.remoteFullScore) source.fullScore = request.remoteFullScore;
+    let { submittable } = request;
     await this.problems.lockProblemById(problem.id, "Write", async locked => {
       if (!locked) throw new BadRequestException("NO_SUCH_PROBLEM");
       if (source && locked.type === ProblemType.SubmitAnswer)
@@ -369,6 +370,13 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         locked.submissionMethod !== request.submissionMethod ||
         locked.remoteProblem?.contestId !== source?.contestId ||
         locked.remoteProblem?.taskId !== source?.taskId;
+      // Remote judging does not depend on the previous local test data or submission setting.
+      if (
+        submittable == null &&
+        source &&
+        (!locked.submissionMethod || locked.submissionMethod === SubmissionMethod.Local)
+      )
+        submittable = true;
       await this.connection.transaction(async manager => {
         if (changed) await manager.delete(RemoteWatchEntity, { problemId: problem.id });
         await manager.update(
@@ -380,16 +388,17 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             remoteProblemKey: source ? `${source.contestId}:${source.taskId}` : null
           }
         );
-        if (request.submittable != null)
-          await manager.update(ProblemJudgeInfoEntity, { problemId: problem.id }, { submittable: request.submittable });
+        if (submittable != null)
+          await manager.update(ProblemJudgeInfoEntity, { problemId: problem.id }, { submittable });
       });
+      await this.problems.clearProblemPreprocessedJudgeInfoCache(problem.id);
     });
     await this.audit.log("problem.set_submission_method", AuditLogObjectType.Problem, problem.id, {
       oldMethod: problem.submissionMethod,
       oldSource: problem.remoteProblem,
       newMethod: request.submissionMethod,
       newSource: source,
-      submittable: request.submittable
+      submittable
     });
     return {};
   }

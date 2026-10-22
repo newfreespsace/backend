@@ -623,7 +623,7 @@ export class ProblemService {
     problemJudgeInfo.submittable = submittable;
     await this.problemJudgeInfoRepository.save(problemJudgeInfo);
 
-    await this.redisService.cacheDelete(REDIS_KEY_PROBLEM_PREPROCESSED_JUDGE_INFO.format(problem.id));
+    await this.clearProblemPreprocessedJudgeInfoCache(problem.id);
 
     return null;
   }
@@ -660,11 +660,15 @@ export class ProblemService {
     return [problemJudgeInfo.judgeInfo, problemJudgeInfo.submittable];
   }
 
+  async clearProblemPreprocessedJudgeInfoCache(problemId: number): Promise<void> {
+    await this.redisService.cacheDelete(REDIS_KEY_PROBLEM_PREPROCESSED_JUDGE_INFO.format(problemId));
+  }
+
   /**
    * Judge info needs to be preprocessed before sending to clients or judge clients.
    * Currently preprocessing is detecting testcases from testdata files.
    *
-   * The cache gets cleared when the testdata files or judge info changed.
+   * The cache gets cleared when testdata files, judge info, submission method or submittable state changes.
    */
   async getProblemPreprocessedJudgeInfo(
     problem: ProblemEntity

@@ -1,6 +1,10 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const path = require("node:path");
+const { format } = require("node:util");
+String.prototype.format = function (...args) {
+  return format(this.toString(), ...args);
+};
 require("reflect-metadata");
 require("tsconfig-paths").register({ baseUrl: path.resolve(__dirname, "../dist"), paths: { "@/*": ["*"] } });
 const { validate } = require("class-validator");
@@ -23,6 +27,7 @@ const { SubmissionEntity, ContestSubmissionPhase } = require("../dist/submission
 const { SubmissionDetailEntity } = require("../dist/submission/submission-detail.entity");
 const { ProblemEntity, ProblemType } = require("../dist/problem/problem.entity");
 const { ProblemFileEntity } = require("../dist/problem/problem-file.entity");
+const { ProblemJudgeInfoEntity } = require("../dist/problem/problem-judge-info.entity");
 const { ProblemService } = require("../dist/problem/problem.service");
 const { SubmissionStatus: Status } = require("../dist/submission/submission-status.enum");
 
@@ -461,6 +466,7 @@ test("switching requires modify permission, empty files and no pending submissio
   service.problems = {
     findProblemById: async () => problem(),
     userHasPermission: async () => permission,
+    clearProblemPreprocessedJudgeInfoCache: async () => {},
     lockProblemById: async (_, __, callback) => callback(problem())
   };
   service.connection = {
@@ -488,6 +494,108 @@ test("switching requires modify permission, empty files and no pending submissio
   pending = 0;
   await service.setMethod({ id: 1 }, request);
   assert.equal(updates, 1);
+});
+
+function methodFixture(method = Method.Local, enabled = false) {
+  const storedProblem = { ...problem(), submissionMethod: method };
+  const judge = { problemId: 7, judgeInfo: { subtasks: [] }, submittable: enabled };
+  const cached = new Map();
+  const cacheDeletes = [];
+  const problems = Object.create(ProblemService.prototype);
+  problems.findProblemById = async () => ({ ...storedProblem });
+  problems.userHasPermission = async () => true;
+  problems.lockProblemById = async (_, __, callback) => callback({ ...storedProblem });
+  problems.problemJudgeInfoRepository = { findOneBy: async () => ({ ...judge }) };
+  problems.getProblemFiles = async () => [];
+  problems.problemTypeFactoryService = { type: () => ({ preprocessJudgeInfo: info => info }) };
+  problems.redisService = {
+    cacheGet: async key => cached.get(key) ?? null,
+    cacheSet: async (key, value) => cached.set(key, value),
+    cacheDelete: async key => {
+      cacheDeletes.push(key);
+      cached.delete(key);
+    }
+  };
+  const service = Object.create(RemoteJudgeService.prototype);
+  service.problems = problems;
+  service.audit = { log: async () => {} };
+  service.connection = {
+    getRepository: () => ({ countBy: async () => 0 }),
+    transaction: async callback =>
+      callback({
+        delete: async () => {},
+        update: async (entity, _, values) => {
+          if (entity === ProblemEntity) Object.assign(storedProblem, values);
+          else if (entity === ProblemJudgeInfoEntity) Object.assign(judge, values);
+          else assert.fail("Unexpected updated entity");
+        }
+      })
+  };
+  return { service, problems, storedProblem, judge, cacheDeletes };
+}
+
+for (const [method, url] of [
+  [Method.Codeforces, "https://codeforces.com/problemset/problem/4/A"],
+  [Method.AtCoder, "https://atcoder.jp/contests/abc001/tasks/abc001_1"]
+]) {
+  test(`switching an un-submittable local problem without test data to ${method} enables submissions and clears cached state`, async () => {
+    const { service, problems, storedProblem, judge, cacheDeletes } = methodFixture();
+    assert.equal((await problems.getProblemPreprocessedJudgeInfo(storedProblem))[1], false);
+    await service.setMethod({ id: 1 }, { problemId: 7, submissionMethod: method, remoteUrl: url });
+    assert.equal(judge.submittable, true);
+    assert.equal((await problems.getProblemJudgeInfo(storedProblem))[1], true);
+    assert.equal((await problems.getProblemPreprocessedJudgeInfo(storedProblem))[1], true);
+    assert.equal(cacheDeletes.length, 1);
+  });
+}
+
+test("remote submission toggles clear cached state in both directions and honor an explicit disabled setting", async () => {
+  const { service, problems, storedProblem, judge } = methodFixture();
+  const request = {
+    problemId: 7,
+    submissionMethod: Method.Codeforces,
+    remoteUrl: "https://codeforces.com/problemset/problem/4/A"
+  };
+  for (const submittable of [false, true, false]) {
+    await problems.getProblemPreprocessedJudgeInfo(storedProblem);
+    await service.setMethod({ id: 1 }, { ...request, submittable });
+    assert.equal(judge.submittable, submittable);
+    assert.equal((await problems.getProblemPreprocessedJudgeInfo(storedProblem))[1], submittable);
+  }
+});
+
+test("editing an existing remote problem or switching back to local preserves a disabled setting when omitted", async () => {
+  const { service, judge } = methodFixture(Method.Codeforces);
+  await service.setMethod(
+    { id: 1 },
+    {
+      problemId: 7,
+      submissionMethod: Method.AtCoder,
+      remoteUrl: "https://atcoder.jp/contests/abc001/tasks/abc001_1"
+    }
+  );
+  assert.equal(judge.submittable, false);
+  await service.setMethod({ id: 1 }, { problemId: 7, submissionMethod: Method.Local });
+  assert.equal(judge.submittable, false);
+});
+
+test("failed method changes do not invalidate the problem cache", async () => {
+  const { service, cacheDeletes } = methodFixture();
+  service.connection.transaction = async () => {
+    throw new Error("transaction failed");
+  };
+  await assert.rejects(
+    service.setMethod(
+      { id: 1 },
+      {
+        problemId: 7,
+        submissionMethod: Method.Codeforces,
+        remoteUrl: "https://codeforces.com/problemset/problem/4/A"
+      }
+    ),
+    /transaction failed/
+  );
+  assert.deepEqual(cacheDeletes, []);
 });
 
 test("contest context selects by original time, checks membership and rejects historical AC", async () => {
