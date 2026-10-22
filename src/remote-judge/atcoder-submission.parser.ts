@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import moment from "moment-timezone";
 
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
+import { RemoteSyncError } from "./remote-error";
 
 function numericValue(text: string): number | null {
   const value = text.replace(/,/g, "").trim();
@@ -18,6 +19,15 @@ function resourceValue(text: string, units: Record<string, number>): number | nu
 /** Parse the English, server-rendered submission list, before AtCoder's local-time script runs. */
 export function parseAtcoderSubmissionPage(html: string, contestId: string, handle: string, page: number) {
   const $ = cheerio.load(html);
+  const fail = (reason: string, submissionId?: string): never => {
+    throw new RemoteSyncError(reason === "LOGIN_PAGE" ? "REMOTE_AUTH_REQUIRED" : "REMOTE_PARSE_FAILED", {
+      stage: "parse",
+      reason,
+      contestId,
+      page,
+      submissionId
+    });
+  };
   const table = $("table")
     .toArray()
     .find(element => {
@@ -28,8 +38,8 @@ export function parseAtcoderSubmissionPage(html: string, contestId: string, hand
       return ["Submission Time", "Task", "User", "Language", "Score", "Status"].every(name => headers.includes(name));
     });
   if (!table) {
-    if ($('form[action="/login"], input[name="password"]').length) throw new Error("REMOTE_AUTH_REQUIRED");
-    throw new Error("REMOTE_PARSE_FAILED");
+    if ($('form[action^="/login"], input[name="password"]').length) fail("LOGIN_PAGE");
+    fail($("table").length ? "UNEXPECTED_TABLE_HEADERS" : "MISSING_SUBMISSION_TABLE");
   }
   const headers = $(table)
     .find("thead th")
@@ -59,18 +69,12 @@ export function parseAtcoderSubmissionPage(html: string, contestId: string, hand
       .trim()
       .replace(/\s*\/\s*/g, "/");
     const language = cell("Language").text().trim();
-    if (
-      !task ||
-      task[1] !== contestId ||
-      !detail ||
-      detail[1] !== contestId ||
-      !Number.isSafeInteger(Number(detail[2])) ||
-      Number(detail[2]) <= 0 ||
-      !submitted.isValid() ||
-      !verdict ||
-      !language
-    )
-      throw new Error("REMOTE_PARSE_FAILED");
+    if (!task || task[1] !== contestId) fail("INVALID_TASK_LINK", detail?.[2]);
+    if (!detail || detail[1] !== contestId) fail("INVALID_SUBMISSION_LINK");
+    if (!Number.isSafeInteger(Number(detail[2])) || Number(detail[2]) <= 0) fail("INVALID_SUBMISSION_ID");
+    if (!submitted.isValid()) fail("INVALID_SUBMISSION_TIME", detail[2]);
+    if (!verdict) fail("MISSING_VERDICT", detail[2]);
+    if (!language) fail("MISSING_LANGUAGE", detail[2]);
     submissions.push({
       id: detail[2],
       contestId,

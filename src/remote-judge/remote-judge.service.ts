@@ -38,6 +38,7 @@ import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote
 import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
+import { safeRemoteErrorDetails } from "./remote-error";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -577,8 +578,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             ? "Collecting"
             : "Syncing"
         );
+        let user: UserEntity;
         try {
-          const user = await this.users.findUserById(account.userId);
+          user = await this.users.findUserById(account.userId);
           if (!user?.isActive) {
             await this.accounts.update({ id: account.id }, { activeUntil: new Date(0), catchUpRequested: false });
             return;
@@ -619,6 +621,10 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           if (page.submissions.length) this.monitor?.setTaskPhase(platform, "Importing");
           for (const row of page.submissions) await this.importResult(account, user, row, problems, watches);
           await page.acknowledge?.();
+          const newSourceError =
+            page.sourceError &&
+            (page.sourceError !== account.codeforcesSourceError ||
+              +page.sourceRetryAt !== +account.codeforcesSourceRetryAt);
           await this.accounts.update(
             { id: account.id },
             {
@@ -642,23 +648,34 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
                   : () => `IF(catchUpVersion = ${Number(account.catchUpVersion) || 0}, 0, 1)`
             }
           );
+          if (newSourceError)
+            await this.monitor?.recordError(account, user, {
+              error: page.sourceError,
+              at: new Date(),
+              retryAt: page.sourceRetryAt,
+              kind: "Source"
+            });
         } catch (error) {
           const failures = account.failures + 1;
+          const at = new Date();
+          const retryAt = new Date(
+            Date.now() + Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7))
+          );
+          const code = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED";
           await this.accounts.update(
             { id: account.id },
             {
               failures,
-              lastError: /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED",
-              lastErrorAt: new Date(),
-              nextSyncAt: new Date(
-                Date.now() + Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7))
-              )
+              lastError: code,
+              lastErrorAt: at,
+              nextSyncAt: retryAt
             }
           );
+          await this.monitor?.recordError(account, user, { error: code, at, retryAt, details: error.details });
           logger.warn(
-            `Remote sync ${platform} account ${account.id}: ${
-              /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED"
-            }`
+            `Remote sync ${platform} account ${account.id}: ${code} ${JSON.stringify(
+              safeRemoteErrorDetails(error.details)
+            )}`
           );
         } finally {
           this.monitor?.finishTask(platform);

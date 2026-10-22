@@ -1,4 +1,5 @@
 import { SubmissionMethod } from "./remote-judge.types";
+import { RemoteErrorDetails } from "./remote-error";
 
 export type RemoteMonitorState =
   | "Healthy"
@@ -23,6 +24,17 @@ export interface RemoteMonitorAccount {
   sourceError: string | null;
   sourceErrorAt: string | null;
   sourceRetryAt: string | null;
+  lastErrorDetails?: RemoteErrorDetails;
+}
+
+export interface RemoteMonitorError {
+  id: string;
+  account: Pick<RemoteMonitorAccount, "accountId" | "userId" | "username" | "handle">;
+  kind: "Result" | "Source";
+  error: string;
+  at: string;
+  retryAt: string | null;
+  details: RemoteErrorDetails;
 }
 
 export interface RemotePlatformMonitor {
@@ -47,6 +59,8 @@ export interface RemotePlatformMonitor {
     tasks: { account: RemoteMonitorAccount; phase: RemoteTaskPhase; startedAt: string }[];
     errors: RemoteMonitorAccount[];
     errorsTruncated: boolean;
+    recentErrors: RemoteMonitorError[];
+    errorHistoryAvailable: boolean;
     session?: { configured: boolean; status: string; checkedAt: string | null; error: string | null };
   };
 }

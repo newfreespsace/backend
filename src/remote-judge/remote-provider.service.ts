@@ -19,6 +19,7 @@ import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
 import { ATCODER_USER_AGENT } from "./atcoder-request";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
+import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
 
 const CODEFORCES_RESULT_PAGE_SIZE = 100;
 const CODEFORCES_SOURCE_PAGE_SIZE = 20;
@@ -54,9 +55,9 @@ const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   "UND_ERR_SOCKET"
 ]);
 
-class RemoteRequestError extends Error {
-  constructor(message: string, readonly retryable: boolean) {
-    super(message);
+class RemoteRequestError extends RemoteSyncError {
+  constructor(message: string, readonly retryable: boolean, details: RemoteErrorDetails) {
+    super(message, details);
   }
 }
 
@@ -262,7 +263,7 @@ export class RemoteProviderService {
             RETRYABLE_NETWORK_ERROR_CODES.has(networkCode) ||
             (!httpStatus && !originalCode && error?.name === "TypeError") ||
             [408, 500, 502, 503, 504].includes(httpStatus));
-        throw new RemoteRequestError(code, retryable);
+        throw new RemoteRequestError(code, retryable, { stage, reason, httpStatus });
       });
   }
 
@@ -387,21 +388,34 @@ export class RemoteProviderService {
     const key = `remote-atcoder-pages:${account.id}:${target.contestId}`;
     const saved = await redis.get(key);
     const scan: AtcoderLiveScan = saved ? JSON.parse(saved) : { page: 2, head: 0, boundary: 0, pendingIds: [] };
-    const readPage = async (page: number) =>
-      parseAtcoderSubmissionPage(
-        await this.request(
-          SubmissionMethod.AtCoder,
-          `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions?${new URLSearchParams({
-            "f.User": account.handle,
-            lang: "en",
-            page: String(page)
-          })}`,
-          true
-        ),
-        target.contestId,
-        account.handle,
-        page
-      );
+    const readPage = async (page: number) => {
+      try {
+        return parseAtcoderSubmissionPage(
+          await this.request(
+            SubmissionMethod.AtCoder,
+            `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions?${new URLSearchParams({
+              "f.User": account.handle,
+              lang: "en",
+              page: String(page)
+            })}`,
+            true
+          ),
+          target.contestId,
+          account.handle,
+          page
+        );
+      } catch (error) {
+        // Add request context without retaining the authenticated URL or the upstream HTML.
+        const details = safeRemoteErrorDetails(error.details);
+        error.details = {
+          ...details,
+          ...(details.stage === "parse" ? { httpStatus: 200 } : {}),
+          contestId: target.contestId,
+          page
+        };
+        throw error;
+      }
+    };
     const first = await readPage(1);
     const rows = [...first.submissions];
     const pending = new Set(scan.pendingIds);

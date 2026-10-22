@@ -18,15 +18,19 @@ import { SubmissionMethod } from "./remote-judge.types";
 import {
   RemoteJudgeMonitorSnapshot,
   RemoteMonitorAccount,
+  RemoteMonitorError,
   RemoteMonitorState,
   RemotePlatformMonitor,
   RemoteTaskPhase
 } from "./remote-judge-monitor.types";
+import { safeRemoteErrorDetails } from "./remote-error";
 
 const platforms = [SubmissionMethod.Codeforces, SubmissionMethod.AtCoder];
 const CACHE_KEY = "remote-monitor:snapshot:v1";
 const CACHE_MS = 10000;
 const HEARTBEAT_MS = 45000;
+const ERROR_HISTORY_LIMIT = 50;
+const ERROR_HISTORY_SECONDS = 7 * 86400;
 const WORK = "(account.activeUntil > :now OR account.catchUpRequested = 1)";
 const DUE = `${WORK} AND account.nextSyncAt <= :now`;
 const HISTORY =
@@ -111,6 +115,90 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
   finishTask(platform: SubmissionMethod): void {
     this.tasks.delete(platform);
     this.publish();
+  }
+
+  async recordError(
+    account: RemoteAccountEntity,
+    user: UserEntity | undefined,
+    failure: { error: string; at: Date; retryAt?: Date; kind?: "Result" | "Source"; details?: unknown }
+  ): Promise<void> {
+    try {
+      const event: RemoteMonitorError = {
+        id: randomBytes(12).toString("hex"),
+        account: {
+          accountId: account.id,
+          userId: account.userId,
+          username: user?.username?.slice(0, 64) || "",
+          handle: account.handle.slice(0, 64)
+        },
+        kind: failure.kind || "Result",
+        error: safeError(failure.error) || "REMOTE_SYNC_FAILED",
+        at: failure.at.toISOString(),
+        retryAt: iso(failure.retryAt),
+        details: safeRemoteErrorDetails(failure.details)
+      };
+      const redis = this.redisService.getSharedClient();
+      if (redis.status !== "ready") return;
+      const key = `remote-monitor:errors:${account.platform}`;
+      await bounded(
+        redis
+          .multi()
+          .lpush(key, JSON.stringify(event))
+          .ltrim(key, 0, ERROR_HISTORY_LIMIT - 1)
+          .expire(key, ERROR_HISTORY_SECONDS)
+          .exec()
+      );
+    } catch {
+      // Diagnostics must never fail or delay the synchronization retry beyond the monitoring timeout.
+    }
+  }
+
+  private async errorHistory(
+    platform: SubmissionMethod
+  ): Promise<{ events: RemoteMonitorError[]; available: boolean }> {
+    try {
+      const redis = this.redisService.getSharedClient();
+      if (redis.status !== "ready") return { events: [], available: false };
+      const values = await bounded(redis.lrange(`remote-monitor:errors:${platform}`, 0, ERROR_HISTORY_LIMIT - 1));
+      const events = values.flatMap(value => {
+        try {
+          const event = JSON.parse(value) as RemoteMonitorError;
+          const at = iso(event.at);
+          const error = safeError(event.error);
+          if (
+            !at ||
+            !error ||
+            Date.now() - +new Date(at) > ERROR_HISTORY_SECONDS * 1000 ||
+            +new Date(at) > Date.now() + 60000 ||
+            !/^[a-f0-9]{24}$/.test(event.id) ||
+            !Number.isSafeInteger(event.account?.accountId) ||
+            !Number.isSafeInteger(event.account?.userId)
+          )
+            return [];
+          return [
+            {
+              id: event.id,
+              account: {
+                accountId: event.account.accountId,
+                userId: event.account.userId,
+                username: String(event.account.username || "").slice(0, 64),
+                handle: String(event.account.handle || "").slice(0, 64)
+              },
+              kind: event.kind === "Source" ? ("Source" as const) : ("Result" as const),
+              error,
+              at,
+              retryAt: iso(event.retryAt),
+              details: safeRemoteErrorDetails(event.details)
+            }
+          ];
+        } catch {
+          return [];
+        }
+      });
+      return { events: events.sort((a, b) => +new Date(b.at) - +new Date(a.at)), available: true };
+    } catch {
+      return { events: [], available: false };
+    }
   }
 
   // Monitoring failure must never interrupt result synchronization. Reuse the command connection.
@@ -295,6 +383,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         activeAccounts,
         latestError,
         pendingSubmissions,
+        history,
         sourcePendingSubmissions,
         sourceFailedSubmissions
       ] = await Promise.all([
@@ -325,6 +414,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         this.connection
           .getRepository(SubmissionEntity)
           .countBy({ remoteKey: Like(`${platform}:%`), status: SubmissionStatus.Pending }),
+        this.errorHistory(platform),
         ...(["Pending", "Failed"] as const).map(sourceStatus =>
           platform === SubmissionMethod.AtCoder
             ? this.connection
@@ -401,8 +491,20 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
             const account = activeAccounts.find(row => Number(row.accountId) === task.accountId);
             return account ? [{ account: this.account(account), phase: task.phase, startedAt: task.startedAt }] : [];
           }),
-          errors: errors.map(row => this.account(row)),
+          errors: errors.map(row => {
+            const account = this.account(row);
+            const recent = history.events.find(
+              event => event.account.accountId === account.accountId && event.kind === "Result"
+            );
+            const matches =
+              recent?.error === account.lastError &&
+              account.lastErrorAt &&
+              Math.abs(+new Date(recent.at) - +new Date(account.lastErrorAt)) < 1000;
+            return { ...account, ...(matches ? { lastErrorDetails: recent.details } : {}) };
+          }),
           errorsTruncated: count("abnormalAccounts") > errors.length,
+          recentErrors: history.events,
+          errorHistoryAvailable: history.available,
           ...(isAtcoder
             ? {
                 session: {

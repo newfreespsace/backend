@@ -835,6 +835,82 @@ test("upstream failure backs off without advancing the submission cursor", async
   assert.ok(+account.nextSyncAt >= start + 60000);
 });
 
+test("the sync worker retains structured failures while clearing only the active error after recovery", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    handle: "coder",
+    platform: Method.AtCoder,
+    nextSyncAt: new Date(0),
+    cursor: "900",
+    failures: 0
+  };
+  const { service } = workerFixture(account);
+  const failures = [];
+  service.monitor = {
+    startTask() {},
+    setTaskPhase() {},
+    finishTask() {},
+    recordError: async (_, user, failure) => failures.push({ user, ...failure })
+  };
+  service.watches = { findBy: async () => [] };
+  service.provider.hasAtcoderDirectSession = async () => true;
+  service.provider.getPage = async () => {
+    throw Object.assign(new Error("REMOTE_PARSE_FAILED"), {
+      details: { stage: "parse", reason: "MISSING_SUBMISSION_TABLE", contestId: "abc480", page: 1 }
+    });
+  };
+  await service.tick(Method.AtCoder);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].details.contestId, "abc480");
+  assert.equal(failures[0].error, "REMOTE_PARSE_FAILED");
+  assert.equal(+failures[0].at, +account.lastErrorAt);
+  assert.equal(+failures[0].retryAt, +account.nextSyncAt);
+  service.provider.getPage = async () => ({ submissions: [], cursor: "900", scan: null, more: false, pending: false });
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.AtCoder);
+  assert.equal(account.lastError, null);
+  assert.equal(failures.length, 1);
+});
+
+test("new source failures are retained once without repeating a carried-over cooldown error", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    handle: "coder",
+    platform: Method.Codeforces,
+    codeforcesSummaryVersion: 1,
+    nextSyncAt: new Date(0),
+    cursor: "900",
+    failures: 0
+  };
+  const { service } = workerFixture(account);
+  const failures = [];
+  service.monitor = {
+    startTask() {},
+    setTaskPhase() {},
+    finishTask() {},
+    recordError: async (_, __, failure) => failures.push(failure)
+  };
+  service.watches = { findBy: async () => [] };
+  const sourceRetryAt = new Date(Date.now() + 300000);
+  service.provider.getPage = async () => ({
+    submissions: [],
+    cursor: "900",
+    scan: null,
+    more: false,
+    pending: false,
+    sourceError: "REMOTE_CF_SOURCE_MISSING",
+    sourceRetryAt
+  });
+  await service.tick(Method.Codeforces);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].kind, "Source");
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.equal(failures.length, 1);
+});
+
 test("AtCoder pauses without a session and resumes immediately after one is configured", async () => {
   const account = { id: 1, userId: 1, nextSyncAt: new Date(0), cursor: "900", failures: 0, catchUpRequested: true };
   const { service, updates, requestCount } = workerFixture(account);

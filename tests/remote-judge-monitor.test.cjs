@@ -10,7 +10,9 @@ const { SubmissionEntity } = require("../dist/submission/submission.entity");
 const CACHE = "remote-monitor:snapshot:v1";
 function fixture(t) {
   const values = new Map(),
-    registries = new Map();
+    registries = new Map(),
+    histories = new Map();
+  const expirations = [];
   let duplicateCalls = 0,
     queryCount = 0;
   const redis = {
@@ -29,6 +31,29 @@ function fixture(t) {
     zrangebyscore: async (key, min) =>
       [...(registries.get(key) || new Map())].filter(([, score]) => score >= min).map(([id]) => id),
     mget: async (...keys) => keys.map(key => values.get(key) || null),
+    lrange: async (key, start, end) => (histories.get(key) || []).slice(start, end + 1),
+    multi: () => {
+      const commands = [];
+      const transaction = {
+        lpush: (key, value) => {
+          commands.push(() => histories.set(key, [value, ...(histories.get(key) || [])]));
+          return transaction;
+        },
+        ltrim: (key, start, end) => {
+          commands.push(() => histories.set(key, histories.get(key).slice(start, end + 1)));
+          return transaction;
+        },
+        expire: (key, seconds) => {
+          expirations.push({ key, seconds });
+          return transaction;
+        },
+        exec: async () => {
+          commands.forEach(command => command());
+          return [];
+        }
+      };
+      return transaction;
+    },
     pipeline: () => {
       const commands = [];
       const pipeline = {
@@ -168,6 +193,8 @@ function fixture(t) {
     redis,
     values,
     registries,
+    histories,
+    expirations,
     config,
     selected,
     connection,
@@ -364,4 +391,95 @@ test("database failures retain a stale snapshot and never expose admin data to o
   assert.equal(result.unavailable, true);
   assert.ok(result.platforms.every(row => row.state === "Unknown"));
   assert.doesNotMatch(JSON.stringify(result), /remote-coder|student|connectedClients/);
+});
+
+test("detailed errors survive recovery and are shared across workers without exposing request secrets", async t => {
+  const f = fixture(t);
+  const at = new Date();
+  const details = {
+    stage: "parse",
+    reason: "INVALID_SUBMISSION_TIME",
+    contestId: "abc480",
+    page: 2,
+    submissionId: "12345",
+    cookie: "private-cookie",
+    html: "private-source",
+    url: "https://secret.test"
+  };
+  await f.service.recordError(
+    { id: 7, userId: 2, handle: "remote-coder", platform: "AtCoder" },
+    { id: 2, username: "student" },
+    { error: "REMOTE_PARSE_FAILED", at, details }
+  );
+  f.data.errors.AtCoder = [account({ lastError: "REMOTE_PARSE_FAILED", lastErrorAt: at })];
+  let result = await f.service.getSnapshot(admin);
+  let platform = result.platforms[1].admin;
+  assert.equal(platform.recentErrors.length, 1);
+  assert.equal(platform.errors[0].lastErrorDetails.reason, "INVALID_SUBMISSION_TIME");
+  assert.deepEqual(platform.recentErrors[0].details, {
+    stage: "parse",
+    reason: "INVALID_SUBMISSION_TIME",
+    contestId: "abc480",
+    page: 2,
+    submissionId: "12345"
+  });
+  assert.doesNotMatch(JSON.stringify(result), /private-cookie|private-source|secret.test/);
+  f.data.errors.AtCoder = [];
+  f.values.delete(CACHE);
+  const otherWorker = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config, f.settings);
+  result = await otherWorker.getSnapshot(admin);
+  platform = result.platforms[1].admin;
+  assert.equal(platform.errors.length, 0);
+  assert.equal(platform.recentErrors.length, 1, "recovery does not erase history");
+  assert.deepEqual(f.expirations, [{ key: "remote-monitor:errors:AtCoder", seconds: 7 * 86400 }]);
+  const publicSnapshot = await otherWorker.getSnapshot({ id: 2 });
+  assert.doesNotMatch(
+    JSON.stringify(publicSnapshot),
+    /student|remote-coder|recentErrors|INVALID_SUBMISSION_TIME|abc480/
+  );
+});
+
+test("history keeps the newest 50 errors per platform and ignores expired or malformed entries", async t => {
+  const f = fixture(t);
+  const account = { id: 7, userId: 2, handle: "coder", platform: "AtCoder" };
+  for (let i = 0; i < 55; i++) {
+    await f.service.recordError(account, undefined, {
+      error: "REMOTE_PARSE_FAILED",
+      at: new Date(),
+      details: { page: i + 1 }
+    });
+  }
+  assert.equal(f.histories.get("remote-monitor:errors:AtCoder").length, 50);
+  let history = await f.service.errorHistory("AtCoder");
+  assert.equal(history.events[0].details.page, 55);
+  assert.equal(history.events.at(-1).details.page, 6);
+  assert.equal((await f.service.errorHistory("Codeforces")).events.length, 0);
+  const expired = { ...history.events[0], at: new Date(Date.now() - 8 * 86400000).toISOString() };
+  f.histories.set("remote-monitor:errors:AtCoder", [
+    "invalid json",
+    JSON.stringify(expired),
+    JSON.stringify(history.events[0])
+  ]);
+  history = await f.service.errorHistory("AtCoder");
+  assert.equal(history.available, true);
+  assert.equal(history.events.length, 1);
+});
+
+test("history storage failure is isolated from synchronization and reported as unavailable", async t => {
+  const f = fixture(t);
+  f.redis.multi = () => {
+    throw new Error("Redis unavailable");
+  };
+  await assert.doesNotReject(
+    f.service.recordError({ id: 7, userId: 2, handle: "coder", platform: "AtCoder" }, undefined, {
+      error: "REMOTE_PARSE_FAILED",
+      at: new Date()
+    })
+  );
+  f.redis.lrange = async () => {
+    throw new Error("Redis unavailable");
+  };
+  const result = await f.service.getSnapshot(admin);
+  assert.equal(result.platforms[1].admin.errorHistoryAvailable, false);
+  assert.deepEqual(result.platforms[1].admin.recentErrors, []);
 });

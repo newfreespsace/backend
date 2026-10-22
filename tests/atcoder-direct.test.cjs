@@ -138,6 +138,41 @@ test("login, challenge and malformed result pages cannot masquerade as an empty 
   assert.equal(parseAtcoderSubmissionPage(html(), "abc480", "coder", 1).submissions.length, 0);
 });
 
+test("parser failures identify the contest, page, submission and invalid field without retaining HTML", () => {
+  for (const [body, reason, id] of [
+    ["<html>private-session browser verification</html>", "MISSING_SUBMISSION_TABLE"],
+    ["<table><thead><tr><th>unexpected</th></tr></thead></table>", "UNEXPECTED_TABLE_HEADERS"],
+    [html([row({ id: 123, time: "invalid" })]), "INVALID_SUBMISSION_TIME", "123"],
+    [html([row({ id: 123, contest: "abc481" })]), "INVALID_TASK_LINK", "123"],
+    [html([row({ id: 123, verdict: "" })]), "MISSING_VERDICT", "123"]
+  ]) {
+    assert.throws(
+      () => parseAtcoderSubmissionPage(body, "abc480", "coder", 3),
+      error => {
+        assert.equal(error.message, "REMOTE_PARSE_FAILED");
+        assert.equal(error.details.stage, "parse");
+        assert.equal(error.details.reason, reason);
+        assert.equal(error.details.contestId, "abc480");
+        assert.equal(error.details.page, 3);
+        assert.equal(error.details.submissionId, id);
+        assert.doesNotMatch(JSON.stringify(error), /private-session|<html>|<table>/);
+        return true;
+      }
+    );
+  }
+});
+
+test("AtCoder HTTP errors carry the failed contest and page into synchronization diagnostics", async () => {
+  const { provider } = fixture();
+  global.fetch = async () => new Response("private upstream body", { status: 403 });
+  await assert.rejects(provider.getPage(account, targets), error => {
+    assert.equal(error.message, "REMOTE_ACCESS_DENIED");
+    assert.deepEqual(error.details, { stage: "request", httpStatus: 403, contestId: "abc480", page: 1 });
+    assert.doesNotMatch(JSON.stringify(error), /private upstream|test-dedicated-session/);
+    return true;
+  });
+});
+
 test("results come exclusively from AtCoder, with deferred checkpoints", async () => {
   const { provider, values, calls, checks } = fixture(() => html([row()]));
   const result = await provider.getPage(account, targets);
