@@ -335,7 +335,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             id: latest.id,
             status: hideResult ? "Submitted" : latest.status,
             submittedAt: latest.submitTime,
-            remote: hideResult ? undefined : latest.remote
+            remote: hideResult ? undefined : this.submissions.getRemoteMeta(latest)
           }
         : null
     };

@@ -19,6 +19,7 @@ import { CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferEntity } from "./codeforces-import-buffer.entity";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
+import { AtcoderSourceService } from "./atcoder-source.service";
 
 @Module({
   imports: [
@@ -37,7 +38,8 @@ import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
     RemoteJudgeService,
     CodeforcesCredentialsService,
     CodeforcesImportBufferService,
-    RemoteJudgeMonitorService
+    RemoteJudgeMonitorService,
+    AtcoderSourceService
   ],
   controllers: [RemoteJudgeController]
 })

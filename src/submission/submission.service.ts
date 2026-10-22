@@ -8,6 +8,8 @@ import moment from "moment-timezone";
 
 import { remoteCodeLanguage, RemoteSubmissionInfo, SubmissionMethod } from "@/remote-judge/remote-judge.types";
 
+import { makeRemoteSourceContent, validRemoteSource } from "@/remote-judge/remote-source";
+
 import { logger } from "@/logger";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
 import { UserEntity } from "@/user/user.entity";
@@ -501,12 +503,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase }
   ): Promise<void> {
     const { sourceCode: providedSource, ...remote } = incoming;
-    const sourceCode =
-      typeof providedSource === "string" &&
-      providedSource.length > 0 &&
-      Buffer.byteLength(providedSource, "utf8") <= 1024 * 1024
-        ? providedSource
-        : undefined;
+    const sourceCode = validRemoteSource(providedSource) ? providedSource : undefined;
     const key = `${remote.platform}:${remote.id}:${problem.id}`;
     await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
       let submission = await this.submissionRepository.findOneBy({ remoteKey: key });
@@ -515,6 +512,14 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return;
       // Only the content endpoint may return code. Never put it in submission metadata or events.
       remote.sourceAvailable = !!sourceCode || submission?.remote?.sourceAvailable || undefined;
+      if (remote.platform === SubmissionMethod.AtCoder) {
+        const previous = submission?.remote?.sourceSync;
+        remote.sourceSync = remote.sourceAvailable
+          ? previous?.status === "Available"
+            ? previous
+            : { status: "Available", failures: 0 }
+          : previous || { status: "Pending", nextAttemptAt: new Date().toISOString(), failures: 0 };
+      }
       if (!submission) {
         submission = new SubmissionEntity();
         Object.assign(submission, {
@@ -541,11 +546,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           await manager.save(
             Object.assign(new SubmissionDetailEntity(), {
               submissionId: submission.id,
-              content: {
-                code: sourceCode || "",
-                language: remoteCodeLanguage(remote.language) || "",
-                compileAndRunOptions: {}
-              },
+              content: makeRemoteSourceContent(remote.language, sourceCode || ""),
               fileUuid: null,
               result: null
             })
@@ -573,19 +574,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       );
       if (needsSourceSave || metadataChanged) {
         await this.lockService.lock(`Submission_${submission.id}`, async () => {
-          const detail = needsSourceSave ? await this.getSubmissionDetail(submission) : null;
-          if (detail)
-            detail.content = {
-              ...(detail.content as object),
-              code: sourceCode,
-              language: remoteCodeLanguage(remote.language) || "",
-              compileAndRunOptions: {}
-            };
-          submission.remote = nextRemote;
-          await this.connection.transaction(async manager => {
-            await manager.save(submission);
-            if (detail) await manager.save(detail);
-          });
+          await this.saveRemoteContent(submission, nextRemote, needsSourceSave ? sourceCode : undefined);
         });
       }
       if (remote.status === SubmissionStatus.Pending || resultUnchanged) return;
@@ -611,10 +600,70 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     });
   }
 
+  getRemoteMeta(submission: SubmissionEntity): RemoteSubmissionInfo {
+    if (!submission.remote) return submission.remote;
+    const { sourceSync, ...remote } = submission.remote;
+    if (remote.platform !== SubmissionMethod.AtCoder) return remote;
+    return {
+      ...remote,
+      sourceStatus: remote.sourceAvailable ? "Available" : sourceSync?.status || "Pending",
+      sourceError: sourceSync?.error,
+      sourceRetryAt: sourceSync?.nextAttemptAt
+    };
+  }
+
+  /** Caller holds the remote-submission and submission locks. Shared by CF imports and source backfills. */
+  private async saveRemoteContent(
+    submission: SubmissionEntity,
+    remote: RemoteSubmissionInfo,
+    source?: string
+  ): Promise<void> {
+    const detail = source === undefined ? null : await this.getSubmissionDetail(submission);
+    if (source !== undefined && !detail) throw new Error("REMOTE_SOURCE_MISSING_DETAIL");
+    if (detail) detail.content = makeRemoteSourceContent(remote.language, source, detail.content);
+    submission.remote = remote;
+    await this.connection.transaction(async manager => {
+      await manager.save(submission);
+      if (detail) await manager.save(detail);
+    });
+  }
+
+  /** Source-only update: do not re-import verdicts, statistics, review tasks or first-AC events. */
+  async saveRemoteSource(expected: SubmissionEntity, source: string): Promise<void> {
+    if (!source?.trim()) throw new Error("REMOTE_SOURCE_MISSING");
+    if (!validRemoteSource(source)) throw new Error("REMOTE_SOURCE_TOO_LARGE");
+    await this.lockService.lock(`RemoteSubmission_${expected.remoteKey}`, async () => {
+      await this.lockService.lock(`Submission_${expected.id}`, async () => {
+        const submission = await this.findSubmissionById(expected.id);
+        if (
+          !submission ||
+          submission.remoteKey !== expected.remoteKey ||
+          submission.submitterId !== expected.submitterId ||
+          submission.remote?.platform !== SubmissionMethod.AtCoder ||
+          submission.remote.id !== expected.remote.id ||
+          submission.remote.contestId !== expected.remote.contestId ||
+          submission.remote.taskId !== expected.remote.taskId ||
+          submission.remote.handle.toLowerCase() !== expected.remote.handle.toLowerCase()
+        )
+          throw new Error("REMOTE_SOURCE_IDENTITY_MISMATCH");
+        if (submission.remote.sourceAvailable) return;
+        await this.saveRemoteContent(
+          submission,
+          {
+            ...submission.remote,
+            sourceAvailable: true,
+            sourceSync: { status: "Available", failures: 0 }
+          },
+          source
+        );
+      });
+    });
+  }
+
   async getSubmissionBasicMeta(submission: SubmissionEntity): Promise<SubmissionBasicMetaDto> {
     return {
       id: submission.id,
-      remote: submission.remote,
+      remote: this.getRemoteMeta(submission),
       isPublic: submission.isPublic,
       contestId: submission.contestId,
       contestProblemIndex: submission.contestProblemIndex,

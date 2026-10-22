@@ -34,10 +34,22 @@ export interface RemoteSubmission {
   url: string;
 }
 
+export interface RemoteSourceSync {
+  status: "Pending" | "Available" | "Failed";
+  nextAttemptAt?: string;
+  failures: number;
+  error?: string;
+}
+
 export interface RemoteSubmissionInfo extends Omit<RemoteSubmission, "sourceCode"> {
   platform: SubmissionMethod;
   handle: string;
   historical: boolean;
+  // Persisted inside the existing remote JSON; omitted from public metadata.
+  sourceSync?: RemoteSourceSync;
+  sourceStatus?: "Pending" | "Available" | "Failed";
+  sourceError?: string;
+  sourceRetryAt?: string;
 }
 
 // Keep the original compiler name in remote metadata, while preserving NSOJ's language filters.

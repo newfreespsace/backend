@@ -150,7 +150,7 @@ async function probePage(url, session, fetchPage, diagnostics = false, expectSou
     redirect: "manual",
     signal: AbortSignal.timeout(20000),
     headers: {
-      "User-Agent": "NSOJ-Result-Sync/1.0",
+      "User-Agent": browserUserAgent,
       Accept: "text/html",
       ...requestHeaders,
       ...(session ? { Cookie: `REVEL_SESSION=${session}` } : {})
@@ -264,8 +264,8 @@ async function compareRequests(
   const contest = plain.pathname.split("/")[2];
   // Same saved session and submission in every request. No browser Cookie is imported.
   const profiles = [
-    ["default_with_lang", detail, {}],
-    ["default_without_lang", plain, {}],
+    ["default_with_lang", detail, { "User-Agent": "NSOJ-Result-Sync/1.0" }],
+    ["default_without_lang", plain, { "User-Agent": "NSOJ-Result-Sync/1.0" }],
     ["browser_user_agent", plain, { "User-Agent": browserUserAgent }],
     [
       "browser_headers",

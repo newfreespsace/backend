@@ -254,6 +254,67 @@ test("concurrent and repeated sync creates one real submission, with original ti
   assert.equal(stored.size, 1);
 });
 
+test("AtCoder source-only backfill preserves verdicts, results and all statistics across concurrent result sync", async () => {
+  const { service, stored, details, counts, writes } = submissionFixture();
+  const incoming = remote({ platform: Method.AtCoder });
+  await service.importRemoteSubmission({ id: 1 }, problem(), incoming);
+  const expected = structuredClone(stored.get(1));
+  assert.equal(expected.remote.sourceSync.status, "Pending");
+  const beforeCounts = { ...counts };
+  const beforeResult = structuredClone(details.get(1).result);
+  await Promise.all([
+    service.saveRemoteSource(expected, "// private AtCoder code\r\nint main() {}\n"),
+    service.importRemoteSubmission({ id: 1 }, problem(), incoming)
+  ]);
+  assert.deepEqual(counts, beforeCounts);
+  assert.deepEqual(details.get(1).result, beforeResult);
+  assert.equal(details.get(1).content.code, "// private AtCoder code\r\nint main() {}\n");
+  assert.equal(stored.get(1).remote.sourceAvailable, true);
+  assert.equal(stored.get(1).remote.sourceSync.status, "Available");
+  assert.equal(stored.get(1).remote.sourceSync.nextAttemptAt, undefined);
+  assert.equal(stored.get(1).status, expected.status);
+  const meta = await service.getSubmissionBasicMeta(Object.assign(new SubmissionEntity(), stored.get(1)));
+  assert.equal(meta.remote.sourceStatus, "Available");
+  assert.doesNotMatch(JSON.stringify(meta), /private AtCoder code|sourceSync/);
+  const beforeWrites = writes.length;
+  await service.saveRemoteSource(expected, "different code");
+  assert.equal(writes.length, beforeWrites);
+});
+
+test("source-only saves reject changed ownership and oversized UTF-8 before writing", async () => {
+  const { service, stored, details } = submissionFixture();
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote({ platform: Method.AtCoder }));
+  const expected = structuredClone(stored.get(1));
+  await assert.rejects(service.saveRemoteSource({ ...expected, submitterId: 2 }, "attacker"), /IDENTITY_MISMATCH/);
+  await assert.rejects(service.saveRemoteSource(expected, "中".repeat(400000)), /TOO_LARGE/);
+  assert.equal(details.get(1).content.code, "");
+  assert.equal(stored.get(1).remote.sourceAvailable, undefined);
+});
+
+test("AtCoder grade polling preserves persistent JSON source cooldowns and hides internal queue state", async () => {
+  const { service, stored, counts, writes } = submissionFixture();
+  const incoming = remote({ platform: Method.AtCoder });
+  await service.importRemoteSubmission({ id: 1 }, problem(), incoming);
+  const sourceSync = {
+    status: "Failed",
+    nextAttemptAt: "2026-10-22T12:00:00.000Z",
+    failures: 4,
+    error: "REMOTE_RATE_LIMITED"
+  };
+  stored.get(1).remote.sourceSync = structuredClone(sourceSync);
+  const before = { ...counts },
+    beforeWrites = writes.length;
+  await service.importRemoteSubmission({ id: 1 }, problem(), incoming);
+  assert.deepEqual(stored.get(1).remote.sourceSync, sourceSync);
+  assert.deepEqual(counts, before);
+  assert.equal(writes.length, beforeWrites);
+  const meta = await service.getSubmissionBasicMeta(Object.assign(new SubmissionEntity(), stored.get(1)));
+  assert.equal(meta.remote.sourceStatus, "Failed");
+  assert.equal(meta.remote.sourceError, "REMOTE_RATE_LIMITED");
+  assert.equal(meta.remote.sourceRetryAt, sourceSync.nextAttemptAt);
+  assert.equal(meta.remote.sourceSync, undefined);
+});
+
 test("source and test summary backfills update existing records without leaking code or recounting results", async () => {
   const { service, stored, details, counts, writes } = submissionFixture();
   await service.importRemoteSubmission({ id: 1 }, problem(), remote());
@@ -267,6 +328,7 @@ test("source and test summary backfills update existing records without leaking 
   const saved = [...stored.values()][0];
   assert.equal(details.get(saved.id).content.code, code);
   assert.equal(saved.remote.sourceAvailable, true);
+  assert.equal(saved.remote.sourceSync, undefined, "CF retains its existing account-level source state");
   assert.equal(saved.remote.passedTestCount, 17);
   assert.equal(saved.remote.testset, "TESTS");
   assert.equal(saved.remote.sourceCode, undefined);
@@ -1163,6 +1225,14 @@ test("database metadata keeps existing problems local and remote submission keys
   assert.equal(problems.findColumnWithPropertyName("remoteProblemKey").isNullable, true);
   const submissions = dataSource.getMetadata(SubmissionEntity);
   assert.equal(submissions.findColumnWithPropertyName("remoteKey").isNullable, true);
+  assert.equal(submissions.findColumnWithPropertyName("remote").type, "json");
+  for (const name of ["remoteSourceStatus", "remoteSourceNextAttemptAt", "remoteSourceFailures", "remoteSourceError"])
+    assert.equal(
+      submissions.findColumnWithPropertyName(name),
+      undefined,
+      "source queue must reuse existing JSON without new columns"
+    );
+
   assert.ok(
     submissions.indices.some(
       index => index.isUnique && index.columns.some(column => column.propertyName === "remoteKey")

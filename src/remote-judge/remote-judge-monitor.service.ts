@@ -290,7 +290,14 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       const workers = workerGroups[platforms.indexOf(platform)];
       const tasks = workers.flatMap(worker => (worker.task ? [worker.task] : []));
       const activeIds = [...new Set(tasks.map(task => task.accountId))];
-      const [errors, activeAccounts, latestError, pendingSubmissions] = await Promise.all([
+      const [
+        errors,
+        activeAccounts,
+        latestError,
+        pendingSubmissions,
+        sourcePendingSubmissions,
+        sourceFailedSubmissions
+      ] = await Promise.all([
         this.accountQuery()
           .where("account.platform = :platform", { platform })
           .andWhere("(account.lastError IS NOT NULL OR account.codeforcesSourceError IS NOT NULL)")
@@ -317,7 +324,19 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           .getRawOne(),
         this.connection
           .getRepository(SubmissionEntity)
-          .countBy({ remoteKey: Like(`${platform}:%`), status: SubmissionStatus.Pending })
+          .countBy({ remoteKey: Like(`${platform}:%`), status: SubmissionStatus.Pending }),
+        ...(["Pending", "Failed"] as const).map(sourceStatus =>
+          platform === SubmissionMethod.AtCoder
+            ? this.connection
+                .getRepository(SubmissionEntity)
+                .createQueryBuilder("source")
+                .where("source.remoteKey LIKE :prefix", { prefix: "AtCoder:%" })
+                .andWhere("JSON_UNQUOTE(JSON_EXTRACT(source.remote, '$.sourceSync.status')) = :sourceStatus", {
+                  sourceStatus
+                })
+                .getCount()
+            : Promise.resolve(0)
+        )
       ]);
       const lastSyncedAt = iso(sum.lastSyncedAt);
       const lastHeartbeatAt =
@@ -364,7 +383,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         state,
         lastSyncedAt,
         lastHeartbeatAt,
-        sourceSupport: isAtcoder ? "Unavailable" : "PersonalKey",
+        sourceSupport: isAtcoder ? "SiteSession" : "PersonalKey",
         admin: {
           boundAccounts: count("boundAccounts"),
           activeAccounts: count("activeAccounts"),
@@ -372,6 +391,8 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           retryingAccounts: count("retryingAccounts"),
           historyAccounts: count("historyAccounts"),
           pendingSubmissions,
+          sourcePendingSubmissions,
+          sourceFailedSubmissions,
           errorAccounts: count("errorAccounts"),
           sourceErrorAccounts: count("sourceErrorAccounts"),
           oldestQueuedAt: iso(sum.oldestQueuedAt),

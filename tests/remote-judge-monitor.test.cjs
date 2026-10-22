@@ -77,6 +77,8 @@ function fixture(t) {
     accounts: [],
     latest: {},
     pending: 0,
+    sourcePending: 0,
+    sourceFailed: 0,
     fail: false,
     session: {
       atcoderSessionConfigured: true,
@@ -89,7 +91,24 @@ function fixture(t) {
   const connection = {
     getRepository: entity =>
       entity === SubmissionEntity
-        ? { countBy: async () => data.pending }
+        ? {
+            countBy: async () => data.pending,
+            createQueryBuilder: () => {
+              const params = {};
+              const builder = {
+                where: (_, input) => {
+                  Object.assign(params, input);
+                  return builder;
+                },
+                andWhere: (_, input) => {
+                  Object.assign(params, input);
+                  return builder;
+                },
+                getCount: async () => (params.sourceStatus === "Pending" ? data.sourcePending : data.sourceFailed)
+              };
+              return builder;
+            }
+          }
         : {
             createQueryBuilder: () => {
               queryCount++;
@@ -281,7 +300,7 @@ test("AtCoder distinguishes missing and expired sessions; monitoring does not ma
   f.data.session.atcoderSessionStatus = "expired";
   const result = await f.service.getSnapshot(admin);
   assert.equal(result.platforms[1].state, "AuthExpired");
-  assert.equal(result.platforms[1].sourceSupport, "Unavailable");
+  assert.equal(result.platforms[1].sourceSupport, "SiteSession");
   assert.equal(requests, 0);
   f.config.config.remoteJudge.enabled = false;
   assert.ok((await f.service.getSnapshot()).platforms.every(row => row.state === "Disabled"));

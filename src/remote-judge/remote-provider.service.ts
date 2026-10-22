@@ -15,6 +15,9 @@ import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
+import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
+import { ATCODER_USER_AGENT } from "./atcoder-request";
+import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 
 const CODEFORCES_RESULT_PAGE_SIZE = 100;
@@ -94,7 +97,7 @@ function decodeCodeforcesSource(row: CodeforcesSubmissionRow): string | undefine
       ? row.sourceCode
       : undefined;
   const encoded = row.sourceBase64;
-  const maximumBytes = 1024 * 1024;
+  const maximumBytes = MAX_REMOTE_SOURCE_BYTES;
   if (encoded.length > Math.ceil(maximumBytes / 3) * 4) throw new Error("REMOTE_CF_SOURCE_TOO_LARGE");
   // Buffer.from(base64) accepts malformed input silently; reject it before storing code.
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error("REMOTE_CF_SOURCE_INVALID");
@@ -142,8 +145,8 @@ export class RemoteProviderService {
     accountId?: number
   ): Promise<string> {
     const headers: Record<string, string> = {
-      "User-Agent": "NSOJ-Result-Sync/1.0",
-      Accept: "application/json,text/html"
+      "User-Agent": platform === SubmissionMethod.AtCoder ? ATCODER_USER_AGENT : "NSOJ-Result-Sync/1.0",
+      Accept: platform === SubmissionMethod.AtCoder ? "text/html" : "application/json,text/html"
     };
     if (authenticated) {
       const session = await this.siteSettingService.getAtcoderSession();
@@ -343,6 +346,34 @@ export class RemoteProviderService {
       await this.siteSettingService.recordAtcoderSessionCheck(session, error);
     } catch {
       logger.warn("Unable to save AtCoder session check status");
+    }
+  }
+
+  async getAtcoderSource(expected: AtcoderSourceIdentity): Promise<string> {
+    if (
+      !/^[1-9]\d*$/.test(expected.id) ||
+      !Number.isSafeInteger(Number(expected.id)) ||
+      !/^[\w-]+$/.test(expected.contestId) ||
+      !/^[\w-]+$/.test(expected.taskId) ||
+      !/^[a-zA-Z0-9_.-]{1,64}$/.test(expected.handle)
+    )
+      throw new Error("REMOTE_SOURCE_IDENTITY_MISMATCH");
+    const session = await this.siteSettingService.getAtcoderSession();
+    if (!session) throw new Error("REMOTE_AUTH_REQUIRED");
+    try {
+      const html = await this.request(
+        SubmissionMethod.AtCoder,
+        `https://atcoder.jp/contests/${expected.contestId}/submissions/${expected.id}`,
+        true
+      );
+      const source = parseAtcoderSource(html, expected);
+      await this.reportAtcoderSessionCheck(session);
+      return source;
+    } catch (error) {
+      // Source-specific failures must not invalidate an otherwise usable result session.
+      if (["REMOTE_AUTH_REQUIRED", "REMOTE_SESSION_UNREADABLE"].includes(error.message))
+        await this.reportAtcoderSessionCheck(session, error.message);
+      throw error;
     }
   }
 
