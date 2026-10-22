@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { test, afterEach } = require("node:test");
+const { test, beforeEach, afterEach } = require("node:test");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 require("reflect-metadata");
@@ -10,9 +10,20 @@ const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.servic
 const { SubmissionMethod: Method } = require("../dist/remote-judge/remote-judge.types");
 const { RequestLogMiddleware } = require("../dist/request-log.middleware");
 const { EventReportService } = require("../dist/event-report/event-report.service");
+const { logger } = require("../dist/logger");
 const originalFetch = global.fetch;
+const originalWarn = logger.warn;
+const originalLog = logger.log;
+let diagnostics;
+beforeEach(() => {
+  diagnostics = [];
+  logger.warn = message => diagnostics.push(message);
+  logger.log = message => diagnostics.push(message);
+});
 afterEach(() => {
   global.fetch = originalFetch;
+  logger.warn = originalWarn;
+  logger.log = originalLog;
 });
 const credentials = { apiKey: "testKey123", apiSecret: "testSecret456" };
 const account = () => ({
@@ -52,6 +63,7 @@ test("signed source sync uses the official SHA-512 protocol and preserves test s
     const url = new URL(address);
     assert.equal(url.origin, "https://codeforces.com");
     assert.equal(url.searchParams.get("includeSources"), "true");
+    assert.equal(url.searchParams.get("count"), "20");
     assert.equal(url.searchParams.get("apiKey"), credentials.apiKey);
     assert.ok(Math.abs(Number(url.searchParams.get("time")) - Date.now() / 1000) < 5);
     const signature = url.searchParams.get("apiSig");
@@ -89,7 +101,7 @@ test("CF sourceBase64 preserves UTF-8, BOM and line endings and resumes history 
     assert.equal(params.get("includeSources"), "true");
     assert.equal(params.get("from"), "1");
     return new Response(
-      JSON.stringify({ status: "OK", result: Array.from({ length: 100 }, (_, i) => ({ ...encodedRow, id: 1000 - i })) })
+      JSON.stringify({ status: "OK", result: Array.from({ length: 20 }, (_, i) => ({ ...encodedRow, id: 1000 - i })) })
     );
   };
   const page = await providerFixture().getPage({
@@ -106,7 +118,7 @@ test("CF sourceBase64 preserves UTF-8, BOM and line endings and resumes history 
   assert.equal(page.submissions[0].testset, "TESTS");
   assert.equal(page.more, true);
   assert.equal(page.cursor, "0");
-  assert.equal(page.scan.offset, 101);
+  assert.equal(page.scan.offset, 21);
 });
 
 test("malformed, invalid UTF-8 and oversized Base64 sources cannot become silently corrupted code", async () => {
@@ -188,7 +200,7 @@ test("recovered source authorization restarts history skipped by public-only syn
   let offset;
   global.fetch = async address => {
     offset = new URL(address).searchParams.get("from");
-    return new Response(JSON.stringify({ status: "OK", result: Array.from({ length: 100 }, (_, i) => row(1000 - i)) }));
+    return new Response(JSON.stringify({ status: "OK", result: Array.from({ length: 20 }, (_, i) => row(1000 - i)) }));
   };
   const page = await providerFixture().getPage({
     ...account(),
@@ -200,7 +212,199 @@ test("recovered source authorization restarts history skipped by public-only syn
   assert.equal(offset, "1");
   assert.equal(page.more, true);
   assert.equal(page.cursor, "0");
-  assert.equal(page.scan.offset, 101);
+  assert.equal(page.scan.offset, 21);
+});
+
+test("small source pages visit every submission and preserve pending checkpoints across page boundaries", async () => {
+  const allRows = Array.from({ length: 45 }, (_, i) => row(1000 - i));
+  allRows[22].verdict = "TESTING";
+  const offsets = [];
+  global.fetch = async address => {
+    const params = new URL(address).searchParams;
+    assert.equal(params.get("includeSources"), "true");
+    assert.equal(params.get("count"), "20");
+    const offset = Number(params.get("from"));
+    offsets.push(offset);
+    return new Response(JSON.stringify({ status: "OK", result: allRows.slice(offset - 1, offset + 19) }));
+  };
+  const provider = providerFixture();
+  let current = account();
+  const imported = [];
+  let page;
+  for (let i = 0; i < 3; i++) {
+    page = await provider.getPage(current);
+    imported.push(...page.submissions);
+    current = { ...current, cursor: page.cursor, scan: page.scan };
+    assert.equal(page.more, i < 2);
+  }
+  assert.deepEqual(offsets, [1, 21, 41]);
+  assert.deepEqual(
+    imported.map(item => Number(item.id)),
+    allRows.map(item => item.id)
+  );
+  assert.ok(imported.every(item => item.sourceCode === "int main() {}\n"));
+  assert.equal(page.pending, true);
+  assert.equal(page.cursor, "977");
+  assert.equal(page.scan, null);
+});
+
+test("transient source failures retry once through the shared limiter and recover without a cooldown", async () => {
+  for (const failure of ["timeout", "reset", "body timeout", "HTTP 502", "HTTP 503"]) {
+    diagnostics.length = 0;
+    const provider = providerFixture();
+    let limiterEntries = 0;
+    let rateWrites = 0;
+    provider.lockService.lock = async (_, fn) => {
+      limiterEntries++;
+      return fn();
+    };
+    provider.redisService.getSharedClient = () => ({
+      pttl: async () => 0,
+      set: async () => {
+        rateWrites++;
+        return "OK";
+      }
+    });
+    const requests = [];
+    global.fetch = async (address, options) => {
+      const params = new URL(address).searchParams;
+      assert.equal(params.get("includeSources"), "true", "a recovered source request needs no public fallback");
+      requests.push({ params, signal: options.signal });
+      if (requests.length === 1) {
+        if (failure === "timeout") throw new DOMException("private timeout text", "TimeoutError");
+        if (failure === "reset")
+          throw Object.assign(new TypeError("private fetch text"), { cause: { code: "ECONNRESET" } });
+        if (failure === "body timeout")
+          return {
+            ok: true,
+            status: 200,
+            text: async () => {
+              throw new DOMException("private body text", "TimeoutError");
+            }
+          };
+        return new Response("private error page", { status: Number(failure.slice(-3)) });
+      }
+      return new Response(JSON.stringify({ status: "OK", result: [row()] }));
+    };
+    const page = await provider.getPage(account());
+    assert.equal(requests.length, 2, failure);
+    assert.equal(limiterEntries, 2);
+    assert.equal(rateWrites, 2);
+    assert.notEqual(requests[0].params.get("apiSig"), requests[1].params.get("apiSig"));
+    assert.notEqual(requests[0].signal, requests[1].signal);
+    assert.equal(page.sourceError, undefined);
+    assert.equal(page.sourceRetryAt, undefined);
+    assert.equal(page.submissions[0].sourceCode, row().source);
+    const diagnostic = JSON.parse(diagnostics[0].split("Remote request failed: ")[1]);
+    assert.equal(diagnostic.sourceRequest, true);
+    assert.equal(diagnostic.accountId, 3);
+    assert.equal(
+      diagnostic.reason,
+      failure.includes("timeout") ? "TIMEOUT" : failure === "reset" ? "NETWORK_ERROR" : "HTTP_ERROR"
+    );
+    assert.equal(diagnostic.stage, failure === "body timeout" ? "body" : "request");
+    assert.equal(typeof diagnostic.lockWaitMs, "number");
+    assert.equal(typeof diagnostic.durationMs, "number");
+    assert.match(diagnostics.join(" "), /transient request recovered/);
+    assert.doesNotMatch(diagnostics.join(" "), /private|testKey123|testSecret456|apiSig/);
+  }
+});
+
+test("persistent network failures fall back to full public pages and retain the five-minute cooldown", async () => {
+  const requests = [];
+  const provider = providerFixture();
+  global.fetch = async address => {
+    const params = new URL(address).searchParams;
+    requests.push(params);
+    if (params.has("apiKey"))
+      throw Object.assign(new TypeError(`fetch ${address} ${credentials.apiSecret} private-source`), {
+        cause: { code: "ECONNRESET", message: "private-cookie" }
+      });
+    assert.equal(params.get("count"), "100");
+    return new Response(JSON.stringify({ status: "OK", result: Array.from({ length: 100 }, (_, i) => row(1000 - i)) }));
+  };
+  const before = Date.now();
+  const page = await provider.getPage(account());
+  assert.equal(requests.length, 3);
+  assert.equal(page.sourceError, "REMOTE_UNAVAILABLE");
+  assert.ok(+page.sourceRetryAt >= before + 300000);
+  assert.ok(+page.sourceRetryAt <= Date.now() + 300000);
+  assert.equal(page.more, true);
+  assert.equal(page.scan.offset, 101, "public fallback must use its own page size");
+  assert.equal(page.submissions.length, 100);
+  assert.ok(page.submissions.every(item => item.sourceCode === undefined));
+  await provider.getPage({
+    ...account(),
+    codeforcesSourceError: page.sourceError,
+    codeforcesSourceRetryAt: page.sourceRetryAt
+  });
+  assert.equal(requests.length, 4);
+  assert.equal(requests[3].has("apiKey"), false);
+  const logs = diagnostics.join(" ");
+  assert.match(logs, /ECONNRESET/);
+  assert.doesNotMatch(logs, /testKey123|testSecret456|apiSig|https:|private-/);
+});
+
+test("access denial, rate limits, redirects and non-transient HTTP errors are not immediately retried", async () => {
+  for (const [status, code, reason] of [
+    [403, "REMOTE_ACCESS_DENIED", "REMOTE_ACCESS_DENIED"],
+    [429, "REMOTE_RATE_LIMITED", "REMOTE_RATE_LIMITED"],
+    [302, "REMOTE_UNAVAILABLE", "REDIRECT"],
+    [401, "REMOTE_UNAVAILABLE", "HTTP_ERROR"],
+    [404, "REMOTE_UNAVAILABLE", "HTTP_ERROR"]
+  ]) {
+    diagnostics.length = 0;
+    let calls = 0;
+    global.fetch = async address => {
+      calls++;
+      return new URL(address).searchParams.has("apiKey")
+        ? new Response("private response", { status })
+        : new Response(JSON.stringify({ status: "OK", result: [row()] }));
+    };
+    const page = await providerFixture().getPage(account());
+    assert.equal(calls, 2, `HTTP ${status} should fall back directly`);
+    assert.equal(page.sourceError, code);
+    const diagnostic = JSON.parse(diagnostics[0].split("Remote request failed: ")[1]);
+    assert.equal(diagnostic.httpStatus, status);
+    assert.equal(diagnostic.reason, reason);
+  }
+});
+
+test("lock, Redis and TLS failures have safe diagnostics and do not add source retries", async () => {
+  for (const failure of ["lock", "redis", "tls"]) {
+    diagnostics.length = 0;
+    const provider = providerFixture();
+    let lockEntries = 0;
+    provider.lockService.lock = async (_, fn) => {
+      lockEntries++;
+      if (failure === "lock" && lockEntries === 1) throw new Error("private lock text");
+      return fn();
+    };
+    let redisCalls = 0;
+    provider.redisService.getSharedClient = () => ({
+      pttl: async () => {
+        redisCalls++;
+        if (failure === "redis" && redisCalls === 1) throw new Error("private redis text");
+        return 0;
+      },
+      set: async () => "OK"
+    });
+    global.fetch = async address => {
+      if (new URL(address).searchParams.has("apiKey"))
+        throw Object.assign(new TypeError("private certificate text"), { cause: { code: "CERT_HAS_EXPIRED" } });
+      return new Response(JSON.stringify({ status: "OK", result: [row()] }));
+    };
+    const page = await provider.getPage(account());
+    assert.equal(page.sourceError, "REMOTE_UNAVAILABLE");
+    assert.equal(lockEntries, 2, failure);
+    const diagnostic = JSON.parse(diagnostics[0].split("Remote request failed: ")[1]);
+    assert.equal(
+      diagnostic.reason,
+      failure === "lock" ? "LOCK_FAILED" : failure === "redis" ? "RATE_LIMIT_STORE_FAILED" : "NETWORK_ERROR"
+    );
+    if (failure === "tls") assert.equal(diagnostic.networkCode, "CERT_HAS_EXPIRED");
+    assert.doesNotMatch(diagnostics.join(" "), /private|testKey123|testSecret456|apiSig/);
+  }
 });
 
 test("credentials are encrypted, bound to their owner, excluded from normal selection and removable", async () => {

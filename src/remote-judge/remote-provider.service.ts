@@ -17,6 +17,46 @@ import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judg
 import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 
+const CODEFORCES_RESULT_PAGE_SIZE = 100;
+const CODEFORCES_SOURCE_PAGE_SIZE = 20;
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID"
+]);
+const RETRYABLE_NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+
+class RemoteRequestError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+  }
+}
+
 export interface AtcoderLiveTarget {
   contestId: string;
   since: number;
@@ -98,7 +138,8 @@ export class RemoteProviderService {
     platform: SubmissionMethod,
     url: string,
     authenticated?: boolean,
-    credentials?: CodeforcesCredentials
+    credentials?: CodeforcesCredentials,
+    accountId?: number
   ): Promise<string> {
     const headers: Record<string, string> = {
       "User-Agent": "NSOJ-Result-Sync/1.0",
@@ -113,12 +154,22 @@ export class RemoteProviderService {
     }
     if (platform === SubmissionMethod.AtCoder && new URL(url).origin !== "https://atcoder.jp")
       throw new Error("REMOTE_UNAVAILABLE");
+    const startedAt = Date.now();
+    let stage: "lock" | "rate_limit" | "request" | "body" | "unlock" = "lock";
+    let lockWaitMs: number;
+    let rateWaitMs = 0;
+    let httpStatus: number;
     return await this.lockService
       .lock(`RemoteProvider_${platform}`, async () => {
+        lockWaitMs = Date.now() - startedAt;
+        stage = "rate_limit";
         const redis = this.redisService.getSharedClient();
         const key = `remote-provider-rate:${platform}`;
         const wait = await redis.pttl(key);
-        if (wait > 0) await delay(wait);
+        if (wait > 0) {
+          rateWaitMs = wait;
+          await delay(wait);
+        }
         await redis.set(key, "1", "PX", platform === SubmissionMethod.Codeforces ? 2200 : 1500);
         let address = url;
         if (credentials) {
@@ -139,11 +190,13 @@ export class RemoteProviderService {
           target.searchParams.set("apiSig", prefix + signature);
           address = target.toString();
         }
+        stage = "request";
         const response = await fetch(address, {
           redirect: "manual",
           signal: AbortSignal.timeout(20000),
           headers
         });
+        httpStatus = response.status;
         if (authenticated && response.status >= 300 && response.status < 400) {
           const location = new URL(response.headers.get("location") || "/", url);
           if (location.origin === "https://atcoder.jp" && location.pathname === "/login")
@@ -157,19 +210,64 @@ export class RemoteProviderService {
               ? "REMOTE_ACCESS_DENIED"
               : "REMOTE_UNAVAILABLE"
           );
+        stage = "body";
         const text = await response.text();
         if (text.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
+        stage = "unlock";
         return text;
       })
       .catch(error => {
-        throw new Error(/^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_UNAVAILABLE");
+        const code = /^REMOTE_[A-Z_]+$/.test(error?.message) ? error.message : "REMOTE_UNAVAILABLE";
+        const originalCode = error?.cause?.code || error?.code;
+        const networkCode = NETWORK_ERROR_CODES.has(originalCode) ? originalCode : undefined;
+        const timedOut =
+          error?.name === "TimeoutError" || networkCode === "ETIMEDOUT" || networkCode?.endsWith("_TIMEOUT");
+        const reason =
+          code !== "REMOTE_UNAVAILABLE"
+            ? code
+            : stage === "lock" || stage === "unlock"
+            ? "LOCK_FAILED"
+            : stage === "rate_limit"
+            ? "RATE_LIMIT_STORE_FAILED"
+            : timedOut
+            ? "TIMEOUT"
+            : httpStatus >= 300 && httpStatus < 400
+            ? "REDIRECT"
+            : httpStatus >= 400
+            ? "HTTP_ERROR"
+            : "NETWORK_ERROR";
+        // Only fixed fields and allowlisted codes: never log signed URLs, headers, bodies or raw errors.
+        logger.warn(
+          `Remote request failed: ${JSON.stringify({
+            platform,
+            accountId: Number.isSafeInteger(accountId) ? accountId : undefined,
+            sourceRequest: !!credentials,
+            code,
+            reason,
+            stage,
+            httpStatus,
+            networkCode,
+            lockWaitMs: lockWaitMs ?? Date.now() - startedAt,
+            rateWaitMs,
+            durationMs: Date.now() - startedAt
+          })}`
+        );
+        const retryable =
+          code === "REMOTE_UNAVAILABLE" &&
+          (stage === "request" || stage === "body") &&
+          (timedOut ||
+            RETRYABLE_NETWORK_ERROR_CODES.has(networkCode) ||
+            (!httpStatus && !originalCode && error?.name === "TypeError") ||
+            [408, 500, 502, 503, 504].includes(httpStatus));
+        throw new RemoteRequestError(code, retryable);
       });
   }
 
   private async codeforces<T>(
     method: string,
     params: Record<string, string>,
-    credentials?: CodeforcesCredentials
+    credentials?: CodeforcesCredentials,
+    accountId?: number
   ): Promise<T[]> {
     let response;
     try {
@@ -178,10 +276,12 @@ export class RemoteProviderService {
           SubmissionMethod.Codeforces,
           `https://codeforces.com/api/${method}?${new URLSearchParams(params)}`,
           false,
-          credentials
+          credentials,
+          accountId
         )
       );
     } catch (error) {
+      if (error instanceof RemoteRequestError) throw error;
       throw new Error(/^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_API_FAILED");
     }
     if (response?.status !== "OK" || !Array.isArray(response.result))
@@ -328,8 +428,9 @@ export class RemoteProviderService {
     const params = {
       handle: account.handle,
       from: String(scan.offset),
-      count: "100"
+      count: String(CODEFORCES_RESULT_PAGE_SIZE)
     };
+    let pageSize = CODEFORCES_RESULT_PAGE_SIZE;
     let rows: CodeforcesSubmissionRow[];
     let sourceError: string;
     let sourceRetryAt: Date;
@@ -342,17 +443,34 @@ export class RemoteProviderService {
       try {
         const credentials = await this.codeforcesCredentials.get(account.id);
         if (!credentials) throw new Error("REMOTE_CF_CREDENTIALS_UNREADABLE");
-        rows = await this.codeforces<CodeforcesSubmissionRow>(
-          "user.status",
-          { ...params, from: account.codeforcesSourceError ? "1" : params.from, includeSources: "true" },
-          credentials
-        );
+        const readSources = () =>
+          this.codeforces<CodeforcesSubmissionRow>(
+            "user.status",
+            {
+              ...params,
+              from: account.codeforcesSourceError ? "1" : params.from,
+              count: String(CODEFORCES_SOURCE_PAGE_SIZE),
+              includeSources: "true"
+            },
+            credentials,
+            account.id
+          );
+        try {
+          rows = await readSources();
+        } catch (error) {
+          if (!(error instanceof RemoteRequestError) || !error.retryable) throw error;
+          // Re-enter the shared limiter and generate a fresh signature for the single retry.
+          logger.warn(`Codeforces source account ${account.id}: retrying transient request failure once`);
+          rows = await readSources();
+          logger.log(`Codeforces source account ${account.id}: transient request recovered`);
+        }
         for (const row of rows) {
           const source = decodeCodeforcesSource(row);
           if (source !== undefined) sources.set(row, source);
         }
         if (rows.length && sources.size === 0) throw new Error("REMOTE_CF_SOURCE_MISSING");
         sourceAuthorized = true;
+        pageSize = CODEFORCES_SOURCE_PAGE_SIZE;
         if (account.codeforcesSourceError) {
           // Recovering credentials must revisit pages skipped during public-only result sync.
           scan = { offset: 1, head: 0 };
@@ -368,7 +486,7 @@ export class RemoteProviderService {
       sourceRetryAt = account.codeforcesSourceRetryAt;
     }
     // Public result sync remains available when source authorization fails.
-    rows ??= await this.codeforces<CodeforcesSubmissionRow>("user.status", params);
+    rows ??= await this.codeforces<CodeforcesSubmissionRow>("user.status", params, undefined, account.id);
     const submissions: RemoteSubmission[] = rows
       .filter(
         row =>
@@ -413,7 +531,7 @@ export class RemoteProviderService {
     const head = Math.max(scan.head, ...rows.map(row => Number(row.id)), 0);
     const pendingIds = submissions.filter(row => row.status === SubmissionStatus.Pending).map(row => Number(row.id));
     const pendingMin = Math.min(scan.pendingMin || Infinity, ...pendingIds);
-    const more = rows.length === 100 && Number(rows[rows.length - 1].id) > Number(cursor);
+    const more = rows.length === pageSize && Number(rows[rows.length - 1].id) > Number(cursor);
     return {
       submissions,
       sourceError,
