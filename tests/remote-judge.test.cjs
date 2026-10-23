@@ -259,7 +259,7 @@ test("concurrent and repeated sync creates one real submission, with original ti
   assert.equal(stored.size, 1);
 });
 
-test("AtCoder JSON grades update immediately and start a persistent one-minute source delay only at the final grade", async t => {
+test("AtCoder JSON grades update immediately and make source eligible as soon as a final grade is received", async t => {
   const { parseAtcoderStatuses } = require("../dist/remote-judge/atcoder-status.parser");
   const { service, stored, details } = submissionFixture();
   let now = Date.now();
@@ -280,7 +280,7 @@ test("AtCoder JSON grades update immediately and start a persistent one-minute s
   now += 30000;
   await service.importRemoteSubmission({ id: 1 }, target, updated);
   const deadline = stored.get(1).remote.sourceSync.nextAttemptAt;
-  assert.equal(Date.parse(deadline), now + 60000);
+  assert.equal(Date.parse(deadline), now);
   assert.equal(stored.get(1).remote.sourceSync.readyAt, deadline);
   now += 20000;
   await service.importRemoteSubmission({ id: 1 }, target, updated);

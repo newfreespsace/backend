@@ -17,7 +17,7 @@ import { AtcoderStatusUpdate, parseAtcoderStatusResponse } from "./atcoder-statu
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
-import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
+import { parseAtcoderSubmissionDetail } from "./atcoder-detail.parser";
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
 import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
 import { safeAtcoderRequest } from "./atcoder-request-profile";
@@ -70,6 +70,8 @@ interface AtcoderLiveScan {
   nextDiscoveryAt?: number;
   metadataRetryAt?: number;
   statusRetryAt?: number;
+  discoveries?: Record<string, { update?: AtcoderStatusUpdate; failures?: number; retryAt?: number }>;
+  detailsFetched?: string[];
 }
 
 interface CodeforcesSubmissionRow {
@@ -479,75 +481,72 @@ export class RemoteProviderService {
     const key = `remote-atcoder-pages:${account.id}:${target.contestId}`;
     const saved = await redis.get(key);
     const scan: AtcoderLiveScan = saved ? JSON.parse(saved) : { page: 2, head: 0, boundary: 0, pendingIds: [] };
-    const readPage = async (page: number) => {
-      const url = `https://atcoder.jp/contests/${encodeURIComponent(
-        target.contestId
-      )}/submissions?${new URLSearchParams({
-        "f.User": account.handle,
-        lang: "en",
-        page: String(page)
-      })}`;
-      try {
-        return parseAtcoderSubmissionPage(
-          await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session),
-          target.contestId,
-          account.handle,
-          page
-        );
-      } catch (error) {
-        // Keep a sanitized reproduction command without the session or upstream HTML.
-        const details = safeRemoteErrorDetails(error.details);
-        error.details = {
-          ...details,
-          ...(details.stage === "parse" ? { httpStatus: 200 } : {}),
-          contestId: target.contestId,
-          page,
-          request: safeAtcoderRequest(url)
-        };
-        throw error;
-      }
-    };
-    const rows: RemoteSubmission[] = [];
     const known = new Map([...(scan.knownRows || []), ...(scan.pendingRows || [])].map(row => [row.id, row]));
-    const pending = new Map((scan.pendingRows || []).map(row => [row.id, row]));
-    const unresolved = new Set(scan.pendingIds.filter(id => !known.has(id)));
-    const statuses = new Map<string, AtcoderStatusUpdate>();
-    let more = scan.page > 2;
-    const updateRows = (items: RemoteSubmission[]) => {
-      for (const row of items) {
-        known.set(row.id, row);
-        unresolved.delete(row.id);
-        if (row.status === SubmissionStatus.Pending) pending.set(row.id, row);
-        else pending.delete(row.id);
+    const fetched = new Set(scan.detailsFetched || []);
+    const discoveries = new Map(Object.entries(scan.discoveries || {}));
+    for (const id of scan.pendingIds) if (!discoveries.has(id)) discoveries.set(id, {});
+    const rows = new Map<string, RemoteSubmission>();
+    const statusUrl = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`;
+    let updates: AtcoderStatusUpdate[];
+    try {
+      updates = parseAtcoderStatusResponse(
+        await this.request(SubmissionMethod.AtCoder, statusUrl, true, undefined, account.id, session)
+      );
+    } catch (error) {
+      const details = safeRemoteErrorDetails(error.details);
+      error.details = {
+        ...details,
+        ...(details.stage === "parse" ? { httpStatus: 200 } : {}),
+        contestId: target.contestId,
+        request: safeAtcoderRequest(statusUrl)
+      };
+      // Never fall back to a list. Authentication and network errors retain worker backoff.
+      throw error;
+    }
+    for (const update of updates) {
+      const previous = known.get(update.id);
+      if (previous) {
+        const row = { ...previous, ...update };
+        known.set(update.id, row);
+        rows.set(update.id, row);
       }
-    };
+      if (
+        discoveries.has(update.id) ||
+        (previous && !fetched.has(update.id) && !previous.sourceAvailable) ||
+        (!previous && (Number(update.id) > scan.boundary || update.status === SubmissionStatus.Pending))
+      )
+        discoveries.set(update.id, { ...discoveries.get(update.id), update });
+    }
     let warning: RemotePage["warning"];
-    if (!(scan.statusRetryAt > Date.now())) {
-      const url = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`;
+    // Bound upstream work per turn. Every pending ID is still polled through JSON together.
+    const due = [...discoveries.entries()]
+      .filter(
+        ([, item]) => item.update && item.update.status !== SubmissionStatus.Pending && !(item.retryAt > Date.now())
+      )
+      .sort((a, b) => (a[1].failures || 0) - (b[1].failures || 0) || Number(a[0]) - Number(b[0]))
+      .slice(0, 5);
+    for (const [id, item] of due) {
+      const url = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/${id}`;
       try {
-        const body = await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session);
-        for (const update of parseAtcoderStatusResponse(body)) {
-          statuses.set(update.id, update);
-          // Older IDs outside the bounded cache have already been scanned. The periodic list
-          // reconciliation covers them without repeatedly fetching HTML for the same history.
-          if (!known.has(update.id) && Number(update.id) > scan.boundary) unresolved.add(update.id);
-        }
-        const updates = [...known.values()]
-          .filter(row => statuses.has(row.id))
-          .map(row => ({ ...row, ...statuses.get(row.id) }));
-        rows.push(...updates);
-        updateRows(updates);
-        // Omitted pending IDs must remain pending and be reconciled through the list.
-        if ([...pending.keys()].some(id => !statuses.has(id)))
-          scan.nextDiscoveryAt = Math.min(scan.nextDiscoveryAt ?? Infinity, Date.now() + 15000);
-        scan.statusRetryAt = 0;
+        const detail = parseAtcoderSubmissionDetail(
+          // eslint-disable-next-line no-await-in-loop -- Keep this bounded batch under the shared limiter.
+          await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session),
+          { id, contestId: target.contestId, handle: account.handle }
+        );
+        const row: RemoteSubmission = { ...detail, ...item.update, resultSource: "OriginalSite" };
+        rows.set(id, row);
+        const { sourceCode, ...cached } = row;
+        known.set(id, { ...cached, ...(sourceCode !== undefined ? { sourceAvailable: true } : {}) });
+        fetched.add(id);
+        discoveries.delete(id);
+        scan.boundary = Math.max(scan.boundary, Number(id));
       } catch (error) {
-        const code = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_ATCODER_STATUS_FAILED";
         const safe = safeRemoteErrorDetails(error.details);
         const details = {
           ...safe,
           ...(safe.stage === "parse" ? { httpStatus: 200 } : {}),
           contestId: target.contestId,
+          submissionId: id,
           request: safeAtcoderRequest(url)
         };
         error.details = details;
@@ -557,80 +556,42 @@ export class RemoteProviderService {
             "REMOTE_SESSION_UNREADABLE",
             "REMOTE_COOLDOWN",
             "REMOTE_RATE_LIMITED",
-            "REMOTE_ACCESS_DENIED",
             "REMOTE_VERIFICATION_REQUIRED"
-          ].includes(code)
+          ].includes(error.message)
         )
           throw error;
-        // Preserve a list fallback for unavailable/changed JSON APIs, with a bounded cooldown.
-        warning = { error: code, details };
-        scan.statusRetryAt = Date.now() + 60000;
-        scan.nextDiscoveryAt = 0;
+        const failures = Math.min((item.failures || 0) + 1, 30);
+        discoveries.set(id, {
+          ...item,
+          failures,
+          retryAt: Date.now() + Math.min(3600000, 60000 * 2 ** Math.min(failures - 1, 6))
+        });
+        warning = { error: /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_PARSE_FAILED", details };
       }
     }
-    // JSON is the normal discovery/polling path. Fetch HTML only for missing metadata,
-    // initial/migrated state, a slow reconciliation, or a JSON API failure.
-    if (
-      !scan.knownRows ||
-      !scan.nextDiscoveryAt ||
-      scan.nextDiscoveryAt <= Date.now() ||
-      more ||
-      (unresolved.size > 0 && !(scan.metadataRetryAt > Date.now()))
-    ) {
-      const mergeStatus = (row: RemoteSubmission): RemoteSubmission => {
-        const update = statuses.get(row.id);
-        // A list read after the JSON snapshot may already have reached a final verdict.
-        return update && !(update.status === SubmissionStatus.Pending && row.status !== SubmissionStatus.Pending)
-          ? { ...row, ...update }
-          : row;
-      };
-      const first = await readPage(1);
-      first.submissions = first.submissions.map(mergeStatus);
-      const discovered = [...first.submissions];
-      updateRows(first.submissions);
-      scan.head = Math.max(scan.head, ...first.submissions.map(row => Number(row.id)));
-      const needsOlder = (result: typeof first) =>
-        result.more &&
-        result.submissions.length > 0 &&
-        (scan.boundary || pending.size || unresolved.size
-          ? Math.min(...result.submissions.map(row => Number(row.id))) >
-            Math.min(scan.boundary || Infinity, ...[...pending.keys(), ...unresolved].map(Number))
-          : Math.min(...result.submissions.map(row => row.submittedAt)) >= target.since);
-      more = needsOlder(first);
-      if (more) {
-        const older = await readPage(scan.page);
-        older.submissions = older.submissions.map(mergeStatus);
-        discovered.push(...older.submissions);
-        updateRows(older.submissions);
-        scan.head = Math.max(scan.head, ...older.submissions.map(row => Number(row.id)));
-        more = needsOlder(older);
-        scan.page++;
-      }
-      if (!more) {
-        scan.boundary = Math.max(scan.boundary, scan.head);
-        scan.head = 0;
-        scan.page = 2;
-      }
-      rows.push(...discovered);
-      scan.metadataRetryAt = unresolved.size ? Date.now() + 30000 : 0;
-      scan.nextDiscoveryAt = Date.now() + (scan.statusRetryAt > Date.now() ? 15000 : 300000);
-    }
-    scan.pendingRows = [...pending.values()];
-    scan.pendingIds = [...pending.keys(), ...unresolved];
-    // Keep recent identities for JSON updates, and retain every unfinished submission.
+    scan.discoveries = Object.fromEntries(discoveries);
+    scan.pendingRows = [...known.values()].filter(row => row.status === SubmissionStatus.Pending);
+    scan.pendingIds = [...new Set([...scan.pendingRows.map(row => row.id), ...discoveries.keys()])];
     scan.knownRows = [...known.values()].sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 200);
+    scan.detailsFetched = scan.knownRows.filter(row => fetched.has(row.id)).map(row => row.id);
+    // Discard the obsolete list pagination and retry state on migration.
+    scan.page = 2;
+    scan.head = 0;
+    delete scan.nextDiscoveryAt;
+    delete scan.metadataRetryAt;
+    delete scan.statusRetryAt;
     const pendingKey = `remote-atcoder-pending:${account.id}`;
     const pendingContests = new Set<string>(JSON.parse((await redis.get(pendingKey)) || "[]"));
     for (const contestId of pendingContests)
       if (!ordered.some(item => item.contestId === contestId)) pendingContests.delete(contestId);
-    if (more || pending.size > 0 || unresolved.size > 0) pendingContests.add(target.contestId);
+    if (scan.pendingIds.length) pendingContests.add(target.contestId);
     else pendingContests.delete(target.contestId);
     return {
-      submissions: rows,
+      submissions: [...rows.values()],
       pending: pendingContests.size > 0,
-      pollAfterMs: scan.statusRetryAt > Date.now() ? 15000 : pendingContests.size > 0 ? 5000 : undefined,
+      pollAfterMs: pendingContests.size > 0 ? 5000 : undefined,
       warning,
-      // Advance only after every imported result has been saved successfully.
+      // Persist only after imports succeed; never cache source code in Redis.
       acknowledge: async () => {
         await redis.set(key, JSON.stringify(scan), "EX", 86400);
         await redis.set(pendingKey, JSON.stringify([...pendingContests]), "EX", 86400);

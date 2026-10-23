@@ -63,7 +63,8 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
       .createQueryBuilder("submission")
       .where("submission.remoteKey LIKE :prefix", { prefix: "AtCoder:%" })
       .andWhere(
-        "(JSON_EXTRACT(submission.remote, '$.sourceSync.status') IS NULL OR (JSON_EXTRACT(submission.remote, '$.sourceSync.readyAt') IS NULL AND JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.status')) != 'Available'))"
+        "(JSON_EXTRACT(submission.remote, '$.sourceSync.status') IS NULL OR (JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.status')) != 'Available' AND (JSON_EXTRACT(submission.remote, '$.sourceSync.readyAt') IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.readyAt')) > :now)))",
+        { now: new Date().toISOString() }
       )
       .andWhere("submission.status != :pending", { pending: SubmissionStatus.Pending })
       .orderBy("submission.id", "ASC")
@@ -74,8 +75,8 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
         if (current.status === SubmissionStatus.Pending || current.remote.sourceSync?.status === "Available")
           return undefined;
         if (current.remote.sourceAvailable) return { status: "Available", failures: 0 };
-        if (current.remote.sourceSync?.readyAt) return undefined;
-        return scheduleAtcoderSource(current.remote.sourceSync, true);
+        const next = scheduleAtcoderSource(current.remote.sourceSync, true);
+        return next === current.remote.sourceSync ? undefined : next;
       });
     }
   }
@@ -177,9 +178,12 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
         const bound = await this.connection.getRepository(RemoteAccountEntity).findOneBy({ id: account.id });
         const submission = await repository.findOneBy({ id: candidate.id });
         if (!submission || submission.status === SubmissionStatus.Pending) return;
-        if (!submission.remote?.sourceAvailable && !submission.remote?.sourceSync?.readyAt) {
-          await this.updateSourceSync(submission, current => scheduleAtcoderSource(current.remote.sourceSync, true));
-          return;
+        if (!submission.remote?.sourceAvailable) {
+          const next = scheduleAtcoderSource(submission.remote?.sourceSync, true);
+          if (next !== submission.remote?.sourceSync) {
+            await this.updateSourceSync(submission, current => scheduleAtcoderSource(current.remote.sourceSync, true));
+            submission.remote.sourceSync = next;
+          }
         }
         if (
           submission.remote?.sourceSync?.nextAttemptAt &&

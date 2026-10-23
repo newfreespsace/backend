@@ -92,8 +92,8 @@ test("repeated provider requests, binding operations and worker turns do not all
     await judge.tick(Method.Codeforces);
     await judge.tick(Method.AtCoder);
   }
-  assert.equal(fetches, 301);
-  assert.equal(listFetches, 1, "cached empty searches use JSON rather than repeatedly fetching the full list");
+  assert.equal(fetches, 300);
+  assert.equal(listFetches, 0, "empty JSON discovery skips the list even on the first scan");
   assert.equal(redis.duplicateCount(), 0, "ordinary remote operations must reuse the shared command connection");
 });
 

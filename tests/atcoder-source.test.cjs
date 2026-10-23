@@ -102,7 +102,12 @@ function fixture() {
       platform: "AtCoder",
       language: "C++23",
       historical: true,
-      sourceSync: { status: "Pending", readyAt: new Date(0).toISOString(), nextAttemptAt: new Date(0).toISOString(), failures: 0 }
+      sourceSync: {
+        status: "Pending",
+        readyAt: new Date(0).toISOString(),
+        nextAttemptAt: new Date(0).toISOString(),
+        failures: 0
+      }
     }
   };
   const state = {
@@ -215,49 +220,57 @@ function fixture() {
   return { service, state };
 }
 
-test("source requests wait until exactly one minute after the final grade, regardless of submission age", async t => {
-  const received = Date.parse("2026-10-23T04:00:00Z");
-  let now = received + 60000 - 1;
+test("final submissions are immediately eligible and old one-minute source delays are removed", async t => {
+  const now = Date.parse("2026-10-23T04:00:00Z");
   t.mock.method(Date, "now", () => now);
-  for (const status of ["Pending", "Failed"]) {
-    now = received + 60000 - 1;
+  for (const age of [10000, 3600000]) {
     const { service, state } = fixture();
-    const submitted = received - (status === "Pending" ? 10000 : 3600000);
-    state.row.submitTime = new Date(submitted);
-    state.row.remote.submittedAt = submitted / 1000;
+    state.row.submitTime = new Date(now - age);
+    state.row.remote.submittedAt = (now - age) / 1000;
     state.row.remote.sourceSync = {
-      status,
-      readyAt: new Date(received + 60000).toISOString(),
-      failures: status === "Failed" ? 2 : 0,
-      nextAttemptAt: new Date(0).toISOString()
+      status: "Pending",
+      failures: 0,
+      readyAt: new Date(now + 60000).toISOString(),
+      nextAttemptAt: new Date(now + 60000).toISOString()
     };
-    await service.tick();
-    assert.equal(state.fetches, 0, "queue selection waits one minute after receiving the grade");
-    await service.process(state.row);
-    assert.equal(state.fetches, 0, "the locked request path also rejects an early candidate");
-    assert.equal(Date.parse(state.row.remote.sourceSync.nextAttemptAt), received + 60000);
-    assert.equal(state.row.remote.sourceSync.status, status);
-    assert.equal(state.row.remote.sourceSync.failures, status === "Failed" ? 2 : 0);
-    now++;
+    state.discover = [structuredClone(state.row)];
     await service.tick();
     assert.equal(state.fetches, 1);
     assert.equal(state.saves, 1);
   }
 });
 
-test("legacy source discovery starts the one-minute delay and replaces the old ten-minute schedule", async t => {
+test("legacy source discovery makes final submissions eligible immediately", async t => {
   const now = Date.parse("2026-10-23T04:00:00Z");
   t.mock.method(Date, "now", () => now);
   const { service, state } = fixture();
-  state.row.submitTime = new Date();
-  state.row.remote.submittedAt = +state.row.submitTime / 1000;
-  state.row.remote.sourceSync = { status: "Pending", nextAttemptAt: new Date(now + 600000).toISOString(), failures: 0 };
+  delete state.row.remote.sourceSync;
+  state.discover = [structuredClone(state.row)];
+  await service.discover();
+  assert.equal(Date.parse(state.row.remote.sourceSync.nextAttemptAt), now);
+  await service.process(state.row);
+  assert.equal(state.fetches, 1);
+});
+
+test("upgrading a failed source job removes the artificial delay while preserving its longer failure backoff", async t => {
+  const now = Date.parse("2026-10-23T04:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const { service, state } = fixture();
+  state.row.remote.sourceSync = {
+    status: "Failed",
+    failures: 3,
+    error: "REMOTE_RATE_LIMITED",
+    nextAttemptAt: new Date(now + 120000).toISOString()
+  };
   state.discover = [structuredClone(state.row)];
   await service.tick();
+  assert.equal(state.row.remote.sourceSync.readyAt, new Date(now).toISOString());
+  assert.equal(state.row.remote.sourceSync.nextAttemptAt, new Date(now + 120000).toISOString());
+  assert.equal(state.row.remote.sourceSync.failures, 3);
+  const saved = structuredClone(state.row.remote.sourceSync);
+  await service.tick();
+  assert.deepEqual(state.row.remote.sourceSync, saved);
   assert.equal(state.fetches, 0);
-  assert.equal(Date.parse(state.row.remote.sourceSync.nextAttemptAt), now + 60000);
-  assert.equal(state.row.remote.sourceSync.readyAt, state.row.remote.sourceSync.nextAttemptAt);
-  assert.equal(state.row.remote.sourceSync.status, "Pending");
 });
 
 test("source jobs resume from persisted rows, yield to grades, pause without a session and skip already saved code", async () => {

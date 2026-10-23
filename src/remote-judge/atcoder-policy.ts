@@ -1,11 +1,10 @@
 import { RemoteSourceSync } from "./remote-judge.types";
 
-// Wait one minute after the first final grade, independently of the original submission time.
-export const ATCODER_SOURCE_DELAY_MS = 60 * 1000;
-
 export function scheduleAtcoderSource(previous: RemoteSourceSync | undefined, final: boolean): RemoteSourceSync {
-  if (!final || previous?.readyAt) return previous || { status: "Pending", failures: 0 };
-  const readyAt = new Date(Date.now() + ATCODER_SOURCE_DELAY_MS).toISOString();
+  if (!final || (previous?.readyAt && Date.parse(previous.readyAt) <= Date.now()))
+    return previous || { status: "Pending", failures: 0 };
+  // Final grades are immediately eligible; upgrade the previous delayed queues as well.
+  const readyAt = new Date(Date.now()).toISOString();
   return {
     ...previous,
     status: previous?.status || "Pending",

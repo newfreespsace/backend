@@ -72,7 +72,7 @@ export function parseAtcoderStatusResponse(body: string): AtcoderStatusUpdate[] 
   return rows;
 }
 
-/** Only import statuses after their identity and metadata have been verified in the list. */
+/** Only import statuses after their identity and metadata have been verified. */
 export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): RemoteSubmission[] {
   const updates = new Map(parseAtcoderStatusResponse(body).map(row => [row.id, row]));
   return known.filter(row => updates.has(row.id)).map(row => ({ ...row, ...updates.get(row.id) }));

@@ -9,9 +9,10 @@ export function safeAtcoderRequest(value: unknown): { url: string; command: stri
     if (url.origin !== "https://atcoder.jp" || url.username || url.password || url.hash) return undefined;
     const list = /^\/contests\/[\w-]{1,100}\/submissions$/.test(url.pathname);
     const status = /^\/contests\/[\w-]{1,100}\/submissions\/me\/status\/json$/.test(url.pathname);
-    if (!list && !status) return undefined;
+    const detail = /^\/contests\/[\w-]{1,100}\/submissions\/[1-9]\d{0,19}$/.test(url.pathname);
+    if (!list && !status && !detail) return undefined;
     const params = url.searchParams;
-    if (status && url.search) return undefined;
+    if ((status || detail) && url.search) return undefined;
     if (
       list &&
       ([...params.keys()].length !== 3 ||
