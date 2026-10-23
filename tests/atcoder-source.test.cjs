@@ -95,12 +95,14 @@ function fixture() {
     submitterId: 1,
     problemId: 7,
     status: Status.Accepted,
+    submitTime: new Date(Date.now() - 3600000),
     remote: {
       ...identity,
+      submittedAt: Math.floor((Date.now() - 3600000) / 1000),
       platform: "AtCoder",
       language: "C++23",
       historical: true,
-      sourceSync: { status: "Pending", nextAttemptAt: new Date(0).toISOString(), failures: 0 }
+      sourceSync: { status: "Pending", readyAt: new Date(0).toISOString(), nextAttemptAt: new Date(0).toISOString(), failures: 0 }
     }
   };
   const state = {
@@ -125,16 +127,21 @@ function fixture() {
       Object.assign(state.row, structuredClone(update));
     },
     createQueryBuilder: () => {
+      let sourceNow;
       const builder = {
         where: () => builder,
-        andWhere: () => builder,
+        andWhere: (_, params) => {
+          if (params?.sourceNow) sourceNow = params.sourceNow;
+          return builder;
+        },
         orderBy: () => builder,
         addOrderBy: () => builder,
         take: () => builder,
         getMany: async () => state.discover,
         getOne: async () =>
-          state.row.remote.sourceSync?.nextAttemptAt &&
-          Date.parse(state.row.remote.sourceSync.nextAttemptAt) > Date.now()
+          (sourceNow && (!state.row.remote.sourceSync?.readyAt || state.row.remote.sourceSync.readyAt > sourceNow)) ||
+          (state.row.remote.sourceSync?.nextAttemptAt &&
+            Date.parse(state.row.remote.sourceSync.nextAttemptAt) > Date.now())
             ? null
             : state.row
       };
@@ -208,6 +215,51 @@ function fixture() {
   return { service, state };
 }
 
+test("source requests wait until exactly one minute after the final grade, regardless of submission age", async t => {
+  const received = Date.parse("2026-10-23T04:00:00Z");
+  let now = received + 60000 - 1;
+  t.mock.method(Date, "now", () => now);
+  for (const status of ["Pending", "Failed"]) {
+    now = received + 60000 - 1;
+    const { service, state } = fixture();
+    const submitted = received - (status === "Pending" ? 10000 : 3600000);
+    state.row.submitTime = new Date(submitted);
+    state.row.remote.submittedAt = submitted / 1000;
+    state.row.remote.sourceSync = {
+      status,
+      readyAt: new Date(received + 60000).toISOString(),
+      failures: status === "Failed" ? 2 : 0,
+      nextAttemptAt: new Date(0).toISOString()
+    };
+    await service.tick();
+    assert.equal(state.fetches, 0, "queue selection waits one minute after receiving the grade");
+    await service.process(state.row);
+    assert.equal(state.fetches, 0, "the locked request path also rejects an early candidate");
+    assert.equal(Date.parse(state.row.remote.sourceSync.nextAttemptAt), received + 60000);
+    assert.equal(state.row.remote.sourceSync.status, status);
+    assert.equal(state.row.remote.sourceSync.failures, status === "Failed" ? 2 : 0);
+    now++;
+    await service.tick();
+    assert.equal(state.fetches, 1);
+    assert.equal(state.saves, 1);
+  }
+});
+
+test("legacy source discovery starts the one-minute delay and replaces the old ten-minute schedule", async t => {
+  const now = Date.parse("2026-10-23T04:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const { service, state } = fixture();
+  state.row.submitTime = new Date();
+  state.row.remote.submittedAt = +state.row.submitTime / 1000;
+  state.row.remote.sourceSync = { status: "Pending", nextAttemptAt: new Date(now + 600000).toISOString(), failures: 0 };
+  state.discover = [structuredClone(state.row)];
+  await service.tick();
+  assert.equal(state.fetches, 0);
+  assert.equal(Date.parse(state.row.remote.sourceSync.nextAttemptAt), now + 60000);
+  assert.equal(state.row.remote.sourceSync.readyAt, state.row.remote.sourceSync.nextAttemptAt);
+  assert.equal(state.row.remote.sourceSync.status, "Pending");
+});
+
 test("source jobs resume from persisted rows, yield to grades, pause without a session and skip already saved code", async () => {
   const { service, state } = fixture();
   state.session = false;
@@ -241,6 +293,7 @@ test("source failures are persisted with exponential backoff, without mutating t
     assert.equal(state.row.remote.sourceSync.failures, attempt);
     assert.equal(state.row.remote.sourceSync.status, "Failed");
     assert.equal(state.row.remote.sourceSync.error, state.error);
+    assert.equal(state.row.remote.sourceSync.readyAt, result.sourceSync.readyAt);
     const delay = Date.parse(state.row.remote.sourceSync.nextAttemptAt) - started;
     assert.ok(delay >= 60000 * 2 ** (attempt - 1) && delay < 60000 * 2 ** (attempt - 1) + 2000);
   }
@@ -330,6 +383,7 @@ test("legacy discovery merges queue state into the latest remote JSON without re
   state.row.remote.sourceSync = {
     status: "Failed",
     failures: 3,
+    readyAt: state.row.remote.sourceSync.readyAt,
     error: "REMOTE_RATE_LIMITED",
     nextAttemptAt: new Date(Date.now() + 600000).toISOString()
   };

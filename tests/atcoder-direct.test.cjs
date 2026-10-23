@@ -7,6 +7,8 @@ const { RemoteProviderService } = require("../dist/remote-judge/remote-provider.
 const { parseAtcoderSubmissionPage } = require("../dist/remote-judge/atcoder-submission.parser");
 const { SubmissionMethod: Method } = require("../dist/remote-judge/remote-judge.types");
 const { SubmissionStatus: Status } = require("../dist/submission/submission-status.enum");
+const { safeRemoteErrorDetails } = require("../dist/remote-judge/remote-error");
+const { ATCODER_USER_AGENT } = require("../dist/remote-judge/atcoder-request");
 
 let personalSession;
 const originalFetch = global.fetch;
@@ -172,11 +174,54 @@ test("AtCoder JSON access denial carries the contest into diagnostics without re
   };
   await assert.rejects(provider.getPage(account, targets), error => {
     assert.equal(error.message, "REMOTE_ACCESS_DENIED");
-    assert.deepEqual(error.details, { stage: "request", httpStatus: 403, contestId: "abc480" });
+    const { request, ...details } = error.details;
+    assert.deepEqual(details, { stage: "request", httpStatus: 403, contestId: "abc480" });
+    assert.equal(request.url, "https://atcoder.jp/contests/abc480/submissions/me/status/json");
+    assert.match(request.command, /Accept: application\/json/);
     assert.doesNotMatch(JSON.stringify(error), /private upstream|test-dedicated-session/);
     return true;
   });
   assert.equal(requests, 1);
+});
+
+test("list parse failures retain a reproducible request through diagnostic sanitization", async () => {
+  const { provider, calls } = fixture(() => "<html>private upstream body</html>");
+  await assert.rejects(provider.getPage(account, targets), error => {
+    assert.equal(error.message, "REMOTE_PARSE_FAILED");
+    const details = safeRemoteErrorDetails(error.details);
+    assert.equal(details.request.url, calls.at(-1).url.toString());
+    assert.ok(details.request.command.includes(`--user-agent '${ATCODER_USER_AGENT}'`));
+    assert.match(details.request.command, /Accept: text\/html/);
+    assert.match(details.request.command, /REVEL_SESSION=\$ATCODER_REVEL_SESSION/);
+    assert.doesNotMatch(JSON.stringify(details), /test-dedicated-session|private upstream|<html>/);
+    const { spawnSync } = require("node:child_process");
+    const replay = spawnSync("sh", ["-c", `curl() { printf '%s\\n' "$@"; }; ${details.request.command}`], {
+      encoding: "utf8",
+      env: { ...process.env, ATCODER_REVEL_SESSION: "local-replay-session" }
+    });
+    assert.equal(replay.status, 0);
+    assert.ok(replay.stdout.includes("REVEL_SESSION=local-replay-session"));
+    assert.ok(replay.stdout.includes(details.request.url));
+    return true;
+  });
+});
+
+test("request diagnostics reject credentials, arbitrary endpoints and command injection", () => {
+  const url = "https://atcoder.jp/contests/abc480/submissions?f.User=coder&lang=en&page=1";
+  for (const unsafe of [
+    url.replace("atcoder.jp", "example.com"),
+    url.replace("https://", "https://user:private@"),
+    `${url}&session=private`,
+    `${url}#private`,
+    url.replace("coder&", "coder%27%3B%20echo%20private&"),
+    "https://atcoder.jp/settings"
+  ]) {
+    assert.deepEqual(safeRemoteErrorDetails({ request: { url: unsafe, command: "private" } }), {});
+  }
+  const details = safeRemoteErrorDetails({ request: { url, command: "private raw command", cookie: "private" } });
+  assert.equal(details.request.url, url);
+  assert.doesNotMatch(JSON.stringify(details), /private/);
+  assert.deepEqual(safeRemoteErrorDetails(details), details);
 });
 
 test("results come exclusively from AtCoder, with deferred checkpoints", async () => {

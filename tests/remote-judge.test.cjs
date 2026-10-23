@@ -259,6 +259,39 @@ test("concurrent and repeated sync creates one real submission, with original ti
   assert.equal(stored.size, 1);
 });
 
+test("AtCoder JSON grades update immediately and start a persistent one-minute source delay only at the final grade", async t => {
+  const { parseAtcoderStatuses } = require("../dist/remote-judge/atcoder-status.parser");
+  const { service, stored, details } = submissionFixture();
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const submittedAt = Math.floor((now - 3600000) / 1000);
+  const incoming = remote({ platform: Method.AtCoder, status: Status.Pending, verdict: "WJ", submittedAt });
+  const target = problem();
+  target.remoteProblem.fullScore = 200;
+  await service.importRemoteSubmission({ id: 1 }, target, incoming);
+  assert.equal(stored.get(1).remote.sourceSync.nextAttemptAt, undefined);
+  assert.equal(stored.get(1).remote.sourceSync.readyAt, undefined);
+  const [updated] = parseAtcoderStatuses(
+    JSON.stringify({
+      Result: { [incoming.id]: { Html: "<td>WA</td><td>12 ms</td><td>1,024 KiB</td>", Score: "100" } }
+    }),
+    [incoming]
+  );
+  now += 30000;
+  await service.importRemoteSubmission({ id: 1 }, target, updated);
+  const deadline = stored.get(1).remote.sourceSync.nextAttemptAt;
+  assert.equal(Date.parse(deadline), now + 60000);
+  assert.equal(stored.get(1).remote.sourceSync.readyAt, deadline);
+  now += 20000;
+  await service.importRemoteSubmission({ id: 1 }, target, updated);
+  assert.equal(stored.get(1).status, Status.WrongAnswer);
+  assert.equal(stored.get(1).remote.points, 100);
+  assert.equal(stored.get(1).score, 50);
+  assert.equal(stored.get(1).remote.sourceSync.status, "Pending");
+  assert.equal(stored.get(1).remote.sourceSync.nextAttemptAt, deadline);
+  assert.equal(details.get(1).content.code, "");
+});
+
 test("AtCoder source-only backfill preserves verdicts, results and all statistics across concurrent result sync", async () => {
   const { service, stored, details, counts, writes } = submissionFixture();
   const incoming = remote({ platform: Method.AtCoder });
@@ -302,6 +335,7 @@ test("AtCoder grade polling preserves persistent JSON source cooldowns and hides
   await service.importRemoteSubmission({ id: 1 }, problem(), incoming);
   const sourceSync = {
     status: "Failed",
+    readyAt: stored.get(1).remote.sourceSync.readyAt,
     nextAttemptAt: "2026-10-22T12:00:00.000Z",
     failures: 4,
     error: "REMOTE_RATE_LIMITED"

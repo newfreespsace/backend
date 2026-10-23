@@ -20,6 +20,7 @@ import { UserService } from "@/user/user.service";
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteProviderService } from "./remote-provider.service";
 import { RemoteSourceSync, SubmissionMethod } from "./remote-judge.types";
+import { scheduleAtcoderSource } from "./atcoder-policy";
 
 @Injectable()
 export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
@@ -61,21 +62,21 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
     const rows = await repository
       .createQueryBuilder("submission")
       .where("submission.remoteKey LIKE :prefix", { prefix: "AtCoder:%" })
-      .andWhere("JSON_EXTRACT(submission.remote, '$.sourceSync.status') IS NULL")
+      .andWhere(
+        "(JSON_EXTRACT(submission.remote, '$.sourceSync.status') IS NULL OR (JSON_EXTRACT(submission.remote, '$.sourceSync.readyAt') IS NULL AND JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.status')) != 'Available'))"
+      )
       .andWhere("submission.status != :pending", { pending: SubmissionStatus.Pending })
       .orderBy("submission.id", "ASC")
       .take(100)
       .getMany();
     for (const row of rows) {
-      await this.updateSourceSync(row, current =>
-        current.remote.sourceSync
-          ? undefined
-          : {
-              status: current.remote.sourceAvailable ? "Available" : "Pending",
-              ...(current.remote.sourceAvailable ? {} : { nextAttemptAt: new Date().toISOString() }),
-              failures: 0
-            }
-      );
+      await this.updateSourceSync(row, current => {
+        if (current.status === SubmissionStatus.Pending || current.remote.sourceSync?.status === "Available")
+          return undefined;
+        if (current.remote.sourceAvailable) return { status: "Available", failures: 0 };
+        if (current.remote.sourceSync?.readyAt) return undefined;
+        return scheduleAtcoderSource(current.remote.sourceSync, true);
+      });
     }
   }
 
@@ -139,6 +140,9 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
           "EXISTS (SELECT 1 FROM remote_account account WHERE account.userId = submission.submitterId AND account.platform = 'AtCoder' AND account.atcoderSessionConfigured = 1)"
         )
         .andWhere("submission.status != :pending", { pending: SubmissionStatus.Pending })
+        .andWhere("JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.readyAt')) <= :sourceNow", {
+          sourceNow: new Date(Date.now()).toISOString()
+        })
         .orderBy(
           "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.failures')), '0') AS UNSIGNED)",
           "ASC"
@@ -173,6 +177,10 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
         const bound = await this.connection.getRepository(RemoteAccountEntity).findOneBy({ id: account.id });
         const submission = await repository.findOneBy({ id: candidate.id });
         if (!submission || submission.status === SubmissionStatus.Pending) return;
+        if (!submission.remote?.sourceAvailable && !submission.remote?.sourceSync?.readyAt) {
+          await this.updateSourceSync(submission, current => scheduleAtcoderSource(current.remote.sourceSync, true));
+          return;
+        }
         if (
           submission.remote?.sourceSync?.nextAttemptAt &&
           Date.parse(submission.remote.sourceSync.nextAttemptAt) > Date.now()
@@ -182,6 +190,16 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
           await this.updateSourceSync(submission, current =>
             current.remote.sourceSync?.status === "Available" ? undefined : { status: "Available", failures: 0 }
           );
+          return;
+        }
+        const readyAt = Date.parse(submission.remote.sourceSync.readyAt);
+        if (readyAt > Date.now()) {
+          await this.updateSourceSync(submission, current => ({
+            ...current.remote.sourceSync,
+            status: current.remote.sourceSync?.status || "Pending",
+            failures: current.remote.sourceSync?.failures || 0,
+            nextAttemptAt: new Date(readyAt).toISOString()
+          }));
           return;
         }
         const { remote } = submission;
@@ -248,6 +266,7 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
         if (current.remote.sourceAvailable) return undefined;
         const failures = Math.min((current.remote.sourceSync?.failures || 0) + 1, 30);
         return {
+          ...current.remote.sourceSync,
           status: "Failed",
           failures,
           error: code,

@@ -1,4 +1,6 @@
-// Only structured diagnostic fields are retained; response bodies, URLs and credentials are never copied.
+import { safeAtcoderRequest } from "./atcoder-request-profile";
+
+// Only structured diagnostics and allowlisted AtCoder requests are retained; never bodies or credentials.
 export interface RemoteErrorDetails {
   stage?: string;
   reason?: string;
@@ -6,6 +8,7 @@ export interface RemoteErrorDetails {
   page?: number;
   submissionId?: string;
   httpStatus?: number;
+  request?: { url: string; command: string };
 }
 
 const stages = ["lock", "rate_limit", "request", "body", "unlock", "parse"];
@@ -33,6 +36,10 @@ const reasons = [
 export function safeRemoteErrorDetails(value: unknown): RemoteErrorDetails {
   const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const details: RemoteErrorDetails = {};
+  if (source.request && typeof source.request === "object") {
+    const request = safeAtcoderRequest((source.request as Record<string, unknown>).url);
+    if (request) details.request = request;
+  }
   if (stages.includes(source.stage as string)) details.stage = source.stage as string;
   if (reasons.includes(source.reason as string)) details.reason = source.reason as string;
   if (typeof source.contestId === "string" && /^[\w-]{1,100}$/.test(source.contestId))

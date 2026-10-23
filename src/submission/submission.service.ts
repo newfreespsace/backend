@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
 import moment from "moment-timezone";
 
 import { remoteCodeLanguage, RemoteSubmissionInfo, SubmissionMethod } from "@/remote-judge/remote-judge.types";
+import { scheduleAtcoderSource } from "@/remote-judge/atcoder-policy";
 
 import { makeRemoteSourceContent, validRemoteSource } from "@/remote-judge/remote-source";
 
@@ -518,7 +519,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           ? previous?.status === "Available"
             ? previous
             : { status: "Available", failures: 0 }
-          : previous || { status: "Pending", nextAttemptAt: new Date().toISOString(), failures: 0 };
+          : scheduleAtcoderSource(previous, remote.status !== SubmissionStatus.Pending);
       }
       if (!submission) {
         submission = new SubmissionEntity();

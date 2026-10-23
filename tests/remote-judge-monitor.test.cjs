@@ -402,6 +402,10 @@ test("detailed errors survive recovery and are shared across workers without exp
     contestId: "abc480",
     page: 2,
     submissionId: "12345",
+    request: {
+      url: "https://atcoder.jp/contests/abc480/submissions?f.User=coder&lang=en&page=2",
+      command: "private-cookie"
+    },
     cookie: "private-cookie",
     html: "private-source",
     url: "https://secret.test"
@@ -421,8 +425,11 @@ test("detailed errors survive recovery and are shared across workers without exp
     reason: "INVALID_SUBMISSION_TIME",
     contestId: "abc480",
     page: 2,
-    submissionId: "12345"
+    submissionId: "12345",
+    request: platform.recentErrors[0].details.request
   });
+  assert.match(platform.recentErrors[0].details.request.command, /curl --request GET/);
+  assert.deepEqual(platform.errors[0].lastErrorDetails.request, platform.recentErrors[0].details.request);
   assert.doesNotMatch(JSON.stringify(result), /private-cookie|private-source|secret.test/);
   f.data.errors.AtCoder = [];
   f.values.delete(CACHE);
@@ -431,6 +438,7 @@ test("detailed errors survive recovery and are shared across workers without exp
   platform = result.platforms[1].admin;
   assert.equal(platform.errors.length, 0);
   assert.equal(platform.recentErrors.length, 1, "recovery does not erase history");
+  assert.match(platform.recentErrors[0].details.request.command, /REVEL_SESSION=\$ATCODER_REVEL_SESSION/);
   assert.deepEqual(f.expirations, [{ key: "remote-monitor:errors:AtCoder", seconds: 7 * 86400 }]);
   const publicSnapshot = await otherWorker.getSnapshot({ id: 2 });
   assert.doesNotMatch(

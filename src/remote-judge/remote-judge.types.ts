@@ -36,6 +36,8 @@ export interface RemoteSubmission {
 
 export interface RemoteSourceSync {
   status: "Pending" | "Available" | "Failed";
+  // Earliest source request: one minute after the first final grade was imported.
+  readyAt?: string;
   nextAttemptAt?: string;
   failures: number;
   error?: string;

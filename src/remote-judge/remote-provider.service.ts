@@ -20,6 +20,7 @@ import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judg
 import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
 import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
+import { safeAtcoderRequest } from "./atcoder-request-profile";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
@@ -479,32 +480,29 @@ export class RemoteProviderService {
     const saved = await redis.get(key);
     const scan: AtcoderLiveScan = saved ? JSON.parse(saved) : { page: 2, head: 0, boundary: 0, pendingIds: [] };
     const readPage = async (page: number) => {
+      const url = `https://atcoder.jp/contests/${encodeURIComponent(
+        target.contestId
+      )}/submissions?${new URLSearchParams({
+        "f.User": account.handle,
+        lang: "en",
+        page: String(page)
+      })}`;
       try {
         return parseAtcoderSubmissionPage(
-          await this.request(
-            SubmissionMethod.AtCoder,
-            `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions?${new URLSearchParams({
-              "f.User": account.handle,
-              lang: "en",
-              page: String(page)
-            })}`,
-            true,
-            undefined,
-            account.id,
-            session
-          ),
+          await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session),
           target.contestId,
           account.handle,
           page
         );
       } catch (error) {
-        // Add request context without retaining the authenticated URL or the upstream HTML.
+        // Keep a sanitized reproduction command without the session or upstream HTML.
         const details = safeRemoteErrorDetails(error.details);
         error.details = {
           ...details,
           ...(details.stage === "parse" ? { httpStatus: 200 } : {}),
           contestId: target.contestId,
-          page
+          page,
+          request: safeAtcoderRequest(url)
         };
         throw error;
       }
@@ -525,15 +523,9 @@ export class RemoteProviderService {
     };
     let warning: RemotePage["warning"];
     if (!(scan.statusRetryAt > Date.now())) {
+      const url = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`;
       try {
-        const body = await this.request(
-          SubmissionMethod.AtCoder,
-          `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`,
-          true,
-          undefined,
-          account.id,
-          session
-        );
+        const body = await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session);
         for (const update of parseAtcoderStatusResponse(body)) {
           statuses.set(update.id, update);
           // Older IDs outside the bounded cache have already been scanned. The periodic list
@@ -555,7 +547,8 @@ export class RemoteProviderService {
         const details = {
           ...safe,
           ...(safe.stage === "parse" ? { httpStatus: 200 } : {}),
-          contestId: target.contestId
+          contestId: target.contestId,
+          request: safeAtcoderRequest(url)
         };
         error.details = details;
         if (
