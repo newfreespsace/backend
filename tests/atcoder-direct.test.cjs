@@ -68,6 +68,8 @@ function fixture(handler, statusHandler) {
   provider.redisService = {
     getSharedClient: () => ({
       get: async key => values.get(key) ?? null,
+      incr: async () => 1,
+      pexpire: async () => 1,
       set: async (key, value, unit, ttl, nx) => {
         if (nx === "NX" && (expirations.get(key) || 0) > Date.now()) return null;
         values.set(key, value);
@@ -314,7 +316,7 @@ test("HTTP failures distinguish access denial and rate limits without assuming a
   global.fetch = async () => new Response("<html>Verification</html>", { status: 200 });
   await assert.rejects(
     provider.getPage({ platform: Method.Codeforces, handle: "coder", cursor: "0" }),
-    /REMOTE_API_FAILED/
+    /REMOTE_VERIFICATION_REQUIRED/
   );
 });
 

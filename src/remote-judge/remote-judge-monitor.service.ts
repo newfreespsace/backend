@@ -23,6 +23,7 @@ import {
   RemoteTaskPhase
 } from "./remote-judge-monitor.types";
 import { safeRemoteErrorDetails } from "./remote-error";
+import { CODEFORCES_COOLDOWN_KEY } from "./codeforces-policy";
 
 const platforms = [SubmissionMethod.Codeforces, SubmissionMethod.AtCoder];
 const CACHE_KEY = "remote-monitor:snapshot:v1";
@@ -342,6 +343,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
 
   private async collect(): Promise<RemoteJudgeMonitorSnapshot> {
     const now = new Date();
+    const codeforcesCooldown = await bounded(this.redisService.getSharedClient().get(CODEFORCES_COOLDOWN_KEY));
     const workerGroups = await Promise.all(platforms.map(platform => this.workers(platform, +now)));
     const runningIds = [
       ...new Set(
@@ -457,6 +459,8 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           : [])
       ].includes(latestError?.error);
       if (!this.enabled) state = "Disabled";
+      else if (!isAtcoder && codeforcesCooldown)
+        state = codeforcesCooldown === "REMOTE_RATE_LIMITED" ? "RateLimited" : "Error";
       else if (isAtcoder && count("sessionAccounts") === 0) state = "Unconfigured";
       else if (!lastHeartbeatAt) state = "Unknown";
       else if (count("activeAccounts") === 0) state = "Idle";

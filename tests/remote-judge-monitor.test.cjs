@@ -483,3 +483,15 @@ test("history storage failure is isolated from synchronization and reported as u
   assert.equal(result.platforms[1].admin.errorHistoryAvailable, false);
   assert.deepEqual(result.platforms[1].admin.recentErrors, []);
 });
+
+test("CF shared cooldown is visible even when only a binding request failed", async t => {
+  const f = fixture(t);
+  f.values.set("remote-codeforces-cooldown", "REMOTE_RATE_LIMITED");
+  let result = await f.service.getSnapshot(admin);
+  assert.equal(result.platforms[0].state, "RateLimited");
+  f.values.delete(CACHE);
+  f.values.set("remote-codeforces-cooldown", "REMOTE_VERIFICATION_REQUIRED");
+  result = await f.service.getSnapshot(admin);
+  assert.equal(result.platforms[0].state, "Error");
+  assert.notEqual(result.platforms[1].state, "Error");
+});

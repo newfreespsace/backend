@@ -48,7 +48,10 @@ test("repeated provider requests, binding operations and worker turns do not all
   judge.redisService = redis.service;
   judge.lockService = lock;
   judge.configService = { config: {} };
-  judge.provider = { verifyProfile: async () => true };
+  judge.provider = {
+    verifyProfile: async () => true,
+    getCodeforcesCooldownMs: () => provider.getCodeforcesCooldownMs()
+  };
   judge.users = { findUserById: async () => ({ id: 1, isActive: false }) };
   judge.accounts = {
     createQueryBuilder: () => {

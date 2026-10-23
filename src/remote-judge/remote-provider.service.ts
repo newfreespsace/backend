@@ -23,6 +23,7 @@ import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
+import { CODEFORCES_COOLDOWN_KEY, CODEFORCES_FAILURES_KEY, CODEFORCES_REQUEST_INTERVAL_MS } from "./codeforces-policy";
 
 const CODEFORCES_RESULT_PAGE_SIZE = 100;
 const CODEFORCES_SOURCE_PAGE_SIZE = 20;
@@ -44,25 +45,7 @@ const NETWORK_ERROR_CODES = new Set([
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
   "ERR_TLS_CERT_ALTNAME_INVALID"
 ]);
-const RETRYABLE_NETWORK_ERROR_CODES = new Set([
-  "ECONNRESET",
-  "ECONNREFUSED",
-  "EPIPE",
-  "ETIMEDOUT",
-  "EAI_AGAIN",
-  "ENETUNREACH",
-  "EHOSTUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
-  "UND_ERR_SOCKET"
-]);
-
-class RemoteRequestError extends RemoteSyncError {
-  constructor(message: string, readonly retryable: boolean, details: RemoteErrorDetails) {
-    super(message, details);
-  }
-}
+class RemoteRequestError extends RemoteSyncError {}
 
 export interface AtcoderLiveTarget {
   contestId: string;
@@ -153,6 +136,10 @@ export class RemoteProviderService {
     return `remote-atcoder-cooldown:${createHash("sha256").update(session).digest("hex")}`;
   }
 
+  async getCodeforcesCooldownMs(): Promise<number> {
+    return Math.max(0, await this.redisService.getSharedClient().pttl(CODEFORCES_COOLDOWN_KEY));
+  }
+
   // Load once per worker turn. Requests still recheck shared cooldowns under the rate-limit lock.
   async getAtcoderSessionContext(accountId: number): Promise<AtcoderSessionContext> {
     const session = await this.atcoderSessions.get(accountId);
@@ -206,7 +193,8 @@ export class RemoteProviderService {
         lockWaitMs = Date.now() - startedAt;
         stage = "rate_limit";
         const redis = this.redisService.getSharedClient();
-        const cooldownKey = session ? this.atcoderCooldownKey(session) : null;
+        const isCodeforces = platform === SubmissionMethod.Codeforces;
+        const cooldownKey = isCodeforces ? CODEFORCES_COOLDOWN_KEY : session ? this.atcoderCooldownKey(session) : null;
         if (cooldownKey && (await redis.pttl(cooldownKey)) > 0)
           throw new RemoteSyncError("REMOTE_COOLDOWN", { stage, reason: "SHARED_COOLDOWN" });
         let retryAfterMs = 0;
@@ -217,7 +205,7 @@ export class RemoteProviderService {
             rateWaitMs = wait;
             await delay(wait);
           }
-          await redis.set(key, "1", "PX", platform === SubmissionMethod.Codeforces ? 2200 : 1500);
+          await redis.set(key, "1", "PX", isCodeforces ? CODEFORCES_REQUEST_INTERVAL_MS : 1500);
           let address = url;
           if (credentials) {
             const target = new URL(url);
@@ -244,23 +232,26 @@ export class RemoteProviderService {
             headers
           });
           httpStatus = response.status;
-          if (platform === SubmissionMethod.AtCoder) {
-            const retryAfter = response.headers.get("retry-after");
-            if (retryAfter) {
-              const seconds = /^\d+$/.test(retryAfter)
-                ? Number(retryAfter)
-                : (Date.parse(retryAfter) - Date.now()) / 1000;
-              if (Number.isFinite(seconds)) retryAfterMs = Math.min(300000, Math.max(0, seconds * 1000));
-            }
-            if (response.headers.get("cf-mitigated") === "challenge")
-              throw new RemoteSyncError("REMOTE_VERIFICATION_REQUIRED", { stage, reason: "CHALLENGE_PAGE" });
+          const retryAfter = response.headers.get("retry-after");
+          if (retryAfter) {
+            const seconds = /^\d+$/.test(retryAfter)
+              ? Number(retryAfter)
+              : (Date.parse(retryAfter) - Date.now()) / 1000;
+            if (Number.isFinite(seconds))
+              retryAfterMs = Math.min(isCodeforces ? 86400000 : 300000, Math.max(0, seconds * 1000));
+          }
+          if (response.headers.get("cf-mitigated") === "challenge") {
+            await response.body?.cancel().catch(() => undefined);
+            throw new RemoteSyncError("REMOTE_VERIFICATION_REQUIRED", { stage, reason: "CHALLENGE_PAGE" });
           }
           if (authenticated && response.status >= 300 && response.status < 400) {
             const location = new URL(response.headers.get("location") || "/", url);
             if (location.origin === "https://atcoder.jp" && location.pathname === "/login")
               throw new Error("REMOTE_AUTH_REQUIRED");
           }
-          if (!response.ok)
+          // CF also uses HTTP 400 for structured API failures (including call limits).
+          if (!response.ok && !(isCodeforces && response.status === 400)) {
+            await response.body?.cancel().catch(() => undefined);
             throw new Error(
               response.status === 429
                 ? "REMOTE_RATE_LIMITED"
@@ -268,18 +259,41 @@ export class RemoteProviderService {
                 ? "REMOTE_ACCESS_DENIED"
                 : "REMOTE_UNAVAILABLE"
             );
+          }
           stage = "body";
           const text = await response.text();
           if (text.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
+          if (isCodeforces) {
+            if (/^\s*</.test(text))
+              throw new RemoteSyncError("REMOTE_VERIFICATION_REQUIRED", { stage, reason: "CHALLENGE_PAGE" });
+            // Inspect failures before releasing the lock: queued callers must see the cooldown.
+            let body: { status?: string; comment?: string; result?: unknown };
+            try {
+              body = JSON.parse(text);
+            } catch {
+              throw new Error("REMOTE_API_FAILED");
+            }
+            if (body?.status === "FAILED" && body.comment === "Call limit exceeded")
+              throw new Error("REMOTE_RATE_LIMITED");
+            if (body?.status === "OK" && Array.isArray(body.result)) await redis.del(CODEFORCES_FAILURES_KEY);
+          }
           if (authenticated && !new URL(url).pathname.endsWith("/status/json")) assertAtcoderPage(cheerio.load(text));
           else if (authenticated && /^\s*</.test(text)) assertAtcoderPage(cheerio.load(text));
           stage = "unlock";
           return text;
         } catch (error) {
-          // Only explicit shared failures pause result and source requests together. A source-only
-          // 403 or an unrecognized contest page must not suspend all users. Set this under the lock
-          // so already queued requests recheck the pause before contacting AtCoder.
+          // Set shared pauses before unlocking so queued requests cannot follow a rejection.
           if (
+            isCodeforces &&
+            ["REMOTE_VERIFICATION_REQUIRED", "REMOTE_ACCESS_DENIED", "REMOTE_RATE_LIMITED"].includes(error.message)
+          ) {
+            const failures = await redis.incr(CODEFORCES_FAILURES_KEY);
+            await redis.pexpire(CODEFORCES_FAILURES_KEY, 86400000);
+            const baseMs = error.message === "REMOTE_RATE_LIMITED" ? 300000 : 900000;
+            const cooldownMs = Math.max(retryAfterMs, Math.min(3600000, baseMs * 2 ** Math.min(failures - 1, 4)));
+            await redis.set(CODEFORCES_COOLDOWN_KEY, error.message, "PX", cooldownMs);
+          } else if (
+            // AtCoder pauses only the affected session; a source-only 403 does not pause everyone.
             cooldownKey &&
             ["REMOTE_AUTH_REQUIRED", "REMOTE_VERIFICATION_REQUIRED", "REMOTE_RATE_LIMITED"].includes(error.message)
           )
@@ -324,14 +338,7 @@ export class RemoteProviderService {
             durationMs: Date.now() - startedAt
           })}`
         );
-        const retryable =
-          code === "REMOTE_UNAVAILABLE" &&
-          (stage === "request" || stage === "body") &&
-          (timedOut ||
-            RETRYABLE_NETWORK_ERROR_CODES.has(networkCode) ||
-            (!httpStatus && !originalCode && error?.name === "TypeError") ||
-            [408, 500, 502, 503, 504].includes(httpStatus));
-        throw new RemoteRequestError(code, retryable, { stage, reason, httpStatus });
+        throw new RemoteRequestError(code, { stage, reason, httpStatus });
       });
   }
 
@@ -615,8 +622,8 @@ export class RemoteProviderService {
   }
 
   private async codeforcesPage(account: RemoteAccountEntity): Promise<RemotePage> {
-    let scan = account.scan || { offset: 1, head: 0 };
-    let { cursor } = account;
+    const scan = account.scan || { offset: 1, head: 0 };
+    const { cursor } = account;
     const params = {
       handle: account.handle,
       from: String(scan.offset),
@@ -640,36 +647,44 @@ export class RemoteProviderService {
             "user.status",
             {
               ...params,
-              from: account.codeforcesSourceError ? "1" : params.from,
+              from: params.from,
               count: String(CODEFORCES_SOURCE_PAGE_SIZE),
               includeSources: "true"
             },
             credentials,
             account.id
           );
-        try {
-          rows = await readSources();
-        } catch (error) {
-          if (!(error instanceof RemoteRequestError) || !error.retryable) throw error;
-          // Re-enter the shared limiter and generate a fresh signature for the single retry.
-          logger.warn(`Codeforces source account ${account.id}: retrying transient request failure once`);
-          rows = await readSources();
-          logger.log(`Codeforces source account ${account.id}: transient request recovered`);
-        }
+        rows = await readSources();
+        sourceAuthorized = true;
+        pageSize = CODEFORCES_SOURCE_PAGE_SIZE;
         for (const row of rows) {
           const source = decodeCodeforcesSource(row);
           if (source !== undefined) sources.set(row, source);
         }
-        if (rows.length && sources.size === 0) throw new Error("REMOTE_CF_SOURCE_MISSING");
-        sourceAuthorized = true;
-        pageSize = CODEFORCES_SOURCE_PAGE_SIZE;
-        if (account.codeforcesSourceError) {
-          // Recovering credentials must revisit pages skipped during public-only result sync.
-          scan = { offset: 1, head: 0 };
-          cursor = "0";
-        }
+        if (
+          rows.some(
+            row =>
+              row.author?.members?.some(member => member.handle.toLowerCase() === account.handle.toLowerCase()) &&
+              !sources.has(row)
+          )
+        )
+          throw new Error("REMOTE_CF_SOURCE_MISSING");
       } catch (error) {
-        rows = undefined;
+        // Request failures retain the current checkpoint and back off at the worker level.
+        // In particular, never follow a challenge/rate limit with a public fallback request.
+        if (
+          error instanceof RemoteRequestError ||
+          ![
+            "REMOTE_CF_AUTH_FAILED",
+            "REMOTE_CF_CREDENTIALS_UNREADABLE",
+            "REMOTE_CF_SOURCE_MISSING",
+            "REMOTE_CF_SOURCE_INVALID",
+            "REMOTE_CF_SOURCE_TOO_LARGE"
+          ].includes(error.message)
+        )
+          throw error;
+        // A successful source response already contains the results. Keep it even if decoding
+        // fails, rather than contacting the public API again for the same page.
         sourceError = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_CF_SOURCE_UNAVAILABLE";
         sourceRetryAt = new Date(Date.now() + 300000);
       }

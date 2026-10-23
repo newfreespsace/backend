@@ -708,7 +708,7 @@ test("two users cannot bind the same remote handle with different capitalization
   assert.match(results.find(item => item.status === "rejected").reason.message, /ACCOUNT_ALREADY_BOUND/);
 });
 
-test("returning to a problem extends activity without bypassing cooldown or repeating its history reset", async () => {
+test("problem visits queue a coalesced history backfill without resetting an in-flight scan or bypassing cooldown", async () => {
   const service = Object.create(RemoteJudgeService.prototype);
   const nextSyncAt = new Date(Date.now() + 60000);
   const account = {
@@ -739,10 +739,13 @@ test("returning to a problem extends activity without bypassing cooldown or repe
     update: async (_, value) => Object.assign(watch, value)
   };
   await service.activate({ id: 1 }, { problemId: 7 });
-  assert.equal(account.cursor, "0");
+  assert.equal(account.cursor, "900");
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
   account.cursor = "950";
+  account.scan = { offset: 41, head: 1000 };
   await service.activate({ id: 1 }, { problemId: 7 });
   assert.equal(account.cursor, "950");
+  assert.equal(account.scan.offset, 41);
   assert.equal(account.nextSyncAt, nextSyncAt);
   assert.ok(account.activeUntil > new Date());
 });
@@ -804,6 +807,7 @@ function workerFixture(candidate) {
   service.codeforcesImportBuffer = importBufferFixture().service;
   service.users = { findUserById: async () => ({ id: 1, isActive: true }) };
   service.provider = {
+    getCodeforcesCooldownMs: async () => 0,
     getAtcoderSessionContext: async accountId => ({ accountId, session: "private-session", cooldownMs: 0 }),
     getPage: async () => {
       requests++;
@@ -833,6 +837,151 @@ test("upstream failure backs off without advancing the submission cursor", async
   assert.equal(account.failures, 1);
   assert.equal(account.lastError, "REMOTE_UNAVAILABLE");
   assert.ok(+account.nextSyncAt >= start + 60000);
+});
+
+test("CF shared cooldown skips the queue without changing any account checkpoints", async () => {
+  const account = { id: 1, cursor: "900", scan: { offset: 41, head: 1000 }, nextSyncAt: new Date(0), failures: 0 };
+  const { service, updates, filters, requestCount } = workerFixture(account);
+  service.provider.getCodeforcesCooldownMs = async () => 900000;
+  await service.tick(Method.Codeforces);
+  assert.equal(requestCount(), 0);
+  assert.deepEqual(updates, []);
+  assert.deepEqual(filters, []);
+  assert.equal(account.scan.offset, 41);
+});
+
+test("CF rejection preserves pagination and schedules the account after the shared cooldown", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    cursor: "900",
+    scan: { offset: 41, head: 1000, bufferKey: "batch" },
+    nextSyncAt: new Date(0),
+    failures: 0
+  };
+  const { service } = workerFixture(account);
+  let cooldown = 0;
+  service.provider.getCodeforcesCooldownMs = async () => cooldown;
+  service.provider.getPage = async () => {
+    cooldown = 900000;
+    throw new Error("REMOTE_VERIFICATION_REQUIRED");
+  };
+  const before = Date.now();
+  await service.tick(Method.Codeforces);
+  assert.equal(account.cursor, "900");
+  assert.equal(account.scan.offset, 41);
+  assert.equal(account.lastError, "REMOTE_VERIFICATION_REQUIRED");
+  assert.equal(account.failures, 1);
+  assert.ok(+account.nextSyncAt >= before + 900000);
+});
+
+test("unchanged CF results slow polling to five minutes and new or pending results reset it", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    cursor: "900",
+    codeforcesSummaryVersion: 1,
+    nextSyncAt: new Date(0),
+    failures: 0
+  };
+  const { service } = workerFixture(account);
+  service.watches = { findBy: async () => [] };
+  let cursor = "900",
+    pending = false;
+  service.provider.getPage = async () => ({ submissions: [], cursor, scan: null, more: false, pending });
+  for (const expected of [60000, 120000, 240000, 300000]) {
+    account.nextSyncAt = new Date(0);
+    const before = Date.now();
+    await service.tick(Method.Codeforces);
+    assert.ok(+account.nextSyncAt >= before + expected);
+    assert.ok(+account.nextSyncAt <= Date.now() + expected);
+  }
+  cursor = "901";
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.equal(account.codeforcesSyncState.idlePolls, 0);
+  assert.ok(+account.nextSyncAt <= Date.now() + 30000);
+  pending = true;
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.equal(account.codeforcesSyncState.idlePolls, 0);
+  assert.equal(account.catchUpRequested, true);
+});
+
+test("new-problem history requests wait for the rescan window and never restart an active batch", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    cursor: "900",
+    codeforcesSummaryVersion: 1,
+    nextSyncAt: new Date(0),
+    failures: 0,
+    codeforcesSyncState: { historyRequested: true, nextHistoryAt: Date.now() + 3600000 }
+  };
+  const { service } = workerFixture(account);
+  service.watches = { findBy: async () => [] };
+  const offsets = [];
+  service.provider.getPage = async current => {
+    offsets.push([current.cursor, current.scan?.offset]);
+    return current.cursor === "0"
+      ? {
+          submissions: [],
+          cursor: "0",
+          scan: { offset: (current.scan?.offset || 1) + 20, head: 1000 },
+          more: true,
+          pending: false
+        }
+      : { submissions: [], cursor: current.cursor, scan: null, more: false, pending: false };
+  };
+  await service.tick(Method.Codeforces);
+  assert.equal(account.cursor, "900");
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
+  account.codeforcesSyncState.nextHistoryAt = Date.now() - 1;
+  account.nextSyncAt = new Date(0);
+  const before = Date.now();
+  await service.tick(Method.Codeforces);
+  assert.equal(account.cursor, "0");
+  assert.equal(account.codeforcesSyncState.historyRequested, false);
+  assert.ok(account.codeforcesSyncState.nextHistoryAt >= before + 6 * 3600000);
+  assert.ok(+account.nextSyncAt >= before + 30000, "historical pages are spaced by at least 30 seconds");
+  // A further activation during collection is retained without throwing away the offset.
+  account.codeforcesSyncState.historyRequested = true;
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(offsets, [
+    ["900", undefined],
+    ["0", undefined],
+    ["0", 21]
+  ]);
+  assert.equal(account.scan.offset, 41);
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
+});
+
+test("source recovery queues a delayed repair scan while preserving the current results cursor", async () => {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    cursor: "900",
+    codeforcesSummaryVersion: 1,
+    codeforcesSourceError: "REMOTE_CF_AUTH_FAILED",
+    nextSyncAt: new Date(0),
+    failures: 0
+  };
+  const { service } = workerFixture(account);
+  service.watches = { findBy: async () => [] };
+  service.provider.getPage = async current => {
+    assert.equal(current.cursor, "900");
+    return { submissions: [], cursor: "901", scan: null, more: false, pending: false };
+  };
+  const before = Date.now();
+  await service.tick(Method.Codeforces);
+  assert.equal(account.cursor, "901");
+  assert.equal(account.codeforcesSourceError, null);
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
+  assert.ok(account.codeforcesSyncState.nextHistoryAt >= before + 6 * 3600000);
 });
 
 test("the sync worker retains structured failures while clearing only the active error after recovery", async () => {

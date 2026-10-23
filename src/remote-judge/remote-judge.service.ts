@@ -41,6 +41,7 @@ import { CodeforcesImportBufferService } from "./codeforces-import-buffer.servic
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import { AtcoderSessionService, normalizeAtcoderSession } from "./atcoder-session.service";
 import { safeRemoteErrorDetails } from "./remote-error";
+import { CODEFORCES_HISTORY_INTERVAL_MS, CODEFORCES_HISTORY_RESCAN_MS } from "./codeforces-policy";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -383,7 +384,11 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           if (platform === SubmissionMethod.Codeforces && firstVisit && account.cursor !== "0")
             await this.lockService.lock(`RemoteAccount_${account.id}`, async () => {
               const current = await this.accounts.findOneBy({ id: account.id });
-              if (current) await this.accounts.update({ id: account.id }, { cursor: "0", scan: null });
+              if (current)
+                await this.accounts.update(
+                  { id: account.id },
+                  { codeforcesSyncState: { ...current.codeforcesSyncState, historyRequested: true } }
+                );
             });
         }
       }
@@ -605,6 +610,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     // Restart legacy in-flight scans so every page participates in the ordered batch.
     const scan = account.scan?.bufferKey ? account.scan : null;
     const page = await this.provider.getPage({ ...account, scan });
+    if (account.codeforcesSourceError && !page.sourceError) {
+      // Persist the repair request before clearing source errors or acknowledging buffered pages.
+      account.codeforcesSyncState = {
+        ...account.codeforcesSyncState,
+        historyRequested: true,
+        nextHistoryAt: Math.max(
+          account.codeforcesSyncState?.nextHistoryAt || 0,
+          Date.now() + CODEFORCES_HISTORY_RESCAN_MS
+        )
+      };
+      await this.accounts.update({ id: account.id }, { codeforcesSyncState: account.codeforcesSyncState });
+    }
     if (!scan && !page.more) {
       await this.codeforcesImportBuffer.discard(account.id);
       page.submissions.sort((a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id));
@@ -644,6 +661,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async tick(platform: SubmissionMethod): Promise<void> {
+    // Skip the entire queue during a shared CF pause. Requests recheck under the provider lock.
+    if (platform === SubmissionMethod.Codeforces && (await this.provider.getCodeforcesCooldownMs()) > 0) return;
     const now = new Date();
     const candidate = await this.accounts
       .createQueryBuilder("account")
@@ -685,6 +704,19 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             // Existing accounts backfill summaries once on their next active sync.
             await this.accounts.update({ id: account.id }, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
             Object.assign(account, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
+          }
+          if (platform === SubmissionMethod.Codeforces && !account.scan) {
+            const state = account.codeforcesSyncState || {};
+            if (account.cursor === "0" || (state.historyRequested && !(state.nextHistoryAt > Date.now()))) {
+              // Coalesce new-problem backfills without repeatedly discarding an in-flight scan.
+              const codeforcesSyncState = {
+                ...state,
+                historyRequested: false,
+                nextHistoryAt: Date.now() + CODEFORCES_HISTORY_RESCAN_MS
+              };
+              await this.accounts.update({ id: account.id }, { cursor: "0", codeforcesSyncState });
+              Object.assign(account, { cursor: "0", codeforcesSyncState });
+            }
           }
           let watches: RemoteWatchEntity[];
           let atcoderSession: AtcoderSessionContext;
@@ -735,6 +767,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             page.sourceError &&
             (page.sourceError !== account.codeforcesSourceError ||
               +page.sourceRetryAt !== +account.codeforcesSourceRetryAt);
+          let syncDelayMs = page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000;
+          let { codeforcesSyncState } = account;
+          if (platform === SubmissionMethod.Codeforces) {
+            const changed = page.more || page.pending || page.cursor !== account.cursor;
+            const idlePolls = changed ? 0 : Math.min(4, (codeforcesSyncState?.idlePolls || 0) + 1);
+            codeforcesSyncState = { ...codeforcesSyncState, idlePolls };
+            syncDelayMs = page.more
+              ? page.scan?.importCursor !== undefined
+                ? 1000
+                : CODEFORCES_HISTORY_INTERVAL_MS
+              : Math.max(syncDelayMs, Math.min(300000, 30000 * 2 ** idlePolls));
+          }
           await this.accounts.update(
             { id: account.id },
             {
@@ -747,12 +791,11 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               ...(platform === SubmissionMethod.Codeforces
                 ? {
                     codeforcesSourceError: page.sourceError || null,
-                    codeforcesSourceRetryAt: page.sourceRetryAt || null
+                    codeforcesSourceRetryAt: page.sourceRetryAt || null,
+                    codeforcesSyncState
                   }
                 : {}),
-              nextSyncAt: new Date(
-                Date.now() + (page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000)
-              ),
+              nextSyncAt: new Date(Date.now() + syncDelayMs),
               // A return-to-site request arriving during this sync must survive its completion.
               catchUpRequested:
                 page.more || page.pending
@@ -768,11 +811,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               kind: "Source"
             });
         } catch (error) {
-          if (error.message === "REMOTE_COOLDOWN") return;
+          const cooldownMs =
+            platform === SubmissionMethod.Codeforces ? await this.provider.getCodeforcesCooldownMs() : 0;
+          if (error.message === "REMOTE_COOLDOWN") {
+            if (cooldownMs > 0)
+              await this.accounts.update({ id: account.id }, { nextSyncAt: new Date(Date.now() + cooldownMs) });
+            return;
+          }
           const failures = account.failures + 1;
           const at = new Date();
           const retryAt = new Date(
-            Date.now() + Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7))
+            Date.now() +
+              Math.max(cooldownMs, Math.min(3600000, this.settings.intervalSeconds * 1000 * 2 ** Math.min(failures, 7)))
           );
           const code = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED";
           await this.accounts.update(

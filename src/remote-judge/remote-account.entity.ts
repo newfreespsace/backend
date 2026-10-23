@@ -60,6 +60,13 @@ export class RemoteAccountEntity {
     importPending?: boolean;
   };
 
+  @Column({ type: "json", nullable: true })
+  codeforcesSyncState: {
+    idlePolls?: number;
+    historyRequested?: boolean;
+    nextHistoryAt?: number;
+  };
+
   @Column({ type: "integer", default: 0 })
   failures: number;
 
