@@ -30,6 +30,12 @@ export class RemoteContextDto {
   contestProblemIndex?: number;
 }
 
+export class RemoteActivateDto extends RemoteContextDto {
+  @IsOptional()
+  @IsBoolean()
+  submissionIntent?: boolean;
+}
+
 export class SetCodeforcesCredentialsDto {
   @IsOptional()
   @IsString()

@@ -65,6 +65,7 @@ export class RemoteAccountEntity {
     idlePolls?: number;
     historyRequested?: boolean;
     nextHistoryAt?: number;
+    submissionUntil?: number;
   };
 
   @Column({ type: "integer", default: 0 })

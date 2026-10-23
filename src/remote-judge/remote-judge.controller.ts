@@ -9,6 +9,7 @@ import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
+  RemoteActivateDto,
   RemotePlatformDto,
   SetSubmissionMethodDto,
   SetCodeforcesCredentialsDto,
@@ -58,7 +59,7 @@ export class RemoteJudgeController {
   }
 
   @Post("activate")
-  activate(@CurrentUser() user: UserEntity, @Body() request: RemoteContextDto) {
+  activate(@CurrentUser() user: UserEntity, @Body() request: RemoteActivateDto) {
     return this.service.activate(user, request);
   }
 

@@ -17,7 +17,11 @@ const {
 } = require("../dist/remote-judge/remote-judge.types");
 const { RemoteProviderService } = require("../dist/remote-judge/remote-provider.service");
 const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.service");
-const { RemotePlatformDto, SetSubmissionMethodDto } = require("../dist/remote-judge/remote-judge.dto");
+const {
+  RemoteActivateDto,
+  RemotePlatformDto,
+  SetSubmissionMethodDto
+} = require("../dist/remote-judge/remote-judge.dto");
 const { RemoteAccountEntity } = require("../dist/remote-judge/remote-account.entity");
 const { RemoteWatchEntity } = require("../dist/remote-judge/remote-watch.entity");
 const { CodeforcesImportBufferService } = require("../dist/remote-judge/codeforces-import-buffer.service");
@@ -127,6 +131,14 @@ test("verdict mapping preserves pending, failures and unknown final statuses", (
   assert.equal(remoteVerdict(Method.AtCoder, "NEW_UNKNOWN_VERDICT"), Status.JudgementFailed);
 });
 
+test("submission activation accepts only a boolean intent and validates the problem context", async () => {
+  for (const submissionIntent of [undefined, true, false])
+    assert.equal((await validate(plainToInstance(RemoteActivateDto, { problemId: 7, submissionIntent }))).length, 0);
+  for (const submissionIntent of ["true", 1, {}])
+    assert.ok((await validate(plainToInstance(RemoteActivateDto, { problemId: 7, submissionIntent }))).length);
+  assert.ok((await validate(plainToInstance(RemoteActivateDto, { problemId: 0, submissionIntent: true }))).length);
+});
+
 test("CF paginates history, retains pending submissions behind the cursor and filters other accounts", async () => {
   const provider = Object.create(RemoteProviderService.prototype);
   const row = id => ({
@@ -141,9 +153,10 @@ test("CF paginates history, retains pending submissions behind the cursor and fi
   });
   const requests = [];
   provider.codeforces = async (_, params) => {
+    assert.equal(params.count, "5");
     requests.push(params.from);
     return params.from === "1"
-      ? Array.from({ length: 100 }, (_, i) => row(200 - i))
+      ? Array.from({ length: 5 }, (_, i) => row(105 - i))
       : [{ ...row(100), verdict: "TESTING" }, row(99), { ...row(98), author: { members: [{ handle: "somebody" }] } }];
   };
   const account = { platform: Method.Codeforces, handle: "coder", cursor: "0", scan: null };
@@ -151,7 +164,7 @@ test("CF paginates history, retains pending submissions behind the cursor and fi
   assert.equal(first.more, true);
   assert.equal(first.cursor, "0");
   const last = await provider.getPage({ ...account, scan: first.scan });
-  assert.deepEqual(requests, ["1", "101"]);
+  assert.deepEqual(requests, ["1", "6"]);
   assert.equal(last.cursor, "99");
   assert.equal(last.pending, true);
   assert.equal(last.scan, null);
@@ -850,6 +863,201 @@ function workerFixture(candidate) {
   };
   return { service, updates, filters, requestCount: () => requests };
 }
+
+function submissionActivationFixture(overrides = {}) {
+  const account = {
+    id: 1,
+    userId: 1,
+    platform: Method.Codeforces,
+    handle: "coder",
+    cursor: "900",
+    nextSyncAt: new Date(Date.now() + 300000),
+    failures: 0,
+    codeforcesSyncState: { idlePolls: 4, historyRequested: true, nextHistoryAt: Date.now() + 3600000 },
+    ...overrides
+  };
+  const fixture = workerFixture(account);
+  const { service } = fixture;
+  service.accounts.findBy = async () => [account];
+  service.context = async () => ({ problem: { ...problem(), submissionMethod: account.platform } });
+  service.problems = { getProblemJudgeInfo: async () => [{}, true] };
+  service.watches = {
+    findOne: async () => ({ id: 1, contestId: 0, until: new Date(Date.now() + 600000) }),
+    update: async () => {}
+  };
+  return { ...fixture, account };
+}
+
+test("clicking a CF submission brings idle polling forward while preserving pagination and history state", async () => {
+  const scan = { offset: 41, head: 1000, bufferKey: "batch" };
+  const { service, account, requestCount } = submissionActivationFixture({ scan });
+  const before = Date.now();
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  assert.ok(+account.nextSyncAt >= before + 5000);
+  assert.ok(+account.nextSyncAt <= Date.now() + 5000);
+  assert.ok(account.codeforcesSyncState.submissionUntil >= before + 120000);
+  assert.equal(account.codeforcesSyncState.idlePolls, 0);
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
+  assert.equal(account.cursor, "900");
+  assert.deepEqual(account.scan, scan);
+  assert.equal(account.catchUpRequested, true);
+  assert.equal(requestCount(), 0, "the activation endpoint schedules work without calling CF");
+  const due = account.nextSyncAt;
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  assert.equal(+account.nextSyncAt, +due, "repeated clicks must not postpone a queued sync");
+  const until = account.codeforcesSyncState.submissionUntil;
+  await service.activate({ id: 1 }, { problemId: 7 });
+  assert.equal(+account.nextSyncAt, +due);
+  assert.equal(account.codeforcesSyncState.submissionUntil, until, "ordinary heartbeats cannot extend the fast window");
+});
+
+test("CF submission clicks respect account retry backoff and shared cooldowns", async () => {
+  for (const failure of [{ lastError: "REMOTE_UNAVAILABLE", failures: 1 }, { failures: 1 }]) {
+    const { service, account } = submissionActivationFixture(failure);
+    const retry = +account.nextSyncAt;
+    await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+    assert.equal(+account.nextSyncAt, retry);
+    assert.equal(account.lastError, failure.lastError);
+    assert.equal(account.failures, failure.failures);
+  }
+  const { service, account } = submissionActivationFixture();
+  service.provider.getCodeforcesCooldownMs = async () => 900000;
+  const before = Date.now();
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  assert.ok(+account.nextSyncAt >= before + 900000);
+});
+
+test("only an explicit click on a submittable CF problem enables fast synchronization", async () => {
+  for (const scenario of ["heartbeat", "atcoder", "disabled"]) {
+    const { service, account } = submissionActivationFixture(
+      scenario === "atcoder" ? { platform: Method.AtCoder } : {}
+    );
+    if (scenario === "disabled") service.problems.getProblemJudgeInfo = async () => [{}, false];
+    const due = account.nextSyncAt;
+    await service.activate(
+      { id: 1 },
+      { problemId: 7, ...(scenario === "heartbeat" ? {} : { submissionIntent: true }) }
+    );
+    assert.equal(account.nextSyncAt, due, scenario);
+    assert.equal(account.codeforcesSyncState.submissionUntil, undefined, scenario);
+  }
+  const { service } = submissionActivationFixture();
+  await assert.rejects(service.activate({ id: 1 }, { submissionIntent: true }), /PROBLEM_REQUIRED/);
+});
+
+test("a CF submission window polls empty results quickly, follows pending verdicts, then returns to idle polling", async () => {
+  const { service, account } = submissionActivationFixture({ codeforcesSummaryVersion: 1 });
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  service.watches.findBy = async () => [];
+  let pending = false;
+  service.provider.getPage = async () => ({ submissions: [], cursor: "900", scan: null, more: false, pending });
+  for (let i = 0; i < 3; i++) {
+    account.nextSyncAt = new Date(0);
+    const before = Date.now();
+    await service.tick(Method.Codeforces);
+    assert.ok(+account.nextSyncAt >= before + 10000);
+    assert.ok(+account.nextSyncAt <= Date.now() + 10000);
+    assert.equal(account.catchUpRequested, true);
+    assert.equal(account.codeforcesSyncState.idlePolls, 0);
+  }
+  account.codeforcesSyncState.submissionUntil = Date.now() - 1;
+  pending = true;
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.ok(+account.nextSyncAt <= Date.now() + 10000);
+  assert.equal(account.catchUpRequested, true);
+  pending = false;
+  account.nextSyncAt = new Date(0);
+  const before = Date.now();
+  await service.tick(Method.Codeforces);
+  assert.ok(+account.nextSyncAt >= before + 60000);
+  assert.equal(account.codeforcesSyncState.submissionUntil, undefined);
+});
+
+test("fast CF synchronization defers a new history backfill until recent-submission tracking ends", async () => {
+  const { service, account } = submissionActivationFixture({
+    codeforcesSummaryVersion: 1,
+    codeforcesSyncState: { historyRequested: true, nextHistoryAt: 0 }
+  });
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  service.watches.findBy = async () => [];
+  const cursors = [];
+  service.provider.getPage = async current => {
+    cursors.push(current.cursor);
+    return { submissions: [], cursor: current.cursor, scan: null, more: false, pending: false };
+  };
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(cursors, ["900"]);
+  assert.equal(account.codeforcesSyncState.historyRequested, true);
+  account.codeforcesSyncState.submissionUntil = Date.now() - 1;
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.equal(account.codeforcesSyncState.submissionUntil, undefined);
+  account.nextSyncAt = new Date(0);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(cursors, ["900", "900", "0"]);
+  assert.equal(account.codeforcesSyncState.historyRequested, false);
+});
+
+test("a failed CF request during fast tracking still backs off instead of polling every ten seconds", async () => {
+  const { service, account } = submissionActivationFixture({ codeforcesSummaryVersion: 1 });
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  account.nextSyncAt = new Date(0);
+  const before = Date.now();
+  await service.tick(Method.Codeforces);
+  assert.equal(account.lastError, "REMOTE_UNAVAILABLE");
+  assert.ok(+account.nextSyncAt >= before + 60000);
+});
+
+test("a CF submission click arriving during synchronization uses the completed worker's retry state", async () => {
+  for (const fails of [false, true]) {
+    const { service, account } = submissionActivationFixture({
+      codeforcesSummaryVersion: 1,
+      nextSyncAt: new Date(0),
+      codeforcesSyncState: { idlePolls: 4 }
+    });
+    service.watches.findBy = async () => [];
+    let started, finish, activated;
+    const requestStarted = new Promise(resolve => {
+      started = resolve;
+    });
+    const requestFinished = new Promise(resolve => {
+      finish = resolve;
+    });
+    const clickActivated = new Promise(resolve => {
+      activated = resolve;
+    });
+    const update = service.accounts.update;
+    service.accounts.update = async (where, value) => {
+      await update(where, value);
+      if (value.catchUpVersion) activated();
+    };
+    service.provider.getPage = async () => {
+      started();
+      await requestFinished;
+      if (fails) throw new Error("REMOTE_UNAVAILABLE");
+      return { submissions: [], cursor: "900", scan: null, more: false, pending: false };
+    };
+    const sync = service.tick(Method.Codeforces);
+    await requestStarted;
+    const click = service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+    await clickActivated;
+    const before = Date.now();
+    finish();
+    await Promise.all([sync, click]);
+    assert.ok(account.codeforcesSyncState.submissionUntil > Date.now());
+    if (fails) {
+      assert.equal(account.lastError, "REMOTE_UNAVAILABLE");
+      assert.equal(account.failures, 1);
+      assert.ok(+account.nextSyncAt >= before + 60000);
+    } else {
+      assert.equal(account.failures, 0);
+      assert.equal(account.codeforcesSyncState.idlePolls, 0);
+      assert.ok(+account.nextSyncAt <= Date.now() + 5000);
+    }
+  }
+});
 
 test("idle accounts are excluded before any upstream query and paused sync never starts a request", async () => {
   const idle = workerFixture(null);

@@ -31,6 +31,7 @@ import { AtcoderLiveTarget, AtcoderSessionContext, RemotePage, RemoteProviderSer
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
+  RemoteActivateDto,
   SetSubmissionMethodDto,
   SetCodeforcesCredentialsDto,
   SetAtcoderSessionDto
@@ -41,7 +42,13 @@ import { CodeforcesImportBufferService } from "./codeforces-import-buffer.servic
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import { AtcoderSessionService, normalizeAtcoderSession } from "./atcoder-session.service";
 import { safeRemoteErrorDetails } from "./remote-error";
-import { CODEFORCES_HISTORY_INTERVAL_MS, CODEFORCES_HISTORY_RESCAN_MS } from "./codeforces-policy";
+import {
+  CODEFORCES_HISTORY_INTERVAL_MS,
+  CODEFORCES_HISTORY_RESCAN_MS,
+  CODEFORCES_SUBMIT_INITIAL_DELAY_MS,
+  CODEFORCES_SUBMIT_POLL_INTERVAL_MS,
+  CODEFORCES_SUBMIT_TRACKING_MS
+} from "./codeforces-policy";
 
 @Injectable()
 export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
@@ -343,8 +350,33 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     return { problem, contest };
   }
 
-  async activate(user: UserEntity, request: RemoteContextDto) {
+  private async scheduleCodeforcesSubmission(accountId: number): Promise<void> {
+    await this.lockService.lock(`RemoteAccount_${accountId}`, async () => {
+      const account = await this.accounts.findOneBy({ id: accountId });
+      if (!account || account.platform !== SubmissionMethod.Codeforces) return;
+      const cooldownMs = await this.provider.getCodeforcesCooldownMs();
+      const now = Date.now();
+      const soon = now + CODEFORCES_SUBMIT_INITIAL_DELAY_MS;
+      const due = +account.nextSyncAt;
+      // Only idle polling may be brought forward. Preserve account errors and shared pauses.
+      const next = account.lastError || account.failures > 0 ? Math.max(soon, due) : Math.min(soon, due);
+      await this.accounts.update(
+        { id: account.id },
+        {
+          codeforcesSyncState: {
+            ...account.codeforcesSyncState,
+            idlePolls: 0,
+            submissionUntil: now + CODEFORCES_SUBMIT_TRACKING_MS
+          },
+          nextSyncAt: new Date(Math.max(next, now + cooldownMs))
+        }
+      );
+    });
+  }
+
+  async activate(user: UserEntity, request: RemoteActivateDto) {
     let platform: SubmissionMethod;
+    let submissionIntent = false;
     if (request.problemId) {
       const { problem, contest } = await this.context(user, request);
       platform = problem.submissionMethod;
@@ -352,6 +384,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
       if (account) {
         const [, submittable] = await this.problems.getProblemJudgeInfo(problem);
         if (submittable) {
+          submissionIntent = platform === SubmissionMethod.Codeforces && request.submissionIntent === true;
           const firstVisit = await this.lockService.lock(`RemoteWatch_${account.id}_${problem.id}`, async () => {
             const now = new Date();
             const last = await this.watches.findOne({
@@ -392,7 +425,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             });
         }
       }
-    } else if (request.contestId || request.contestProblemIndex) throw new BadRequestException("PROBLEM_REQUIRED");
+    } else if (request.contestId || request.contestProblemIndex || request.submissionIntent)
+      throw new BadRequestException("PROBLEM_REQUIRED");
     const accounts = await this.accounts.findBy({ userId: user.id, ...(platform ? { platform } : {}) });
     for (const account of accounts) {
       // A refresh cannot bypass the upstream sync cooldown or reset history pagination.
@@ -404,6 +438,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           ...(request.problemId ? { activeUntil: new Date(Date.now() + this.settings.activeMinutes * 60000) } : {})
         }
       );
+      if (submissionIntent) await this.scheduleCodeforcesSubmission(account.id);
     }
     return await this.list(user);
   }
@@ -708,7 +743,10 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           }
           if (platform === SubmissionMethod.Codeforces && !account.scan) {
             const state = account.codeforcesSyncState || {};
-            if (account.cursor === "0" || (state.historyRequested && !(state.nextHistoryAt > Date.now()))) {
+            if (
+              account.cursor === "0" ||
+              (state.historyRequested && !(state.nextHistoryAt > Date.now()) && !state.submissionUntil)
+            ) {
               // Coalesce new-problem backfills without repeatedly discarding an in-flight scan.
               const codeforcesSyncState = {
                 ...state,
@@ -771,13 +809,22 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           let syncDelayMs = page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000;
           let { codeforcesSyncState } = account;
           if (platform === SubmissionMethod.Codeforces) {
+            const tracking =
+              codeforcesSyncState?.submissionUntil > Date.now() ||
+              (!!codeforcesSyncState?.submissionUntil && page.pending);
             const changed = page.more || page.pending || page.cursor !== account.cursor;
-            const idlePolls = changed ? 0 : Math.min(4, (codeforcesSyncState?.idlePolls || 0) + 1);
-            codeforcesSyncState = { ...codeforcesSyncState, idlePolls };
+            const idlePolls = changed || tracking ? 0 : Math.min(4, (codeforcesSyncState?.idlePolls || 0) + 1);
+            codeforcesSyncState = {
+              ...codeforcesSyncState,
+              idlePolls,
+              submissionUntil: tracking ? codeforcesSyncState.submissionUntil : undefined
+            };
             syncDelayMs = page.more
               ? page.scan?.importCursor !== undefined
                 ? 1000
                 : CODEFORCES_HISTORY_INTERVAL_MS
+              : tracking
+              ? CODEFORCES_SUBMIT_POLL_INTERVAL_MS
               : Math.max(syncDelayMs, Math.min(300000, 30000 * 2 ** idlePolls));
           }
           await this.accounts.update(
@@ -799,7 +846,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               nextSyncAt: new Date(Date.now() + syncDelayMs),
               // A return-to-site request arriving during this sync must survive its completion.
               catchUpRequested:
-                page.more || page.pending
+                page.more ||
+                page.pending ||
+                (platform === SubmissionMethod.Codeforces && codeforcesSyncState?.submissionUntil > Date.now())
                   ? true
                   : () => `IF(catchUpVersion = ${Number(account.catchUpVersion) || 0}, 0, 1)`
             }

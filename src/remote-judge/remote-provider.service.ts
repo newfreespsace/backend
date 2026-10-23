@@ -27,8 +27,8 @@ import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforce
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
 import { CODEFORCES_COOLDOWN_KEY, CODEFORCES_FAILURES_KEY, CODEFORCES_REQUEST_INTERVAL_MS } from "./codeforces-policy";
 
-const CODEFORCES_RESULT_PAGE_SIZE = 100;
-const CODEFORCES_SOURCE_PAGE_SIZE = 20;
+const CODEFORCES_RESULT_PAGE_SIZE = 5;
+const CODEFORCES_SOURCE_PAGE_SIZE = 5;
 const NETWORK_ERROR_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",

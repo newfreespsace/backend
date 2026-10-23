@@ -68,7 +68,7 @@ test("signed source sync uses the official SHA-512 protocol and preserves test s
     const url = new URL(address);
     assert.equal(url.origin, "https://codeforces.com");
     assert.equal(url.searchParams.get("includeSources"), "true");
-    assert.equal(url.searchParams.get("count"), "20");
+    assert.equal(url.searchParams.get("count"), "5");
     assert.equal(url.searchParams.get("apiKey"), credentials.apiKey);
     assert.ok(Math.abs(Number(url.searchParams.get("time")) - Date.now() / 1000) < 5);
     const signature = url.searchParams.get("apiSig");
@@ -106,7 +106,7 @@ test("CF sourceBase64 preserves UTF-8, BOM and line endings without restarting h
     assert.equal(params.get("includeSources"), "true");
     assert.equal(params.get("from"), "301");
     return new Response(
-      JSON.stringify({ status: "OK", result: Array.from({ length: 20 }, (_, i) => ({ ...encodedRow, id: 1000 - i })) })
+      JSON.stringify({ status: "OK", result: Array.from({ length: 5 }, (_, i) => ({ ...encodedRow, id: 1000 - i })) })
     );
   };
   const page = await providerFixture().getPage({
@@ -123,7 +123,7 @@ test("CF sourceBase64 preserves UTF-8, BOM and line endings without restarting h
   assert.equal(page.submissions[0].testset, "TESTS");
   assert.equal(page.more, true);
   assert.equal(page.cursor, "900");
-  assert.equal(page.scan.offset, 321);
+  assert.equal(page.scan.offset, 306);
 });
 
 test("malformed, invalid UTF-8 and oversized Base64 sources cannot become silently corrupted code", async () => {
@@ -179,7 +179,7 @@ test("invalid credentials fall back to public results, with a separate source re
   assert.equal(requests.length, 2);
   assert.equal(page.sourceError, "REMOTE_CF_AUTH_FAILED");
   assert.equal(page.sourceErrorDetails.stage, "body");
-  assert.match(page.sourceErrorDetails.request.url, /count=20&includeSources=true$/);
+  assert.match(page.sourceErrorDetails.request.url, /count=5&includeSources=true$/);
   assert.doesNotMatch(JSON.stringify(page.sourceErrorDetails), /testKey123|testSecret456|secret must not escape/);
   assert.equal(page.submissions[0].status, "Accepted");
   assert.equal(page.submissions[0].passedTestCount, 7);
@@ -243,7 +243,7 @@ test("recovered source authorization retains the current history checkpoint", as
   let offset;
   global.fetch = async address => {
     offset = new URL(address).searchParams.get("from");
-    return new Response(JSON.stringify({ status: "OK", result: Array.from({ length: 20 }, (_, i) => row(1000 - i)) }));
+    return new Response(JSON.stringify({ status: "OK", result: Array.from({ length: 5 }, (_, i) => row(1000 - i)) }));
   };
   const page = await providerFixture().getPage({
     ...account(),
@@ -255,7 +255,7 @@ test("recovered source authorization retains the current history checkpoint", as
   assert.equal(offset, "301");
   assert.equal(page.more, true);
   assert.equal(page.cursor, "900");
-  assert.equal(page.scan.offset, 321);
+  assert.equal(page.scan.offset, 306);
 });
 
 test("small source pages visit every submission and preserve pending checkpoints across page boundaries", async () => {
@@ -265,22 +265,22 @@ test("small source pages visit every submission and preserve pending checkpoints
   global.fetch = async address => {
     const params = new URL(address).searchParams;
     assert.equal(params.get("includeSources"), "true");
-    assert.equal(params.get("count"), "20");
+    assert.equal(params.get("count"), "5");
     const offset = Number(params.get("from"));
     offsets.push(offset);
-    return new Response(JSON.stringify({ status: "OK", result: allRows.slice(offset - 1, offset + 19) }));
+    return new Response(JSON.stringify({ status: "OK", result: allRows.slice(offset - 1, offset + 4) }));
   };
   const provider = providerFixture();
   let current = account();
   const imported = [];
   let page;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 10; i++) {
     page = await provider.getPage(current);
     imported.push(...page.submissions);
     current = { ...current, cursor: page.cursor, scan: page.scan };
-    assert.equal(page.more, i < 2);
+    assert.equal(page.more, i < 9);
   }
-  assert.deepEqual(offsets, [1, 21, 41]);
+  assert.deepEqual(offsets, [1, 6, 11, 16, 21, 26, 31, 36, 41, 46]);
   assert.deepEqual(
     imported.map(item => Number(item.id)),
     allRows.map(item => item.id)
@@ -328,7 +328,7 @@ test("network and HTTP failures retain the source checkpoint without an immediat
       const request = error.details.request;
       assert.equal(
         request.url,
-        "https://codeforces.com/api/user.status?handle=coder&from=41&count=20&includeSources=true"
+        "https://codeforces.com/api/user.status?handle=coder&from=41&count=5&includeSources=true"
       );
       assert.match(request.command, /CODEFORCES_API_SECRET/);
       assert.deepEqual(safeRemoteErrorDetails(error.details), error.details);
