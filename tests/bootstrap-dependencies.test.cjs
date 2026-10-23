@@ -9,7 +9,8 @@ const probe = String.raw`
 require("reflect-metadata");
 const assert = require("node:assert/strict");
 const path = require("node:path");
-require("tsconfig-paths").register({baseUrl:path.resolve("dist"),paths:{"@/*":["*"]}});
+// Load production output without a runtime alias hook: Nest must rewrite @/
+// imports during compilation, just as node dist/main expects.
 
 // AuthController imports version information from main. Keep that import from
 // starting the actual server, connecting to a database, or synchronizing a schema.

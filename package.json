@@ -11,6 +11,7 @@
   "scripts": {
     "prebuild": "rimraf dist",
     "build": "nest build",
+    "typecheck": "tsc --noEmit --incremental false",
     "format": "prettier --write \"src/**/*.ts\"",
     "check-style": "prettier --check \"src/**/*.ts\"",
     "test:bootstrap": "npm run build && node --test tests/bootstrap-dependencies.test.cjs",
