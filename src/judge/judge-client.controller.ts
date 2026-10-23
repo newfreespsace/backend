@@ -1,10 +1,15 @@
-import { Controller, Post, Body, Get } from "@nestjs/common";
+import { Controller, Post, Body, Get, Query } from "@nestjs/common";
 import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+
+import { Type } from "class-transformer";
+import { IsIn } from "class-validator";
 
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 
 import { JudgeClientService } from "./judge-client.service";
+import { ServerMonitorService } from "./server-monitor.service";
+import { ServerMonitorSnapshot } from "./server-monitor.types";
 
 import {
   AddJudgeClientRequestDto,
@@ -19,10 +24,26 @@ import {
   ResetJudgeClientKeyResponseError
 } from "./dto";
 
+class ServerMonitorQuery {
+  @Type(() => Number)
+  @IsIn([1, 6, 24])
+  hours = 24;
+}
+
 @ApiTags("Judge Client")
 @Controller("judgeClient")
 export class JudgeClientController {
-  constructor(private readonly judgeClientService: JudgeClientService) {}
+  constructor(
+    private readonly judgeClientService: JudgeClientService,
+    private readonly serverMonitorService: ServerMonitorService
+  ) {}
+
+  @ApiOperation({ summary: "Backend server CPU and memory history." })
+  @ApiBearerAuth()
+  @Get("serverMonitor")
+  getServerMonitor(@Query() query: ServerMonitorQuery): Promise<ServerMonitorSnapshot> {
+    return this.serverMonitorService.getSnapshot(query.hours);
+  }
 
   @ApiOperation({
     summary: "Add a new judge client."

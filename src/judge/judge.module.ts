@@ -11,6 +11,7 @@ import { JudgeGateway } from "./judge.gateway";
 import { JudgeClientController } from "./judge-client.controller";
 import { JudgeClientService } from "./judge-client.service";
 import { JudgeClientEntity } from "./judge-client.entity";
+import { ServerMonitorService } from "./server-monitor.service";
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { JudgeClientEntity } from "./judge-client.entity";
     forwardRef(() => MetricsModule)
   ],
   controllers: [JudgeClientController],
-  providers: [JudgeGateway, JudgeClientService, JudgeQueueService],
+  providers: [JudgeGateway, JudgeClientService, JudgeQueueService, ServerMonitorService],
   exports: [JudgeGateway, JudgeQueueService]
 })
 export class JudgeModule {}
