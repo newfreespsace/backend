@@ -21,6 +21,7 @@ import { parseAtcoderSubmissionDetail } from "./atcoder-detail.parser";
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
 import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
 import { safeAtcoderRequest } from "./atcoder-request-profile";
+import { CODEFORCES_USER_AGENT, safeCodeforcesRequest } from "./codeforces-request-profile";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
@@ -124,6 +125,7 @@ export interface RemotePage {
   pollAfterMs?: number;
   warning?: { error: string; details: RemoteErrorDetails };
   sourceError?: string;
+  sourceErrorDetails?: RemoteErrorDetails;
   sourceRetryAt?: Date;
 }
 
@@ -169,7 +171,7 @@ export class RemoteProviderService {
     suppliedSession?: string
   ): Promise<string> {
     const headers: Record<string, string> = {
-      "User-Agent": platform === SubmissionMethod.AtCoder ? ATCODER_USER_AGENT : "NSOJ-Result-Sync/1.0",
+      "User-Agent": platform === SubmissionMethod.AtCoder ? ATCODER_USER_AGENT : CODEFORCES_USER_AGENT,
       Accept:
         platform === SubmissionMethod.AtCoder
           ? new URL(url).pathname.endsWith("/status/json")
@@ -342,7 +344,12 @@ export class RemoteProviderService {
             durationMs: Date.now() - startedAt
           })}`
         );
-        throw new RemoteRequestError(code, { stage, reason, httpStatus });
+        throw new RemoteRequestError(code, {
+          stage,
+          reason,
+          httpStatus,
+          ...(platform === SubmissionMethod.Codeforces ? { request: safeCodeforcesRequest(url) } : {})
+        });
       });
   }
 
@@ -352,30 +359,25 @@ export class RemoteProviderService {
     credentials?: CodeforcesCredentials,
     accountId?: number
   ): Promise<T[]> {
-    let response;
+    const url = `https://codeforces.com/api/${method}?${new URLSearchParams(params)}`;
     try {
-      response = JSON.parse(
-        await this.request(
-          SubmissionMethod.Codeforces,
-          `https://codeforces.com/api/${method}?${new URLSearchParams(params)}`,
-          false,
-          credentials,
-          accountId
-        )
-      );
+      const response = JSON.parse(await this.request(SubmissionMethod.Codeforces, url, false, credentials, accountId));
+      if (response?.status !== "OK" || !Array.isArray(response.result))
+        throw new Error(
+          response?.comment === "Call limit exceeded"
+            ? "REMOTE_RATE_LIMITED"
+            : credentials
+            ? "REMOTE_CF_AUTH_FAILED"
+            : "REMOTE_API_FAILED"
+        );
+      return response.result;
     } catch (error) {
       if (error instanceof RemoteRequestError) throw error;
-      throw new Error(/^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_API_FAILED");
+      throw new RemoteSyncError(/^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_API_FAILED", {
+        stage: "body",
+        request: safeCodeforcesRequest(url)
+      });
     }
-    if (response?.status !== "OK" || !Array.isArray(response.result))
-      throw new Error(
-        response?.comment === "Call limit exceeded"
-          ? "REMOTE_RATE_LIMITED"
-          : credentials
-          ? "REMOTE_CF_AUTH_FAILED"
-          : "REMOTE_API_FAILED"
-      );
-    return response.result;
   }
 
   async verifyProfile(platform: SubmissionMethod, handle: string, code: string): Promise<boolean> {
@@ -610,6 +612,7 @@ export class RemoteProviderService {
     let pageSize = CODEFORCES_RESULT_PAGE_SIZE;
     let rows: CodeforcesSubmissionRow[];
     let sourceError: string;
+    let sourceErrorDetails: RemoteErrorDetails;
     let sourceRetryAt: Date;
     let sourceAuthorized = false;
     const sources = new Map<CodeforcesSubmissionRow, string>();
@@ -617,22 +620,15 @@ export class RemoteProviderService {
       account.codeforcesSourceEnabled &&
       (!account.codeforcesSourceRetryAt || account.codeforcesSourceRetryAt <= new Date())
     ) {
+      let sourceRequest: RemoteErrorDetails["request"];
       try {
         const credentials = await this.codeforcesCredentials.get(account.id);
         if (!credentials) throw new Error("REMOTE_CF_CREDENTIALS_UNREADABLE");
-        const readSources = () =>
-          this.codeforces<CodeforcesSubmissionRow>(
-            "user.status",
-            {
-              ...params,
-              from: params.from,
-              count: String(CODEFORCES_SOURCE_PAGE_SIZE),
-              includeSources: "true"
-            },
-            credentials,
-            account.id
-          );
-        rows = await readSources();
+        const sourceParams = { ...params, count: String(CODEFORCES_SOURCE_PAGE_SIZE), includeSources: "true" };
+        sourceRequest = safeCodeforcesRequest(
+          `https://codeforces.com/api/user.status?${new URLSearchParams(sourceParams)}`
+        );
+        rows = await this.codeforces<CodeforcesSubmissionRow>("user.status", sourceParams, credentials, account.id);
         sourceAuthorized = true;
         pageSize = CODEFORCES_SOURCE_PAGE_SIZE;
         for (const row of rows) {
@@ -664,6 +660,10 @@ export class RemoteProviderService {
         // A successful source response already contains the results. Keep it even if decoding
         // fails, rather than contacting the public API again for the same page.
         sourceError = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_CF_SOURCE_UNAVAILABLE";
+        sourceErrorDetails = safeRemoteErrorDetails({
+          ...(sourceRequest ? { stage: "parse", request: sourceRequest } : {}),
+          ...safeRemoteErrorDetails(error.details)
+        });
         sourceRetryAt = new Date(Date.now() + 300000);
       }
     } else if (account.codeforcesSourceEnabled) {
@@ -720,6 +720,7 @@ export class RemoteProviderService {
     return {
       submissions,
       sourceError,
+      sourceErrorDetails,
       sourceRetryAt,
       more,
       pending: Number.isFinite(pendingMin),

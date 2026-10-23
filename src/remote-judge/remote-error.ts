@@ -1,6 +1,7 @@
 import { safeAtcoderRequest } from "./atcoder-request-profile";
+import { safeCodeforcesRequest } from "./codeforces-request-profile";
 
-// Only structured diagnostics and allowlisted AtCoder requests are retained; never bodies or credentials.
+// Only structured diagnostics and allowlisted requests are retained; never bodies or credentials.
 export interface RemoteErrorDetails {
   stage?: string;
   reason?: string;
@@ -37,7 +38,8 @@ export function safeRemoteErrorDetails(value: unknown): RemoteErrorDetails {
   const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const details: RemoteErrorDetails = {};
   if (source.request && typeof source.request === "object") {
-    const request = safeAtcoderRequest((source.request as Record<string, unknown>).url);
+    const { url } = source.request as Record<string, unknown>;
+    const request = safeAtcoderRequest(url) || safeCodeforcesRequest(url);
     if (request) details.request = request;
   }
   if (stages.includes(source.stage as string)) details.stage = source.stage as string;

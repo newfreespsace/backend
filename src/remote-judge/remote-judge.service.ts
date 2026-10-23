@@ -578,12 +578,13 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
   private async bufferedCodeforcesPage(
     account: RemoteAccountEntity,
     scan: RemoteAccountEntity["scan"],
-    source: Pick<RemotePage, "sourceError" | "sourceRetryAt">
+    source: Pick<RemotePage, "sourceError" | "sourceRetryAt" | "sourceErrorDetails">
   ): Promise<RemotePage> {
     const page = await this.codeforcesImportBuffer.read(account.id, scan.bufferKey);
     return {
       ...page,
       sourceError: source.sourceError,
+      sourceErrorDetails: source.sourceErrorDetails,
       sourceRetryAt: source.sourceRetryAt,
       cursor: page.more ? account.cursor : scan.importCursor,
       scan: page.more ? scan : null,
@@ -808,6 +809,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               error: page.sourceError,
               at: new Date(),
               retryAt: page.sourceRetryAt,
+              details: page.sourceErrorDetails,
               kind: "Source"
             });
         } catch (error) {

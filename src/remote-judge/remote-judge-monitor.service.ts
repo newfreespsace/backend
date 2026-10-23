@@ -515,7 +515,20 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
               recent?.error === account.lastError &&
               account.lastErrorAt &&
               Math.abs(+new Date(recent.at) - +new Date(account.lastErrorAt)) < 1000;
-            return { ...account, ...(matches ? { lastErrorDetails: recent.details } : {}) };
+            const source = history.events.find(
+              event =>
+                event.account.accountId === account.accountId &&
+                event.kind === "Source" &&
+                event.error === account.sourceError &&
+                event.retryAt &&
+                account.sourceRetryAt &&
+                Math.abs(+new Date(event.retryAt) - +new Date(account.sourceRetryAt)) < 1000
+            );
+            return {
+              ...account,
+              ...(matches ? { lastErrorDetails: recent.details } : {}),
+              ...(source ? { sourceErrorDetails: source.details } : {})
+            };
           }),
           errorsTruncated: count("abnormalAccounts") > errors.length,
           recentErrors: history.events,

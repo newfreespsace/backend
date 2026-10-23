@@ -25,6 +25,7 @@ export interface RemoteMonitorAccount {
   sourceErrorAt: string | null;
   sourceRetryAt: string | null;
   lastErrorDetails?: RemoteErrorDetails;
+  sourceErrorDetails?: RemoteErrorDetails;
 }
 
 export interface RemoteMonitorError {

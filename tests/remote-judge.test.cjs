@@ -1076,6 +1076,13 @@ test("new source failures are retained once without repeating a carried-over coo
   };
   service.watches = { findBy: async () => [] };
   const sourceRetryAt = new Date(Date.now() + 300000);
+  const sourceErrorDetails = {
+    stage: "parse",
+    request: {
+      url: "https://codeforces.com/api/user.status?handle=coder&from=1&count=20&includeSources=true",
+      command: "safe command"
+    }
+  };
   service.provider.getPage = async () => ({
     submissions: [],
     cursor: "900",
@@ -1083,11 +1090,13 @@ test("new source failures are retained once without repeating a carried-over coo
     more: false,
     pending: false,
     sourceError: "REMOTE_CF_SOURCE_MISSING",
+    sourceErrorDetails,
     sourceRetryAt
   });
   await service.tick(Method.Codeforces);
   assert.equal(failures.length, 1);
   assert.equal(failures[0].kind, "Source");
+  assert.deepEqual(failures[0].details, sourceErrorDetails);
   account.nextSyncAt = new Date(0);
   await service.tick(Method.Codeforces);
   assert.equal(failures.length, 1);

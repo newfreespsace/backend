@@ -447,6 +447,52 @@ test("detailed errors survive recovery and are shared across workers without exp
   );
 });
 
+test("CF source request commands survive error history sanitization and remain admin-only", async t => {
+  const f = fixture(t);
+  await f.service.recordError(
+    { id: 7, userId: 2, handle: "remote-coder", platform: "Codeforces" },
+    { id: 2, username: "student" },
+    {
+      error: "REMOTE_UNAVAILABLE",
+      at: new Date(),
+      details: {
+        stage: "request",
+        reason: "TIMEOUT",
+        request: {
+          url: "https://codeforces.com/api/user.status?handle=coder&from=41&count=20&includeSources=true&apiKey=private-key&apiSig=private-signature&time=1",
+          command: "private command"
+        }
+      }
+    }
+  );
+  const otherWorker = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config);
+  const result = await otherWorker.getSnapshot(admin);
+  const event = result.platforms[0].admin.recentErrors[0];
+  assert.equal(event.details.reason, "TIMEOUT");
+  assert.equal(
+    event.details.request.url,
+    "https://codeforces.com/api/user.status?handle=coder&from=41&count=20&includeSources=true"
+  );
+  assert.match(event.details.request.command, /CODEFORCES_API_KEY/);
+  assert.doesNotMatch(JSON.stringify(result), /private-key|private-signature|private command/);
+  const retryAt = new Date(Date.now() + 300000);
+  await f.service.recordError(
+    { id: 7, userId: 2, handle: "remote-coder", platform: "Codeforces" },
+    { id: 2, username: "student" },
+    { kind: "Source", error: "REMOTE_CF_SOURCE_MISSING", at: new Date(), retryAt, details: event.details }
+  );
+  f.data.errors.Codeforces = [
+    account({ lastError: null, sourceError: "REMOTE_CF_SOURCE_MISSING", sourceRetryAt: retryAt })
+  ];
+  f.values.delete(CACHE);
+  const updated = await otherWorker.getSnapshot(admin);
+  assert.deepEqual(updated.platforms[0].admin.errors[0].sourceErrorDetails.request, event.details.request);
+  assert.doesNotMatch(
+    JSON.stringify(await otherWorker.getSnapshot({ id: 2 })),
+    /CODEFORCES_API_KEY|includeSources|remote-coder/
+  );
+});
+
 test("history keeps the newest 50 errors per platform and ignores expired or malformed entries", async t => {
   const f = fixture(t);
   const account = { id: 7, userId: 2, handle: "coder", platform: "AtCoder" };

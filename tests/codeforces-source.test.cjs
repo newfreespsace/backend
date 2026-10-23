@@ -1,10 +1,13 @@
 const assert = require("node:assert/strict");
 const { test, beforeEach, afterEach } = require("node:test");
 const { createHash } = require("node:crypto");
+const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 require("reflect-metadata");
 require("tsconfig-paths").register({ baseUrl: path.resolve(__dirname, "../dist"), paths: { "@/*": ["*"] } });
 const { RemoteProviderService } = require("../dist/remote-judge/remote-provider.service");
+const { safeRemoteErrorDetails } = require("../dist/remote-judge/remote-error");
+const { safeCodeforcesRequest } = require("../dist/remote-judge/codeforces-request-profile");
 const { CodeforcesCredentialsService } = require("../dist/remote-judge/codeforces-credentials.service");
 const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.service");
 const { SubmissionMethod: Method } = require("../dist/remote-judge/remote-judge.types");
@@ -175,6 +178,9 @@ test("invalid credentials fall back to public results, with a separate source re
   const page = await provider.getPage(account());
   assert.equal(requests.length, 2);
   assert.equal(page.sourceError, "REMOTE_CF_AUTH_FAILED");
+  assert.equal(page.sourceErrorDetails.stage, "body");
+  assert.match(page.sourceErrorDetails.request.url, /count=20&includeSources=true$/);
+  assert.doesNotMatch(JSON.stringify(page.sourceErrorDetails), /testKey123|testSecret456|secret must not escape/);
   assert.equal(page.submissions[0].status, "Accepted");
   assert.equal(page.submissions[0].passedTestCount, 7);
   assert.equal(page.submissions[0].sourceCode, undefined);
@@ -317,13 +323,86 @@ test("network and HTTP failures retain the source checkpoint without an immediat
       return new Response("private response", { status: Number(failure.slice(-3)) });
     };
     const current = { ...account(), scan: { offset: 41, head: 1000 }, cursor: "900" };
-    await assert.rejects(provider.getPage(current), /REMOTE_UNAVAILABLE/);
+    await assert.rejects(provider.getPage(current), error => {
+      assert.equal(error.message, "REMOTE_UNAVAILABLE");
+      const request = error.details.request;
+      assert.equal(
+        request.url,
+        "https://codeforces.com/api/user.status?handle=coder&from=41&count=20&includeSources=true"
+      );
+      assert.match(request.command, /CODEFORCES_API_SECRET/);
+      assert.deepEqual(safeRemoteErrorDetails(error.details), error.details);
+      assert.doesNotMatch(JSON.stringify(error.details), /testKey123|testSecret456|private/);
+      return true;
+    });
     assert.equal(calls, 1, failure);
     assert.equal(current.scan.offset, 41);
     assert.equal(current.cursor, "900");
     assert.equal(current.codeforcesSourceError, undefined);
     assert.doesNotMatch(diagnostics.join(" "), /private|testKey123|testSecret456|apiSig/);
   }
+});
+
+test("CF reproduction commands regenerate valid signatures locally and discard stored secrets and commands", () => {
+  const url = "https://codeforces.com/api/user.status?handle=coder&from=41&count=20&includeSources=true";
+  const details = safeRemoteErrorDetails({
+    request: {
+      url: `${url}&apiKey=private-key&time=1&apiSig=private-signature`,
+      command: "private command",
+      headers: { Authorization: "private-header" }
+    }
+  });
+  assert.equal(details.request.url, url);
+  assert.doesNotMatch(JSON.stringify(details), /private/);
+  assert.deepEqual(safeRemoteErrorDetails(details), details);
+  const replay = spawnSync("sh", ["-c", `curl() { printf '%s\\n' "$@"; }; ${details.request.command}`], {
+    encoding: "utf8",
+    env: { ...process.env, CODEFORCES_API_KEY: credentials.apiKey, CODEFORCES_API_SECRET: credentials.apiSecret }
+  });
+  assert.equal(replay.status, 0, replay.stderr);
+  const args = replay.stdout.trim().split("\n");
+  assert.deepEqual(args.slice(0, -1), [
+    "--request",
+    "GET",
+    "--max-time",
+    "20",
+    "--user-agent",
+    "NSOJ-Result-Sync/1.0",
+    "--header",
+    "Accept: application/json,text/html"
+  ]);
+  const signed = new URL(args.at(-1));
+  const signature = signed.searchParams.get("apiSig");
+  signed.searchParams.delete("apiSig");
+  signed.searchParams.sort();
+  assert.equal(
+    signature.slice(6),
+    createHash("sha512")
+      .update(`${signature.slice(0, 6)}/user.status?${signed.searchParams}#${credentials.apiSecret}`)
+      .digest("hex")
+  );
+  assert.equal(signed.searchParams.get("apiKey"), credentials.apiKey);
+  assert.ok(Math.abs(Number(signed.searchParams.get("time")) - Date.now() / 1000) < 5);
+  assert.equal(signed.searchParams.get("from"), "41");
+  assert.equal(signed.searchParams.get("includeSources"), "true");
+  const unsigned = safeCodeforcesRequest(url.replace("&includeSources=true", ""));
+  assert.doesNotMatch(unsigned.command, /CODEFORCES_API|node -e/);
+  assert.match(unsigned.command, /count=20/);
+});
+
+test("CF request diagnostics reject arbitrary endpoints, duplicate parameters and shell injection", () => {
+  const url = "https://codeforces.com/api/user.status?handle=coder&from=1&count=20&includeSources=true";
+  for (const unsafe of [
+    url.replace("codeforces.com", "example.com"),
+    url.replace("https://", "https://user:private@"),
+    url.replace("user.status", "user.friends"),
+    url.replace("coder&", "coder%27%24%28echo%20private%29&"),
+    url.replace("from=1", "from=0"),
+    `${url}&handle=other`,
+    `${url}&apiSecret=private`,
+    `${url}#private`
+  ])
+    assert.deepEqual(safeRemoteErrorDetails({ request: { url: unsafe, command: "private" } }), {});
 });
 
 test("lock, Redis and TLS failures have safe diagnostics and do not add requests", async () => {
