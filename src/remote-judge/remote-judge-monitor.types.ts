@@ -42,7 +42,7 @@ export interface RemotePlatformMonitor {
   state: RemoteMonitorState;
   lastSyncedAt: string | null;
   lastHeartbeatAt: string | null;
-  sourceSupport: "PersonalKey" | "SiteSession" | "Unavailable";
+  sourceSupport: "PersonalKey" | "PersonalSession" | "Unavailable";
   admin?: {
     boundAccounts: number;
     activeAccounts: number;
@@ -61,7 +61,6 @@ export interface RemotePlatformMonitor {
     errorsTruncated: boolean;
     recentErrors: RemoteMonitorError[];
     errorHistoryAvailable: boolean;
-    session?: { configured: boolean; status: string; checkedAt: string | null; error: string | null };
   };
 }
 

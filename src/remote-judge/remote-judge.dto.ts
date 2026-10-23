@@ -46,6 +46,17 @@ export class SetCodeforcesCredentialsDto {
   clear?: boolean;
 }
 
+export class SetAtcoderSessionDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(8206)
+  atcoderSession?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  clear?: boolean;
+}
+
 export class SetSubmissionMethodDto {
   @IsOptional()
   @IsBoolean()

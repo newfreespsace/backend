@@ -8,7 +8,6 @@ import { ProblemModule } from "@/problem/problem.module";
 import { SubmissionModule } from "@/submission/submission.module";
 import { ContestModule } from "@/contest/contest.module";
 import { ConfigModule } from "@/config/config.module";
-import { SiteSettingModule } from "@/site-setting/site-setting.module";
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteWatchEntity } from "./remote-watch.entity";
@@ -20,6 +19,7 @@ import { CodeforcesImportBufferEntity } from "./codeforces-import-buffer.entity"
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import { AtcoderSourceService } from "./atcoder-source.service";
+import { AtcoderSessionService } from "./atcoder-session.service";
 
 @Module({
   imports: [
@@ -30,7 +30,6 @@ import { AtcoderSourceService } from "./atcoder-source.service";
     SubmissionModule,
     ContestModule,
     ConfigModule,
-    SiteSettingModule,
     AuditModule
   ],
   providers: [
@@ -39,7 +38,8 @@ import { AtcoderSourceService } from "./atcoder-source.service";
     CodeforcesCredentialsService,
     CodeforcesImportBufferService,
     RemoteJudgeMonitorService,
-    AtcoderSourceService
+    AtcoderSourceService,
+    AtcoderSessionService
   ],
   controllers: [RemoteJudgeController]
 })

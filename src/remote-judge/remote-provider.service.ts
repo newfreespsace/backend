@@ -1,22 +1,25 @@
 import { createHash, randomBytes } from "crypto";
 
-import { forwardRef, Inject, Injectable } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 
 import * as cheerio from "cheerio";
 
 import { RedisService } from "@/redis/redis.service";
 import { LockService } from "@/redis/lock.service";
 import { delay } from "@/common/delay";
-import { SiteSettingService } from "@/site-setting/site-setting.service";
+
 import { logger } from "@/logger";
 
 import { SubmissionStatus } from "@/submission/submission-status.enum";
+
+import { AtcoderSessionService } from "./atcoder-session.service";
+import { parseAtcoderStatuses } from "./atcoder-status.parser";
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { parseAtcoderSubmissionPage } from "./atcoder-submission.parser";
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
-import { ATCODER_USER_AGENT } from "./atcoder-request";
+import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
@@ -66,11 +69,22 @@ export interface AtcoderLiveTarget {
   since: number;
 }
 
+/** Internal credentials scoped to one worker turn; never persist or return them through an API. */
+export interface AtcoderSessionContext {
+  readonly accountId: number;
+  readonly session?: string;
+  readonly cooldownMs: number;
+}
+
 interface AtcoderLiveScan {
   page: number;
   head: number;
   boundary: number;
   pendingIds: string[];
+  pendingRows?: RemoteSubmission[];
+  nextDiscoveryAt?: number;
+  statusOffset?: number;
+  statusRetryAt?: number;
 }
 
 interface CodeforcesSubmissionRow {
@@ -120,6 +134,8 @@ export interface RemotePage {
   more: boolean;
   pending: boolean;
   acknowledge?: () => Promise<void>;
+  pollAfterMs?: number;
+  warning?: { error: string; details: RemoteErrorDetails };
   sourceError?: string;
   sourceRetryAt?: Date;
 }
@@ -129,13 +145,28 @@ export class RemoteProviderService {
   constructor(
     private readonly redisService: RedisService,
     private readonly lockService: LockService,
-    @Inject(forwardRef(() => SiteSettingService)) private readonly siteSettingService: SiteSettingService,
+    private readonly atcoderSessions: AtcoderSessionService,
     private readonly codeforcesCredentials: CodeforcesCredentialsService
   ) {}
 
-  // Shared Redis limits cover sync workers and binding requests across all backend processes.
-  async hasAtcoderDirectSession(): Promise<boolean> {
-    return !!(await this.siteSettingService.getAtcoderSession());
+  private atcoderCooldownKey(session: string): string {
+    return `remote-atcoder-cooldown:${createHash("sha256").update(session).digest("hex")}`;
+  }
+
+  // Load once per worker turn. Requests still recheck shared cooldowns under the rate-limit lock.
+  async getAtcoderSessionContext(accountId: number): Promise<AtcoderSessionContext> {
+    const session = await this.atcoderSessions.get(accountId);
+    const cooldownMs = session
+      ? Math.max(0, await this.redisService.getSharedClient().pttl(this.atcoderCooldownKey(session)))
+      : 0;
+    return { accountId, session, cooldownMs };
+  }
+
+  private async requireAtcoderSession(accountId: number, context?: AtcoderSessionContext): Promise<string> {
+    if (context && context.accountId !== accountId) throw new Error("REMOTE_AUTH_REQUIRED");
+    const session = context ? context.session : await this.atcoderSessions.get(accountId);
+    if (!session) throw new Error("REMOTE_AUTH_REQUIRED");
+    return session;
   }
 
   private async request(
@@ -143,14 +174,21 @@ export class RemoteProviderService {
     url: string,
     authenticated?: boolean,
     credentials?: CodeforcesCredentials,
-    accountId?: number
+    accountId?: number,
+    suppliedSession?: string
   ): Promise<string> {
     const headers: Record<string, string> = {
       "User-Agent": platform === SubmissionMethod.AtCoder ? ATCODER_USER_AGENT : "NSOJ-Result-Sync/1.0",
-      Accept: platform === SubmissionMethod.AtCoder ? "text/html" : "application/json,text/html"
+      Accept:
+        platform === SubmissionMethod.AtCoder
+          ? new URL(url).pathname.endsWith("/status/json")
+            ? "application/json"
+            : "text/html"
+          : "application/json,text/html"
     };
+    let session: string;
     if (authenticated) {
-      const session = await this.siteSettingService.getAtcoderSession();
+      session = suppliedSession;
       if (!session || /[;\s]/.test(session)) throw new Error("REMOTE_AUTH_REQUIRED");
       if (platform !== SubmissionMethod.AtCoder || new URL(url).origin !== "https://atcoder.jp")
         throw new Error("REMOTE_AUTH_REQUIRED");
@@ -168,57 +206,86 @@ export class RemoteProviderService {
         lockWaitMs = Date.now() - startedAt;
         stage = "rate_limit";
         const redis = this.redisService.getSharedClient();
-        const key = `remote-provider-rate:${platform}`;
-        const wait = await redis.pttl(key);
-        if (wait > 0) {
-          rateWaitMs = wait;
-          await delay(wait);
-        }
-        await redis.set(key, "1", "PX", platform === SubmissionMethod.Codeforces ? 2200 : 1500);
-        let address = url;
-        if (credentials) {
-          const target = new URL(url);
+        const cooldownKey = session ? this.atcoderCooldownKey(session) : null;
+        if (cooldownKey && (await redis.pttl(cooldownKey)) > 0)
+          throw new RemoteSyncError("REMOTE_COOLDOWN", { stage, reason: "SHARED_COOLDOWN" });
+        let retryAfterMs = 0;
+        try {
+          const key = `remote-provider-rate:${platform}`;
+          const wait = await redis.pttl(key);
+          if (wait > 0) {
+            rateWaitMs = wait;
+            await delay(wait);
+          }
+          await redis.set(key, "1", "PX", platform === SubmissionMethod.Codeforces ? 2200 : 1500);
+          let address = url;
+          if (credentials) {
+            const target = new URL(url);
+            if (
+              platform !== SubmissionMethod.Codeforces ||
+              target.origin !== "https://codeforces.com" ||
+              target.pathname !== "/api/user.status"
+            )
+              throw new Error("REMOTE_CF_AUTH_FAILED");
+            target.searchParams.set("apiKey", credentials.apiKey);
+            target.searchParams.set("time", String(Math.floor(Date.now() / 1000)));
+            target.searchParams.sort();
+            const prefix = randomBytes(3).toString("hex");
+            const signature = createHash("sha512")
+              .update(`${prefix}/user.status?${target.searchParams}#${credentials.apiSecret}`)
+              .digest("hex");
+            target.searchParams.set("apiSig", prefix + signature);
+            address = target.toString();
+          }
+          stage = "request";
+          const response = await fetch(address, {
+            redirect: "manual",
+            signal: AbortSignal.timeout(20000),
+            headers
+          });
+          httpStatus = response.status;
+          if (platform === SubmissionMethod.AtCoder) {
+            const retryAfter = response.headers.get("retry-after");
+            if (retryAfter) {
+              const seconds = /^\d+$/.test(retryAfter)
+                ? Number(retryAfter)
+                : (Date.parse(retryAfter) - Date.now()) / 1000;
+              if (Number.isFinite(seconds)) retryAfterMs = Math.min(300000, Math.max(0, seconds * 1000));
+            }
+            if (response.headers.get("cf-mitigated") === "challenge")
+              throw new RemoteSyncError("REMOTE_VERIFICATION_REQUIRED", { stage, reason: "CHALLENGE_PAGE" });
+          }
+          if (authenticated && response.status >= 300 && response.status < 400) {
+            const location = new URL(response.headers.get("location") || "/", url);
+            if (location.origin === "https://atcoder.jp" && location.pathname === "/login")
+              throw new Error("REMOTE_AUTH_REQUIRED");
+          }
+          if (!response.ok)
+            throw new Error(
+              response.status === 429
+                ? "REMOTE_RATE_LIMITED"
+                : response.status === 403
+                ? "REMOTE_ACCESS_DENIED"
+                : "REMOTE_UNAVAILABLE"
+            );
+          stage = "body";
+          const text = await response.text();
+          if (text.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
+          if (authenticated && !new URL(url).pathname.endsWith("/status/json")) assertAtcoderPage(cheerio.load(text));
+          else if (authenticated && /^\s*</.test(text)) assertAtcoderPage(cheerio.load(text));
+          stage = "unlock";
+          return text;
+        } catch (error) {
+          // Only explicit shared failures pause result and source requests together. A source-only
+          // 403 or an unrecognized contest page must not suspend all users. Set this under the lock
+          // so already queued requests recheck the pause before contacting AtCoder.
           if (
-            platform !== SubmissionMethod.Codeforces ||
-            target.origin !== "https://codeforces.com" ||
-            target.pathname !== "/api/user.status"
+            cooldownKey &&
+            ["REMOTE_AUTH_REQUIRED", "REMOTE_VERIFICATION_REQUIRED", "REMOTE_RATE_LIMITED"].includes(error.message)
           )
-            throw new Error("REMOTE_CF_AUTH_FAILED");
-          target.searchParams.set("apiKey", credentials.apiKey);
-          target.searchParams.set("time", String(Math.floor(Date.now() / 1000)));
-          target.searchParams.sort();
-          const prefix = randomBytes(3).toString("hex");
-          const signature = createHash("sha512")
-            .update(`${prefix}/user.status?${target.searchParams}#${credentials.apiSecret}`)
-            .digest("hex");
-          target.searchParams.set("apiSig", prefix + signature);
-          address = target.toString();
+            await redis.set(cooldownKey, "1", "PX", Math.max(60000, retryAfterMs), "NX");
+          throw error;
         }
-        stage = "request";
-        const response = await fetch(address, {
-          redirect: "manual",
-          signal: AbortSignal.timeout(20000),
-          headers
-        });
-        httpStatus = response.status;
-        if (authenticated && response.status >= 300 && response.status < 400) {
-          const location = new URL(response.headers.get("location") || "/", url);
-          if (location.origin === "https://atcoder.jp" && location.pathname === "/login")
-            throw new Error("REMOTE_AUTH_REQUIRED");
-        }
-        if (!response.ok)
-          throw new Error(
-            response.status === 429
-              ? "REMOTE_RATE_LIMITED"
-              : response.status === 403
-              ? "REMOTE_ACCESS_DENIED"
-              : "REMOTE_UNAVAILABLE"
-          );
-        stage = "body";
-        const text = await response.text();
-        if (text.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
-        stage = "unlock";
-        return text;
       })
       .catch(error => {
         const code = /^REMOTE_[A-Z_]+$/.test(error?.message) ? error.message : "REMOTE_UNAVAILABLE";
@@ -227,7 +294,8 @@ export class RemoteProviderService {
         const timedOut =
           error?.name === "TimeoutError" || networkCode === "ETIMEDOUT" || networkCode?.endsWith("_TIMEOUT");
         const reason =
-          code !== "REMOTE_UNAVAILABLE"
+          safeRemoteErrorDetails(error.details).reason ||
+          (code !== "REMOTE_UNAVAILABLE"
             ? code
             : stage === "lock" || stage === "unlock"
             ? "LOCK_FAILED"
@@ -239,7 +307,7 @@ export class RemoteProviderService {
             ? "REDIRECT"
             : httpStatus >= 400
             ? "HTTP_ERROR"
-            : "NETWORK_ERROR";
+            : "NETWORK_ERROR");
         // Only fixed fields and allowlisted codes: never log signed URLs, headers, bodies or raw errors.
         logger.warn(
           `Remote request failed: ${JSON.stringify({
@@ -308,49 +376,70 @@ export class RemoteProviderService {
         users[0].organization?.trim() === code
       );
     }
-    const html = await this.request(
-      SubmissionMethod.AtCoder,
-      `https://atcoder.jp/users/${encodeURIComponent(handle)}?lang=en`
-    );
-    const $ = cheerio.load(html);
-    return $("tr")
-      .toArray()
-      .some(row => $(row).find("th").text().trim() === "Affiliation" && $(row).find("td").text().trim() === code);
+    throw new Error("REMOTE_ATCODER_SESSION_REQUIRED");
   }
 
-  async getPage(account: RemoteAccountEntity, liveTargets: AtcoderLiveTarget[] = []): Promise<RemotePage> {
+  async getPage(
+    account: RemoteAccountEntity,
+    liveTargets?: AtcoderLiveTarget[],
+    context?: AtcoderSessionContext
+  ): Promise<RemotePage> {
     if (account.platform === SubmissionMethod.Codeforces) return await this.codeforcesPage(account);
-    const session = await this.siteSettingService.getAtcoderSession();
-    if (!session) throw new Error("REMOTE_AUTH_REQUIRED");
-    let live: { submissions: RemoteSubmission[]; pending: boolean; acknowledge?: () => Promise<void> };
-    try {
-      live = liveTargets.length
-        ? await this.atcoderLivePage(account, liveTargets)
-        : { submissions: [], pending: false };
-    } catch (error) {
-      await this.reportAtcoderSessionCheck(session, error.message);
-      throw error;
-    }
-    if (liveTargets.length) await this.reportAtcoderSessionCheck(session);
+    const session = await this.requireAtcoderSession(account.id, context);
+    const live = liveTargets?.length
+      ? await this.atcoderLivePage(account, liveTargets, session)
+      : { submissions: [], pending: false, pollAfterMs: undefined, acknowledge: undefined, warning: undefined };
     return {
-      submissions: [...new Map(live.submissions.map(row => [row.id, row])).values()],
+      submissions: [...new Map(live.submissions.map(row => [row.id, row])).values()].sort(
+        (a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id)
+      ),
       cursor: account.cursor,
       scan: null,
       more: false,
       pending: live.pending,
-      acknowledge: live.acknowledge
+      pollAfterMs: live.pollAfterMs,
+      acknowledge: live.acknowledge,
+      warning: live.warning
     };
   }
 
-  private async reportAtcoderSessionCheck(session: string, error?: string): Promise<void> {
+  async identifyAtcoderSession(session: string, accountId?: number): Promise<string> {
+    const html = await this.request(
+      SubmissionMethod.AtCoder,
+      "https://atcoder.jp/settings",
+      true,
+      undefined,
+      accountId,
+      session
+    );
+    const $ = cheerio.load(html);
+    const match = html.match(/(?:var|let|const)\s+userScreenName\s*=\s*("(?:[^"\\]|\\.)*")\s*;/);
+    let handle: string;
     try {
-      await this.siteSettingService.recordAtcoderSessionCheck(session, error);
+      handle = match ? JSON.parse(match[1]) : "";
     } catch {
-      logger.warn("Unable to save AtCoder session check status");
+      throw new Error("REMOTE_SESSION_IDENTITY_MISMATCH");
     }
+    const logout = $("a[href], form[action]")
+      .toArray()
+      .some(element => {
+        try {
+          const target = new URL($(element).attr("href") || $(element).attr("action"), "https://atcoder.jp");
+          return target.origin === "https://atcoder.jp" && target.pathname === "/logout";
+        } catch {
+          return false;
+        }
+      });
+    if (typeof handle !== "string" || !/^[a-zA-Z0-9_.-]{3,64}$/.test(handle) || !logout)
+      throw new Error("REMOTE_AUTH_REQUIRED");
+    return handle;
   }
 
-  async getAtcoderSource(expected: AtcoderSourceIdentity): Promise<string> {
+  async getAtcoderSource(
+    expected: AtcoderSourceIdentity,
+    accountId: number,
+    context?: AtcoderSessionContext
+  ): Promise<string> {
     if (
       !/^[1-9]\d*$/.test(expected.id) ||
       !Number.isSafeInteger(Number(expected.id)) ||
@@ -359,26 +448,19 @@ export class RemoteProviderService {
       !/^[a-zA-Z0-9_.-]{1,64}$/.test(expected.handle)
     )
       throw new Error("REMOTE_SOURCE_IDENTITY_MISMATCH");
-    const session = await this.siteSettingService.getAtcoderSession();
-    if (!session) throw new Error("REMOTE_AUTH_REQUIRED");
-    try {
-      const html = await this.request(
-        SubmissionMethod.AtCoder,
-        `https://atcoder.jp/contests/${expected.contestId}/submissions/${expected.id}`,
-        true
-      );
-      const source = parseAtcoderSource(html, expected);
-      await this.reportAtcoderSessionCheck(session);
-      return source;
-    } catch (error) {
-      // Source-specific failures must not invalidate an otherwise usable result session.
-      if (["REMOTE_AUTH_REQUIRED", "REMOTE_SESSION_UNREADABLE"].includes(error.message))
-        await this.reportAtcoderSessionCheck(session, error.message);
-      throw error;
-    }
+    const session = await this.requireAtcoderSession(accountId, context);
+    const html = await this.request(
+      SubmissionMethod.AtCoder,
+      `https://atcoder.jp/contests/${expected.contestId}/submissions/${expected.id}`,
+      true,
+      undefined,
+      accountId,
+      session
+    );
+    return parseAtcoderSource(html, expected);
   }
 
-  private async atcoderLivePage(account: RemoteAccountEntity, targets: AtcoderLiveTarget[]) {
+  private async atcoderLivePage(account: RemoteAccountEntity, targets: AtcoderLiveTarget[], session: string) {
     const redis = this.redisService.getSharedClient();
     const ordered = [...targets].sort((a, b) => a.contestId.localeCompare(b.contestId));
     const rotationKey = `remote-atcoder-rotation:${account.id}`;
@@ -398,7 +480,10 @@ export class RemoteProviderService {
               lang: "en",
               page: String(page)
             })}`,
-            true
+            true,
+            undefined,
+            account.id,
+            session
           ),
           target.contestId,
           account.handle,
@@ -416,49 +501,111 @@ export class RemoteProviderService {
         throw error;
       }
     };
-    const first = await readPage(1);
-    const rows = [...first.submissions];
-    const pending = new Set(scan.pendingIds);
-    const updatePending = (submissions: RemoteSubmission[]) => {
-      for (const row of submissions) {
-        if (row.status === SubmissionStatus.Pending) pending.add(row.id);
+    const rows: RemoteSubmission[] = [];
+    const pending = new Map((scan.pendingRows || []).map(row => [row.id, row]));
+    const unresolved = new Set(scan.pendingIds.filter(id => !pending.has(id)));
+    let more = scan.page > 2;
+    const updatePending = (items: RemoteSubmission[]) => {
+      for (const row of items) {
+        unresolved.delete(row.id);
+        if (row.status === SubmissionStatus.Pending) pending.set(row.id, row);
         else pending.delete(row.id);
       }
     };
-    updatePending(rows);
-    scan.head = Math.max(scan.head, ...rows.map(row => Number(row.id)));
-    const needsOlder = (result: typeof first) =>
-      result.more &&
-      result.submissions.length > 0 &&
-      (scan.boundary || pending.size
-        ? Math.min(...result.submissions.map(row => Number(row.id))) >
-          Math.min(scan.boundary || Infinity, ...[...pending].map(Number))
-        : Math.min(...result.submissions.map(row => row.submittedAt)) >= target.since);
-    let more = needsOlder(first);
-    // Always refresh page one; at most one additional page per turn bounds work
-    // without losing bursts of submissions or old pending judgements.
-    if (more) {
-      const older = await readPage(scan.page);
-      rows.push(...older.submissions);
-      updatePending(older.submissions);
-      more = needsOlder(older);
-      scan.page++;
+    // Refresh metadata at a lower frequency, while known WJ submissions use the small status response.
+    if (!scan.nextDiscoveryAt || scan.nextDiscoveryAt <= Date.now() || more || unresolved.size > 0) {
+      const first = await readPage(1);
+      rows.push(...first.submissions);
+      updatePending(rows);
+      scan.head = Math.max(scan.head, ...rows.map(row => Number(row.id)));
+      const needsOlder = (result: typeof first) =>
+        result.more &&
+        result.submissions.length > 0 &&
+        (scan.boundary || pending.size || unresolved.size
+          ? Math.min(...result.submissions.map(row => Number(row.id))) >
+            Math.min(scan.boundary || Infinity, ...[...pending.keys(), ...unresolved].map(Number))
+          : Math.min(...result.submissions.map(row => row.submittedAt)) >= target.since);
+      more = needsOlder(first);
+      if (more) {
+        const older = await readPage(scan.page);
+        rows.push(...older.submissions);
+        updatePending(older.submissions);
+        more = needsOlder(older);
+        scan.page++;
+      }
+      if (!more) {
+        scan.boundary = scan.head;
+        scan.head = 0;
+        scan.page = 2;
+      }
+      scan.nextDiscoveryAt = Date.now() + 30000;
     }
-    if (!more) {
-      scan.boundary = scan.head;
-      scan.head = 0;
-      scan.page = 2;
+    const known = [...pending.values()];
+    let warning: RemotePage["warning"];
+    if (known.length && !(scan.statusRetryAt > Date.now())) {
+      const offset = (scan.statusOffset || 0) % known.length;
+      const batch = [...known.slice(offset), ...known.slice(0, offset)].slice(0, 20);
+      const params = new URLSearchParams();
+      for (const row of batch) params.append("sids[]", row.id);
+      try {
+        const body = await this.request(
+          SubmissionMethod.AtCoder,
+          `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json?${params}`,
+          true,
+          undefined,
+          account.id,
+          session
+        );
+        const updates = parseAtcoderStatuses(body, batch);
+        rows.push(...updates);
+        updatePending(updates);
+        // Missing IDs remain pending; reconcile them using a fresh list rather than guessing a result.
+        if (updates.length < batch.length) scan.nextDiscoveryAt = Math.min(scan.nextDiscoveryAt, Date.now() + 15000);
+        scan.statusOffset = offset + batch.length;
+      } catch (error) {
+        const code = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_ATCODER_STATUS_FAILED";
+        const safe = safeRemoteErrorDetails(error.details);
+        const details = {
+          ...safe,
+          ...(safe.stage === "parse" ? { httpStatus: 200 } : {}),
+          contestId: target.contestId
+        };
+        error.details = details;
+        if (
+          [
+            "REMOTE_AUTH_REQUIRED",
+            "REMOTE_SESSION_UNREADABLE",
+            "REMOTE_COOLDOWN",
+            "REMOTE_RATE_LIMITED",
+            "REMOTE_VERIFICATION_REQUIRED"
+          ].includes(code)
+        )
+          throw error;
+        // A changed or unavailable status endpoint must not discard a valid list result.
+        // Keep errors visible and reconcile through the original list during a bounded API cooldown.
+        warning = { error: code, details };
+        scan.statusRetryAt = Date.now() + 60000;
+        if (!rows.length) {
+          const fallback = await readPage(1);
+          rows.push(...fallback.submissions);
+          updatePending(fallback.submissions);
+        }
+        scan.nextDiscoveryAt = Date.now() + 15000;
+      }
     }
-    scan.pendingIds = [...pending];
+    scan.pendingRows = [...pending.values()];
+    scan.pendingIds = [...pending.keys(), ...unresolved];
     const pendingKey = `remote-atcoder-pending:${account.id}`;
     const pendingContests = new Set<string>(JSON.parse((await redis.get(pendingKey)) || "[]"));
     for (const contestId of pendingContests)
       if (!ordered.some(item => item.contestId === contestId)) pendingContests.delete(contestId);
-    if (more || pending.size > 0) pendingContests.add(target.contestId);
+    if (more || pending.size > 0 || unresolved.size > 0) pendingContests.add(target.contestId);
     else pendingContests.delete(target.contestId);
     return {
       submissions: rows,
       pending: pendingContests.size > 0,
+      pollAfterMs: pendingContests.size > 0 ? (scan.statusRetryAt > Date.now() ? 15000 : 5000) : undefined,
+      warning,
       // Advance only after every imported result has been saved successfully.
       acknowledge: async () => {
         await redis.set(key, JSON.stringify(scan), "EX", 86400);

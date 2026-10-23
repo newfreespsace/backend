@@ -39,12 +39,14 @@ test("source parsing verifies the submission, task and author and preserves enti
 test("production source fetch uses the validated UA, dedicated session and original-site limiter", async t => {
   const provider = Object.create(RemoteProviderService.prototype);
   const calls = [],
-    checks = [],
     rate = [],
     locks = [];
-  provider.siteSettingService = {
-    getAtcoderSession: async () => "private-session",
-    recordAtcoderSessionCheck: async (_, error) => checks.push(error)
+  let credentialReads = 0;
+  provider.atcoderSessions = {
+    get: async () => {
+      credentialReads++;
+      return "private-session";
+    }
   };
   provider.redisService = { getSharedClient: () => ({ pttl: async () => 0, set: async (...args) => rate.push(args) }) };
   provider.lockService = {
@@ -57,7 +59,9 @@ test("production source fetch uses the validated UA, dedicated session and origi
     calls.push({ url, options });
     return new Response(page());
   });
-  assert.equal(await provider.getAtcoderSource(identity), source);
+  const context = await provider.getAtcoderSessionContext(1);
+  assert.equal(await provider.getAtcoderSource(identity, 1, context), source);
+  assert.equal(credentialReads, 1);
   assert.equal(calls[0].url, "https://atcoder.jp/contests/abc001/submissions/12345");
   assert.match(calls[0].options.headers["User-Agent"], /^Mozilla\//);
   assert.equal(calls[0].options.headers.Cookie, "REVEL_SESSION=private-session");
@@ -65,26 +69,22 @@ test("production source fetch uses the validated UA, dedicated session and origi
   assert.equal(calls[0].options.redirect, "manual");
   assert.equal(rate[0][3], 1500);
   assert.equal(locks[0], "RemoteProvider_AtCoder");
-  assert.deepEqual(checks, [undefined]);
   calls.length = 0;
-  await assert.rejects(provider.getAtcoderSource({ ...identity, contestId: "../evil" }), /IDENTITY_MISMATCH/);
+  await assert.rejects(provider.getAtcoderSource({ ...identity, contestId: "../evil" }, 1), /IDENTITY_MISMATCH/);
   assert.equal(calls.length, 0);
 });
 
-test("source access errors stay separate from result session health; only explicit authentication failure expires it", async () => {
+test("source access errors propagate their original error codes", async () => {
   const provider = Object.create(RemoteProviderService.prototype);
-  const checks = [];
-  provider.siteSettingService = {
-    getAtcoderSession: async () => "private-session",
-    recordAtcoderSessionCheck: async (_, error) => checks.push(error)
+  provider.atcoderSessions = {
+    get: async () => "private-session"
   };
   for (const code of ["REMOTE_ACCESS_DENIED", "REMOTE_RATE_LIMITED", "REMOTE_AUTH_REQUIRED"]) {
     provider.request = async () => {
       throw new Error(code);
     };
-    await assert.rejects(provider.getAtcoderSource(identity), new RegExp(code));
+    await assert.rejects(provider.getAtcoderSource(identity, 1), new RegExp(code));
   }
-  assert.deepEqual(checks, ["REMOTE_AUTH_REQUIRED"]);
 });
 
 function fixture() {
@@ -132,7 +132,11 @@ function fixture() {
         addOrderBy: () => builder,
         take: () => builder,
         getMany: async () => state.discover,
-        getOne: async () => state.row
+        getOne: async () =>
+          state.row.remote.sourceSync?.nextAttemptAt &&
+          Date.parse(state.row.remote.sourceSync.nextAttemptAt) > Date.now()
+            ? null
+            : state.row
       };
       return builder;
     }
@@ -167,10 +171,17 @@ function fixture() {
   };
   service.locks = { lock: async (_, fn) => fn() };
   service.provider = {
-    hasAtcoderDirectSession: async () => state.session,
-    getAtcoderSource: async expected => {
+    getAtcoderSessionContext: async accountId => ({
+      accountId,
+      session: state.session ? "private-session" : undefined,
+      cooldownMs: state.cooldown || 0
+    }),
+    getAtcoderSource: async (expected, accountId, context) => {
       state.fetches++;
       assert.deepEqual(expected, identity);
+      assert.equal(accountId, state.account.id);
+      assert.equal(context.accountId, accountId);
+      assert.equal(context.session, "private-session");
       if (state.error) throw new Error(state.error);
       return source;
     }
@@ -203,6 +214,7 @@ test("source jobs resume from persisted rows, yield to grades, pause without a s
   await service.tick();
   assert.equal(state.fetches, 0);
   state.session = true;
+  state.row.remote.sourceSync.nextAttemptAt = new Date(0).toISOString();
   state.due = 1;
   await service.tick();
   assert.equal(state.fetches, 0);
@@ -257,7 +269,6 @@ test("concurrent workers share one claim and source rate limits pause other jobs
   limited.state.error = "REMOTE_RATE_LIMITED";
   await limited.service.tick();
   assert.equal(limited.state.fetches, 1);
-  limited.state.row.remote.sourceSync.nextAttemptAt = new Date(0).toISOString();
   await limited.service.tick();
   assert.equal(limited.state.fetches, 1, "shared cooldown must cover other due source jobs too");
 });
@@ -326,4 +337,19 @@ test("legacy discovery merges queue state into the latest remote JSON without re
   await service.discover();
   assert.equal(state.updates.length, 1);
   assert.deepEqual(state.row, before);
+});
+
+test("shared result cooldown pauses source work without incrementing submission failures", async () => {
+  const { service, state } = fixture();
+  state.cooldown = 60000;
+  await service.tick();
+  assert.equal(state.fetches, 0);
+  state.cooldown = 0;
+  state.row.remote.sourceSync.nextAttemptAt = new Date(0).toISOString();
+  state.error = "REMOTE_COOLDOWN";
+  await service.tick();
+  assert.notEqual(state.row.remote.sourceSync?.status, "Failed");
+  state.error = null;
+  await service.tick();
+  assert.equal(state.saves, 1);
 });

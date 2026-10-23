@@ -8,7 +8,6 @@ import { DataSource, Like } from "typeorm";
 
 import { ConfigService } from "@/config/config.service";
 import { RedisService } from "@/redis/redis.service";
-import { SiteSettingService } from "@/site-setting/site-setting.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { UserEntity } from "@/user/user.entity";
@@ -31,7 +30,8 @@ const CACHE_MS = 10000;
 const HEARTBEAT_MS = 45000;
 const ERROR_HISTORY_LIMIT = 50;
 const ERROR_HISTORY_SECONDS = 7 * 86400;
-const WORK = "(account.activeUntil > :now OR account.catchUpRequested = 1)";
+const WORK =
+  "(account.activeUntil > :now OR account.catchUpRequested = 1) AND (account.platform != 'AtCoder' OR account.atcoderSessionConfigured = 1)";
 const DUE = `${WORK} AND account.nextSyncAt <= :now`;
 const HISTORY =
   "account.platform = :cf AND (account.scan IS NOT NULL OR (account.cursor = '0' AND account.catchUpRequested = 1))";
@@ -81,8 +81,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
   constructor(
     @InjectDataSource() private readonly connection: DataSource,
     private readonly redisService: RedisService,
-    private readonly configService: ConfigService,
-    private readonly siteSettings: SiteSettingService
+    private readonly configService: ConfigService
   ) {}
 
   onModuleInit(): void {
@@ -355,6 +354,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       .createQueryBuilder("account")
       .select("account.platform", "platform")
       .addSelect("COUNT(*)", "boundAccounts")
+      .addSelect("SUM(CASE WHEN account.atcoderSessionConfigured = 1 THEN 1 ELSE 0 END)", "sessionAccounts")
       .addSelect(`SUM(CASE WHEN ${WORK} THEN 1 ELSE 0 END)`, "activeAccounts")
       .addSelect(`SUM(CASE WHEN ${queued} THEN 1 ELSE 0 END)`, "queuedAccounts")
       .addSelect(`SUM(CASE WHEN ${WORK} AND account.failures > 0 THEN 1 ELSE 0 END)`, "retryingAccounts")
@@ -370,7 +370,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       .where("account.platform IN (:...platforms)", { platforms, now, cf: SubmissionMethod.Codeforces, runningIds })
       .groupBy("account.platform")
       .getRawMany();
-    const [session, redisInfo] = await Promise.all([this.siteSettings.getRemoteJudgeSettings(), this.redisInfo()]);
+    const redisInfo = await this.redisInfo();
     const rows: RemotePlatformMonitor[] = [];
     for (const platform of platforms) {
       const sum = sums.find(row => row.platform === platform) || {};
@@ -446,13 +446,19 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         "REMOTE_RATE_LIMITED",
         "REMOTE_ACCESS_DENIED",
         "REMOTE_UNAVAILABLE",
-        ...(isAtcoder ? ["REMOTE_AUTH_REQUIRED", "REMOTE_SESSION_UNREADABLE", "REMOTE_PARSE_FAILED"] : [])
+        ...(isAtcoder
+          ? [
+              "REMOTE_AUTH_REQUIRED",
+              "REMOTE_SESSION_UNREADABLE",
+              "REMOTE_PARSE_FAILED",
+              "REMOTE_VERIFICATION_REQUIRED",
+              "REMOTE_ATCODER_STATUS_FAILED"
+            ]
+          : [])
       ].includes(latestError?.error);
       if (!this.enabled) state = "Disabled";
-      else if (isAtcoder && !session.atcoderSessionConfigured) state = "Unconfigured";
-      else if (isAtcoder && session.atcoderSessionStatus === "expired") state = "AuthExpired";
+      else if (isAtcoder && count("sessionAccounts") === 0) state = "Unconfigured";
       else if (!lastHeartbeatAt) state = "Unknown";
-      else if (isAtcoder && session.atcoderSessionError === "REMOTE_SESSION_UNREADABLE") state = "Error";
       else if (count("activeAccounts") === 0) state = "Idle";
       else if (
         allFailing &&
@@ -460,7 +466,12 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         sharedFailure &&
         (!lastSyncedAt || +new Date(errorAt) >= +new Date(lastSyncedAt))
       )
-        state = latestError.error === "REMOTE_RATE_LIMITED" ? "RateLimited" : "Error";
+        state =
+          latestError.error === "REMOTE_RATE_LIMITED"
+            ? "RateLimited"
+            : ["REMOTE_AUTH_REQUIRED", "REMOTE_SESSION_UNREADABLE"].includes(latestError.error)
+            ? "AuthExpired"
+            : "Error";
       else if (tasks.length) state = "Syncing";
       else if (
         lastSyncedAt &&
@@ -473,7 +484,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         state,
         lastSyncedAt,
         lastHeartbeatAt,
-        sourceSupport: isAtcoder ? "SiteSession" : "PersonalKey",
+        sourceSupport: isAtcoder ? "PersonalSession" : "PersonalKey",
         admin: {
           boundAccounts: count("boundAccounts"),
           activeAccounts: count("activeAccounts"),
@@ -504,17 +515,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           }),
           errorsTruncated: count("abnormalAccounts") > errors.length,
           recentErrors: history.events,
-          errorHistoryAvailable: history.available,
-          ...(isAtcoder
-            ? {
-                session: {
-                  configured: session.atcoderSessionConfigured,
-                  status: session.atcoderSessionStatus,
-                  checkedAt: iso(session.atcoderSessionLastCheckedAt),
-                  error: safeError(session.atcoderSessionError)
-                }
-              }
-            : {})
+          errorHistoryAvailable: history.available
         }
       });
     }

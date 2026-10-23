@@ -264,12 +264,11 @@ function configFixture(t) {
 test("session loading reads the saved encrypted session through the actual compiled service without application startup", async t => {
   const { file, config } = configFixture(t);
   const mysql = require("mysql2/promise");
-  const key = createHmac("sha256", config.security.sessionSecret).update("NSOJ:AtCoder:session:v1").digest();
+  const key = createHmac("sha256", config.security.sessionSecret).update("NSOJ:AtCoder:personal-session:v1").digest();
   const iv = Buffer.alloc(12, 1);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(Buffer.from("remote-judge:atcoder-session"));
+  cipher.setAAD(Buffer.from("NSOJ:AtCoder:7:11:coder:v1"));
   const value = {
-    version: 1,
     iv: iv.toString("base64"),
     ciphertext: Buffer.concat([cipher.update("private-test-session", "utf8"), cipher.final()]).toString("base64"),
     tag: cipher.getAuthTag().toString("base64")
@@ -280,30 +279,43 @@ test("session loading reads the saved encrypted session through the actual compi
     assert.equal(options.password, "private-db-password");
     return {
       execute: async (sql, parameters) => {
-        assert.equal(sql, "SELECT `value` FROM `site_setting` WHERE `key` = ? LIMIT 1");
-        assert.deepEqual(parameters, ["remote-judge:atcoder-session"]);
-        return [[{ value: stringify ? JSON.stringify(value) : value }]];
+        assert.equal(
+          sql,
+          "SELECT id, userId, handleKey, atcoderSessionConfigured, atcoderSession FROM remote_account WHERE id = ? AND platform = 'AtCoder' LIMIT 1"
+        );
+        assert.deepEqual(parameters, [7]);
+        return [
+          [
+            {
+              id: 7,
+              userId: 11,
+              handleKey: "coder",
+              atcoderSessionConfigured: true,
+              atcoderSession: stringify ? JSON.stringify(value) : value
+            }
+          ]
+        ];
       },
       end: async () => closed++
     };
   });
-  assert.equal(await loadSession(file), "private-test-session");
+  assert.equal(await loadSession(file, 7), "private-test-session");
   stringify = true;
-  assert.equal(await loadSession(file), "private-test-session");
+  assert.equal(await loadSession(file, 7), "private-test-session");
   assert.equal(closed, 2);
 });
 
 test("configuration errors identify file reads, invalid YAML and invalid shapes without exposing contents", async t => {
   const { file } = configFixture(t);
-  await assert.rejects(loadSession(file + ".missing"), error => {
+  await assert.rejects(loadSession(file + ".missing", 7), error => {
     assert.equal(error.message, "CONFIG_READ_FAILED");
     assert.equal(error.detail, "ENOENT");
     return true;
   });
   fs.writeFileSync(file, 'private-session: "unterminated');
-  await assert.rejects(loadSession(file), /CONFIG_PARSE_FAILED/);
+  await assert.rejects(loadSession(file, 7), /CONFIG_PARSE_FAILED/);
   fs.writeFileSync(file, "private-session: secret-value");
-  await assert.rejects(loadSession(file), /CONFIG_INVALID/);
+  await assert.rejects(loadSession(file, 7), /CONFIG_INVALID/);
 });
 
 test("database authentication and query failures retain safe codes, close connections and omit raw errors", async t => {
@@ -315,7 +327,7 @@ test("database authentication and query failures retain safe codes, close connec
   const connect = t.mock.method(mysql, "createConnection", async () => {
     throw databaseError;
   });
-  await assert.rejects(loadSession(file), error => {
+  await assert.rejects(loadSession(file, 7), error => {
     assert.equal(error.message, "DATABASE_CONNECT_FAILED");
     assert.equal(error.detail, "ER_ACCESS_DENIED_ERROR");
     assert.doesNotMatch(formatFailure("读取配置", error), /private-db-password|private-test-session/);
@@ -330,7 +342,7 @@ test("database authentication and query failures retain safe codes, close connec
       closed = true;
     }
   }));
-  await assert.rejects(loadSession(file), error => {
+  await assert.rejects(loadSession(file, 7), error => {
     assert.equal(error.message, "SESSION_QUERY_FAILED");
     assert.equal(error.detail, "ER_NO_SUCH_TABLE");
     return true;
@@ -344,22 +356,28 @@ test("unreadable stored JSON, corrupted encrypted sessions and disabled sessions
   let value = "private-invalid-json";
   let closed = 0;
   t.mock.method(mysql, "createConnection", async () => ({
-    execute: async () => [[{ value }]],
+    execute: async () => [
+      [{ id: 7, userId: 11, handleKey: "coder", atcoderSessionConfigured: !value?.disabled, atcoderSession: value }]
+    ],
     end: async () => closed++
   }));
-  await assert.rejects(loadSession(file), /SESSION_DATA_INVALID/);
+  await assert.rejects(loadSession(file, 7), /SESSION_DATA_INVALID/);
   value = { version: 1, ciphertext: "corrupted" };
-  await assert.rejects(loadSession(file), /REMOTE_SESSION_UNREADABLE/);
+  await assert.rejects(loadSession(file, 7), /REMOTE_SESSION_UNREADABLE/);
   value = { version: 1, disabled: true };
-  await assert.rejects(loadSession(file), /REMOTE_AUTH_REQUIRED/);
+  await assert.rejects(loadSession(file, 7), /REMOTE_AUTH_REQUIRED/);
   assert.equal(closed, 3);
 });
 
 test("CLI exposes a missing config file code and safe errno without printing arbitrary errors", () => {
   const script = path.resolve(__dirname, "../scripts/check-atcoder-source.cjs");
-  const missing = spawnSync(process.execPath, [script, url, path.join(__dirname, "private-missing-config.yaml")], {
-    encoding: "utf8"
-  });
+  const missing = spawnSync(
+    process.execPath,
+    [script, url, path.join(__dirname, "private-missing-config.yaml"), "--account-id=7"],
+    {
+      encoding: "utf8"
+    }
+  );
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /CONFIG_READ_FAILED \(ENOENT\)/);
   assert.doesNotMatch(missing.stderr, /private-missing-config/);
@@ -367,4 +385,20 @@ test("CLI exposes a missing config file code and safe errno without printing arb
     formatFailure("检查", Object.assign(new Error("private-session-value"), { detail: "private-db-password" })),
     "检查失败：CHECK_FAILED"
   );
+});
+
+test("the read-only status probe queries only the requested ID and never prints upstream HTML or credentials", async () => {
+  const { checkStatus } = require("../scripts/check-atcoder-source.cjs");
+  const calls = [];
+  const result = await checkStatus(url, "private-session", async (address, options) => {
+    calls.push({ address, options });
+    return new Response(JSON.stringify({ Result: { 12345678: { Html: "<td><span>AC</span></td>", Score: "100" } } }));
+  });
+  assert.equal(result.statusReadable, true);
+  assert.equal(result.verdict, "AC");
+  assert.deepEqual(new URL(calls[0].address).searchParams.getAll("sids[]"), ["12345678"]);
+  assert.equal(calls[0].options.redirect, "manual");
+  assert.doesNotMatch(JSON.stringify(result), /private-session|<td/);
+  const missing = await checkStatus(url, "private-session", async () => new Response('{"Result":{}}'));
+  assert.equal(missing.reason, "STATUS_NOT_RETURNED");
 });

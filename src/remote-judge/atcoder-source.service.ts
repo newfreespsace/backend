@@ -112,8 +112,6 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
     if (!(await redis.set(claim, token, "PX", 120000, "NX"))) return;
     try {
       await this.discover();
-      if (!(await this.provider.hasAtcoderDirectSession())) return;
-      if ((await redis.pttl("remote-atcoder-source-pause")) > 0) return;
       // Result requests take priority over the lower-priority source backfill.
       const dueResults = await this.connection
         .getRepository(RemoteAccountEntity)
@@ -122,7 +120,9 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
           platform: SubmissionMethod.AtCoder,
           now: new Date()
         })
-        .andWhere("(account.activeUntil > :now OR account.catchUpRequested = 1)")
+        .andWhere(
+          "(account.activeUntil > :now OR account.catchUpRequested = 1) AND account.atcoderSessionConfigured = 1"
+        )
         .getCount();
       if (dueResults) return;
       const candidate = await this.connection
@@ -135,6 +135,9 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
           now: new Date().toISOString()
         })
         .andWhere("submission.remoteKey LIKE :prefix", { prefix: "AtCoder:%" })
+        .andWhere(
+          "EXISTS (SELECT 1 FROM remote_account account WHERE account.userId = submission.submitterId AND account.platform = 'AtCoder' AND account.atcoderSessionConfigured = 1)"
+        )
         .andWhere("submission.status != :pending", { pending: SubmissionStatus.Pending })
         .orderBy(
           "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(submission.remote, '$.sourceSync.failures')), '0') AS UNSIGNED)",
@@ -216,16 +219,30 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
             !(await this.problems.userHasPermission(user, problem, ProblemPermissionType.View))
           )
             throw new Error("REMOTE_SOURCE_ACCESS_CHANGED");
-          const source = await this.provider.getAtcoderSource({
-            id: remote.id,
-            contestId: remote.contestId,
-            taskId: remote.taskId,
-            handle: remote.handle
-          });
+          const session = await this.provider.getAtcoderSessionContext(bound.id);
+          const wait = session.cooldownMs;
+          if (wait > 0 || !session.session) {
+            await this.updateSourceSync(submission, current => ({
+              ...current.remote.sourceSync,
+              nextAttemptAt: new Date(Date.now() + Math.max(wait, 60000)).toISOString()
+            }));
+            return;
+          }
+          const source = await this.provider.getAtcoderSource(
+            {
+              id: remote.id,
+              contestId: remote.contestId,
+              taskId: remote.taskId,
+              handle: remote.handle
+            },
+            bound.id,
+            session
+          );
           await this.submissions.saveRemoteSource(submission, source);
         });
       });
     } catch (error) {
+      if (error.message === "REMOTE_COOLDOWN") return;
       const code = /^REMOTE_[A-Z_]{1,72}$/.test(error?.message) ? error.message : "REMOTE_SOURCE_FAILED";
       const saved = await this.updateSourceSync(candidate, current => {
         if (current.remote.sourceAvailable) return undefined;
@@ -238,15 +255,6 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
         };
       });
       if (!saved) return;
-      const retryAt = Date.parse(saved.nextAttemptAt);
-      if (
-        ["REMOTE_RATE_LIMITED", "REMOTE_ACCESS_DENIED", "REMOTE_AUTH_REQUIRED", "REMOTE_SESSION_UNREADABLE"].includes(
-          code
-        )
-      )
-        await this.redis
-          .getSharedClient()
-          .set("remote-atcoder-source-pause", "1", "PX", Math.min(300000, Math.max(60000, +retryAt - Date.now())));
       logger.warn(`AtCoder source submission ${candidate.id}: ${code}`);
     }
   }

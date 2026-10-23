@@ -9,6 +9,7 @@ const browserUserAgent =
 
 const safeCodes = new Set([
   "INVALID_SUBMISSION_URL",
+  "PERSONAL_ACCOUNT_REQUIRED",
   "REMOTE_AUTH_REQUIRED",
   "REMOTE_SESSION_UNREADABLE",
   "REMOTE_RESPONSE_TOO_LARGE",
@@ -75,7 +76,8 @@ function submissionUrl(input) {
   return url;
 }
 
-async function loadSession(configPath) {
+async function loadSession(configPath, accountId) {
+  if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new Error("PERSONAL_ACCOUNT_REQUIRED");
   const yaml = await readStep("DEPENDENCY_LOAD_FAILED", () => require("js-yaml"));
   const text = await readStep("CONFIG_READ_FAILED", () => fs.readFileSync(configPath, "utf8"));
   const config = await readStep("CONFIG_PARSE_FAILED", () => yaml.load(text));
@@ -92,10 +94,11 @@ async function loadSession(configPath) {
   )
     throw new Error("CONFIG_INVALID");
   const mysql = await readStep("DEPENDENCY_LOAD_FAILED", () => require("mysql2/promise"));
-  const compiledService = path.resolve(__dirname, "../dist/site-setting/site-setting.service.js");
+  const compiledService = path.resolve(__dirname, "../dist/remote-judge/atcoder-session.service.js");
   if (!fs.existsSync(compiledService)) throw new Error("BACKEND_BUILD_MISSING");
-  const { SiteSettingService } = await readStep("BACKEND_MODULE_LOAD_FAILED", () => {
+  const { AtcoderSessionService } = await readStep("BACKEND_MODULE_LOAD_FAILED", () => {
     require("reflect-metadata");
+    require("tsconfig-paths").register({ baseUrl: path.resolve(__dirname, "../dist"), paths: { "@/*": ["*"] } });
     return require(compiledService);
   });
   const connection = await readStep("DATABASE_CONNECT_FAILED", () =>
@@ -110,13 +113,16 @@ async function loadSession(configPath) {
   );
   try {
     const [rows] = await readStep("SESSION_QUERY_FAILED", () =>
-      connection.execute("SELECT `value` FROM `site_setting` WHERE `key` = ? LIMIT 1", ["remote-judge:atcoder-session"])
+      connection.execute(
+        "SELECT id, userId, handleKey, atcoderSessionConfigured, atcoderSession FROM remote_account WHERE id = ? AND platform = 'AtCoder' LIMIT 1",
+        [accountId]
+      )
     );
-    const setting = rows[0];
-    if (typeof setting?.value === "string")
-      setting.value = await readStep("SESSION_DATA_INVALID", () => JSON.parse(setting.value));
-    const service = new SiteSettingService({ findOneBy: async () => setting || null }, { config });
-    const session = await readStep("SESSION_DATA_INVALID", () => service.getAtcoderSession());
+    const account = rows[0];
+    if (typeof account?.atcoderSession === "string")
+      account.atcoderSession = await readStep("SESSION_DATA_INVALID", () => JSON.parse(account.atcoderSession));
+    const service = new AtcoderSessionService({ findOne: async () => account || null }, { config });
+    const session = await readStep("SESSION_DATA_INVALID", () => service.get(accountId));
     if (!session || /[;\s]/.test(session)) throw new Error("REMOTE_AUTH_REQUIRED");
     return session;
   } finally {
@@ -308,14 +314,59 @@ async function compareRequests(
   return { sourceReadable: checks.some(check => check.sourceReadable), checks };
 }
 
+async function checkStatus(input, session, fetchPage = fetch) {
+  const detail = submissionUrl(input);
+  if (!session || /[;\s]/.test(session)) throw new Error("REMOTE_AUTH_REQUIRED");
+  const id = detail.pathname.split("/").at(-1);
+  const contest = detail.pathname.split("/")[2];
+  const url = new URL(`https://atcoder.jp/contests/${contest}/submissions/me/status/json`);
+  url.searchParams.append("sids[]", id);
+  const response = await fetchPage(url.toString(), {
+    redirect: "manual",
+    signal: AbortSignal.timeout(20000),
+    headers: { "User-Agent": browserUserAgent, Accept: "application/json", Cookie: `REVEL_SESSION=${session}` }
+  });
+  const result = { httpStatus: response.status, statusReadable: false };
+  if (response.headers.get("cf-mitigated") === "challenge") return { ...result, reason: "VERIFICATION_REQUIRED" };
+  if (response.status !== 200)
+    return {
+      ...result,
+      reason: response.status === 429 ? "RATE_LIMITED" : response.status === 403 ? "ACCESS_DENIED" : "HTTP_ERROR"
+    };
+  const body = await response.text();
+  if (body.length > 8 * 1024 * 1024) throw new Error("REMOTE_RESPONSE_TOO_LARGE");
+  try {
+    const data = JSON.parse(body);
+    if (!data.Result || Array.isArray(data.Result) || typeof data.Result !== "object") throw new Error();
+    if (!Object.prototype.hasOwnProperty.call(data.Result, id)) return { ...result, reason: "STATUS_NOT_RETURNED" };
+    const entry = data.Result[id];
+    if (typeof entry?.Html !== "string") throw new Error();
+    const $ = require("cheerio").load(`<table><tbody><tr>${entry.Html}</tr></tbody></table>`);
+    const verdict = $("td")
+      .first()
+      .text()
+      .trim()
+      .replace(/\s*\/\s*/g, "/");
+    if (!/^(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE|WJ|WR|Judging|\d+\/\d+)$/.test(verdict)) throw new Error();
+    return { ...result, statusReadable: true, reason: "STATUS_FOUND", verdict };
+  } catch {
+    return { ...result, reason: "INVALID_STATUS_RESPONSE" };
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const [input, configArg] = args.filter(arg => !["--diagnose", "--compare-requests"].includes(arg));
+  const [input, configArg] = args.filter(
+    arg => !["--diagnose", "--compare-requests", "--status"].includes(arg) && !arg.startsWith("--account-id=")
+  );
   if (!input || input === "--help") {
-    console.log("用法：node scripts/check-atcoder-source.cjs <AtCoder 提交详情链接> [后端 config.yaml 路径]");
+    console.log(
+      "用法：node scripts/check-atcoder-source.cjs <AtCoder 提交详情链接> [后端 config.yaml 路径] --account-id=远端账号ID"
+    );
+    console.log("附加 --status：用本人会话只读检查指定提交的状态接口。");
     console.log("附加 --diagnose：依次对比公共首页、账号设置、自己的提交列表和提交详情。");
     console.log("附加 --compare-requests：用同一已保存会话对比查询参数、User-Agent 和浏览器请求头，最多四次请求。");
-    console.log("使用站点已保存的会话，只输出检查结果；不打印 Cookie 或源码，也不修改数据。");
+    console.log("只使用该远端账号已保存的个人会话，只输出检查结果；不打印 Cookie 或源码，也不修改数据。");
     if (!input) process.exitCode = 2;
     return;
   }
@@ -323,15 +374,21 @@ async function main() {
   try {
     const url = submissionUrl(input);
     stage = "读取配置和已保存的会话";
-    const session = await loadSession(configArg || process.env.LYRIO_CONFIG_FILE || path.resolve("config.yaml"));
+    const accountId = Number(args.find(arg => arg.startsWith("--account-id="))?.slice("--account-id=".length));
+    const session = await loadSession(
+      configArg || process.env.LYRIO_CONFIG_FILE || path.resolve("config.yaml"),
+      accountId
+    );
     stage = "请求 AtCoder 提交详情";
-    const result = args.includes("--compare-requests")
+    const result = args.includes("--status")
+      ? await checkStatus(url.toString(), session)
+      : args.includes("--compare-requests")
       ? await compareRequests(url.toString(), session)
       : args.includes("--diagnose")
       ? await diagnoseSource(url.toString(), session)
       : await checkSource(url.toString(), session);
     console.log(JSON.stringify(result, null, 2));
-    if (!result.sourceReadable) process.exitCode = 2;
+    if (!result.sourceReadable && !result.statusReadable) process.exitCode = 2;
   } catch (error) {
     // Raw errors can contain a cookie, SQL values or config contents. Print fixed codes only.
     console.error(formatFailure(stage, error));
@@ -339,5 +396,13 @@ async function main() {
   }
 }
 
-module.exports = { submissionUrl, checkSource, diagnoseSource, compareRequests, loadSession, formatFailure };
+module.exports = {
+  checkStatus,
+  submissionUrl,
+  checkSource,
+  diagnoseSource,
+  compareRequests,
+  loadSession,
+  formatFailure
+};
 if (require.main === module) void main();

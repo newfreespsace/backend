@@ -3,6 +3,7 @@ import moment from "moment-timezone";
 
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { RemoteSyncError } from "./remote-error";
+import { assertAtcoderPage } from "./atcoder-request";
 
 function numericValue(text: string): number | null {
   const value = text.replace(/,/g, "").trim();
@@ -19,8 +20,14 @@ function resourceValue(text: string, units: Record<string, number>): number | nu
 /** Parse the English, server-rendered submission list, before AtCoder's local-time script runs. */
 export function parseAtcoderSubmissionPage(html: string, contestId: string, handle: string, page: number) {
   const $ = cheerio.load(html);
+  try {
+    assertAtcoderPage($);
+  } catch (error) {
+    error.details = { ...error.details, contestId, page };
+    throw error;
+  }
   const fail = (reason: string, submissionId?: string): never => {
-    throw new RemoteSyncError(reason === "LOGIN_PAGE" ? "REMOTE_AUTH_REQUIRED" : "REMOTE_PARSE_FAILED", {
+    throw new RemoteSyncError("REMOTE_PARSE_FAILED", {
       stage: "parse",
       reason,
       contestId,
@@ -38,7 +45,44 @@ export function parseAtcoderSubmissionPage(html: string, contestId: string, hand
       return ["Submission Time", "Task", "User", "Language", "Score", "Status"].every(name => headers.includes(name));
     });
   if (!table) {
-    if ($('form[action^="/login"], input[name="password"]').length) fail("LOGIN_PAGE");
+    // An empty search may omit the table entirely. Require the authenticated contest search
+    // and an explicit empty-result message; missing markup alone is never a successful sync.
+    const path = `/contests/${contestId}/submissions`;
+    const search = $("form")
+      .toArray()
+      .some(form => {
+        try {
+          const action = $(form).attr("action");
+          const target = new URL(action || path, `https://atcoder.jp${path}`);
+          return (
+            target.origin === "https://atcoder.jp" &&
+            target.pathname === path &&
+            (!$(form).attr("method") || $(form).attr("method").toLowerCase() === "get") &&
+            $(form).find('[name="f.User"]').val()?.toString().toLowerCase() === handle.toLowerCase() &&
+            $(form).find('[name="f.Task"], [name="f.Status"]').length > 0
+          );
+        } catch {
+          return false;
+        }
+      });
+    const loggedIn = $("a[href], form[action]")
+      .toArray()
+      .some(element => {
+        try {
+          const target = new URL($(element).attr("href") || $(element).attr("action"), "https://atcoder.jp");
+          return target.origin === "https://atcoder.jp" && target.pathname === "/logout";
+        } catch {
+          return false;
+        }
+      });
+    const empty = $("#main-container p, #main-container .alert, #main-container .text-center")
+      .toArray()
+      .some(element =>
+        /^(?:(?:There (?:is|are) no|No) submissions?(?: found)?[.!]?|提出(?:が|は)ありません[。.]?)$/i.test(
+          $(element).text().trim()
+        )
+      );
+    if (!$("table").length && search && loggedIn && empty) return { submissions: [], more: false };
     fail($("table").length ? "UNEXPECTED_TABLE_HEADERS" : "MISSING_SUBMISSION_TABLE");
   }
   const headers = $(table)

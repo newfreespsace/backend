@@ -131,6 +131,7 @@ export function remoteVerdict(platform: SubmissionMethod, verdict?: string): Sub
     TLE: SubmissionStatus.TimeLimitExceeded,
     MLE: SubmissionStatus.MemoryLimitExceeded,
     OLE: SubmissionStatus.OutputLimitExceeded,
+    QLE: SubmissionStatus.JudgementFailed,
     IE: SubmissionStatus.SystemError
   };
   if (!verdict || ["TESTING", "SUBMITTED", "WJ", "WR"].includes(verdict) || /^\d+\//.test(verdict))

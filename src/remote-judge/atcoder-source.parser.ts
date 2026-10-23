@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
+import { assertAtcoderPage } from "./atcoder-request";
 
 export interface AtcoderSourceIdentity {
   id: string;
@@ -19,7 +20,7 @@ export function parseAtcoderSource(html: string, expected: AtcoderSourceIdentity
     xml: { xmlMode: false, decodeEntities: true }
   };
   const $ = cheerio.load(html, options);
-  if ($('form[action^="/login"], input[name="password"]').length) throw new Error("REMOTE_AUTH_REQUIRED");
+  assertAtcoderPage($);
   const headingMatches = $("h2, .h2")
     .toArray()
     .some(

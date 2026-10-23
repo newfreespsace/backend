@@ -105,12 +105,7 @@ function fixture(t) {
     sourcePending: 0,
     sourceFailed: 0,
     fail: false,
-    session: {
-      atcoderSessionConfigured: true,
-      atcoderSessionStatus: "valid",
-      atcoderSessionLastCheckedAt: new Date(),
-      atcoderSessionError: undefined
-    }
+    atcoderSessionAccounts: 1
   };
   const selected = [];
   const connection = {
@@ -162,7 +157,11 @@ function fixture(t) {
                 },
                 getRawMany: async () => {
                   if (data.fail) throw new Error("test database unavailable");
-                  if (query.grouped) return data.summaries;
+                  if (query.grouped)
+                    return data.summaries.map(row => ({
+                      ...row,
+                      sessionAccounts: row.platform === "AtCoder" ? data.atcoderSessionAccounts : 0
+                    }));
                   if (query.params.ids) return data.accounts.filter(row => query.params.ids.includes(row.accountId));
                   return data.errors[query.params.platform].slice(0, 20);
                 },
@@ -180,8 +179,7 @@ function fixture(t) {
       throw new Error("must reuse Redis connection");
     }
   };
-  const settings = { getRemoteJudgeSettings: async () => data.session };
-  const service = new RemoteJudgeMonitorService(connection, redisService, config, settings);
+  const service = new RemoteJudgeMonitorService(connection, redisService, config);
   t.after(() => service.onModuleDestroy());
   const heartbeat = async () => {
     service.onModuleInit();
@@ -199,7 +197,6 @@ function fixture(t) {
     selected,
     connection,
     redisService,
-    settings,
     heartbeat,
     queryCount: () => queryCount,
     duplicateCalls: () => duplicateCalls
@@ -320,14 +317,17 @@ test("AtCoder distinguishes missing and expired sessions; monitoring does not ma
   t.after(() => {
     global.fetch = previous;
   });
-  f.data.session.atcoderSessionConfigured = false;
+  f.data.atcoderSessionAccounts = 0;
   assert.equal((await f.service.getSnapshot()).platforms[1].state, "Unconfigured");
   f.values.delete(CACHE);
-  f.data.session.atcoderSessionConfigured = true;
-  f.data.session.atcoderSessionStatus = "expired";
+  f.data.atcoderSessionAccounts = 1;
+  const at = f.data.summaries.find(row => row.platform === "AtCoder");
+  at.activeAccounts = 1;
+  at.retryingAccounts = 1;
+  f.data.latest.AtCoder = { error: "REMOTE_AUTH_REQUIRED", at: new Date() };
   const result = await f.service.getSnapshot(admin);
   assert.equal(result.platforms[1].state, "AuthExpired");
-  assert.equal(result.platforms[1].sourceSupport, "SiteSession");
+  assert.equal(result.platforms[1].sourceSupport, "PersonalSession");
   assert.equal(requests, 0);
   f.config.config.remoteJudge.enabled = false;
   assert.ok((await f.service.getSnapshot()).platforms.every(row => row.state === "Disabled"));
@@ -336,7 +336,7 @@ test("AtCoder distinguishes missing and expired sessions; monitoring does not ma
 test("cluster workers share live tasks and their stages, and expired workers are ignored", async t => {
   const f = fixture(t);
   await f.heartbeat();
-  const second = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config, f.settings);
+  const second = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config);
   t.after(() => second.onModuleDestroy());
   f.data.accounts = [account({ lastError: null })];
   second.startTask("Codeforces", 7, "Collecting");
@@ -426,7 +426,7 @@ test("detailed errors survive recovery and are shared across workers without exp
   assert.doesNotMatch(JSON.stringify(result), /private-cookie|private-source|secret.test/);
   f.data.errors.AtCoder = [];
   f.values.delete(CACHE);
-  const otherWorker = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config, f.settings);
+  const otherWorker = new RemoteJudgeMonitorService(f.connection, f.redisService, f.config);
   result = await otherWorker.getSnapshot(admin);
   platform = result.platforms[1].admin;
   assert.equal(platform.errors.length, 0);

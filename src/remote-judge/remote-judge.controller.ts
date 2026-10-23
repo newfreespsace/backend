@@ -11,7 +11,8 @@ import {
   RemoteContextDto,
   RemotePlatformDto,
   SetSubmissionMethodDto,
-  SetCodeforcesCredentialsDto
+  SetCodeforcesCredentialsDto,
+  SetAtcoderSessionDto
 } from "./remote-judge.dto";
 
 @ApiTags("RemoteJudge")
@@ -69,6 +70,11 @@ export class RemoteJudgeController {
   @Post("status")
   status(@CurrentUser() user: UserEntity, @Body() request: RemoteContextDto) {
     return this.service.status(user, request);
+  }
+
+  @Post("setAtcoderSession")
+  setAtcoderSession(@CurrentUser() user: UserEntity, @Body() request: SetAtcoderSessionDto) {
+    return this.run(() => this.service.setAtcoderSession(user, request));
   }
 
   @Post("setSubmissionMethod")

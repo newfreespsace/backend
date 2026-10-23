@@ -41,8 +41,7 @@ test("repeated provider requests, binding operations and worker turns do not all
   const redis = redisFixture();
   const lock = { lock: async (_, callback) => callback() };
   const provider = new RemoteProviderService(redis.service, lock, {
-    getAtcoderSession: async () => "test-session",
-    recordAtcoderSessionCheck: async () => {}
+    get: async () => "test-session"
   });
   const account = { id: 1, userId: 1, nextSyncAt: new Date(0), failures: 0, cursor: "0" };
   const judge = Object.create(RemoteJudgeService.prototype);
@@ -86,7 +85,7 @@ test("repeated provider requests, binding operations and worker turns do not all
     await judge.tick(Method.Codeforces);
     await judge.tick(Method.AtCoder);
   }
-  assert.equal(fetches, 300);
+  assert.equal(fetches, 201, "cached empty searches do not repeatedly fetch the full list");
   assert.equal(redis.duplicateCount(), 0, "ordinary remote operations must reuse the shared command connection");
 });
 

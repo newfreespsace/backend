@@ -163,10 +163,10 @@ test("ownership proof reads only the exact profile field", async () => {
   provider.codeforces = async () => [{ handle: "Coder", organization: "NSOJ-secret" }];
   assert.equal(await provider.verifyProfile(Method.Codeforces, "coder", "NSOJ-secret"), true);
   assert.equal(await provider.verifyProfile(Method.Codeforces, "someone", "NSOJ-secret"), false);
-  provider.request = async () => "<p>NSOJ-secret</p><table><tr><th>Affiliation</th><td>wrong</td></tr></table>";
-  assert.equal(await provider.verifyProfile(Method.AtCoder, "coder", "NSOJ-secret"), false);
-  provider.request = async () => "<table><tr><th>Affiliation</th><td> NSOJ-secret </td></tr></table>";
-  assert.equal(await provider.verifyProfile(Method.AtCoder, "coder", "NSOJ-secret"), true);
+  await assert.rejects(
+    provider.verifyProfile(Method.AtCoder, "coder", "NSOJ-secret"),
+    /REMOTE_ATCODER_SESSION_REQUIRED/
+  );
 });
 
 function submissionFixture() {
@@ -635,7 +635,7 @@ test("contest context selects by original time, checks membership and rejects hi
 });
 
 test("binding proof is NSOJ- plus six letters and verifies unchanged on both platforms", async () => {
-  for (const platform of [Method.Codeforces, Method.AtCoder]) {
+  for (const platform of [Method.Codeforces]) {
     const service = Object.create(RemoteJudgeService.prototype);
     const pending = new Map();
     const saved = [];
@@ -669,7 +669,6 @@ test("binding proof is NSOJ- plus six letters and verifies unchanged on both pla
 
     const provider = Object.create(RemoteProviderService.prototype);
     provider.codeforces = async () => [{ handle: "Coder", organization: code }];
-    provider.request = async () => `<table><tr><th>Affiliation</th><td>${code}</td></tr></table>`;
     service.provider = provider;
     await service.verifyBinding({ id: 1 }, platform);
     assert.equal(saved.length, 1);
@@ -805,6 +804,7 @@ function workerFixture(candidate) {
   service.codeforcesImportBuffer = importBufferFixture().service;
   service.users = { findUserById: async () => ({ id: 1, isActive: true }) };
   service.provider = {
+    getAtcoderSessionContext: async accountId => ({ accountId, session: "private-session", cooldownMs: 0 }),
     getPage: async () => {
       requests++;
       throw new Error("REMOTE_UNAVAILABLE");
@@ -854,7 +854,6 @@ test("the sync worker retains structured failures while clearing only the active
     recordError: async (_, user, failure) => failures.push({ user, ...failure })
   };
   service.watches = { findBy: async () => [] };
-  service.provider.hasAtcoderDirectSession = async () => true;
   service.provider.getPage = async () => {
     throw Object.assign(new Error("REMOTE_PARSE_FAILED"), {
       details: { stage: "parse", reason: "MISSING_SUBMISSION_TABLE", contestId: "abc480", page: 1 }
@@ -914,16 +913,22 @@ test("new source failures are retained once without repeating a carried-over coo
 test("AtCoder pauses without a session and resumes immediately after one is configured", async () => {
   const account = { id: 1, userId: 1, nextSyncAt: new Date(0), cursor: "900", failures: 0, catchUpRequested: true };
   const { service, updates, requestCount } = workerFixture(account);
-  service.provider.hasAtcoderDirectSession = async () => false;
+  service.provider.getAtcoderSessionContext = async accountId => ({ accountId, cooldownMs: 0 });
   await service.tick(Method.AtCoder);
   assert.equal(requestCount(), 0);
   assert.deepEqual(updates, []);
   assert.equal(+account.nextSyncAt, 0);
   assert.equal(account.lastSyncedAt, undefined);
-  service.provider.hasAtcoderDirectSession = async () => true;
+  service.provider.getAtcoderSessionContext = async accountId => ({
+    accountId,
+    session: "private-session",
+    cooldownMs: 0
+  });
   service.watches = { findBy: async () => [] };
-  service.provider.getPage = async (_, targets) => {
+  service.provider.getPage = async (_, targets, context) => {
     assert.deepEqual(targets, []);
+    assert.equal(context.accountId, account.id);
+    assert.equal(context.session, "private-session");
     return { submissions: [], cursor: account.cursor, scan: null, more: false, pending: false };
   };
   await service.tick(Method.AtCoder);
@@ -988,7 +993,6 @@ test("direct sync only queries recent watched contests and commits its checkpoin
       }
     })
   };
-  service.provider.hasAtcoderDirectSession = async () => true;
   const events = [];
   service.provider.getPage = async (_, liveTargets) => {
     assert.deepEqual(liveTargets, [{ contestId: "abc480", since: Math.floor((now - 90000) / 1000) }]);
@@ -1434,4 +1438,41 @@ test("database metadata keeps existing problems local and remote submission keys
   assert.equal(buffer.findColumnWithPropertyName("payload").isSelect, false);
   assert.equal(buffer.foreignKeys[0].onDelete, "CASCADE");
   assert.equal(buffer.findColumnWithPropertyName("remoteId").type, "bigint");
+});
+
+test("AtCoder shared cooldown leaves other due accounts unchanged and resumes after the pause", async () => {
+  const account = { id: 1, userId: 1, nextSyncAt: new Date(0), cursor: "900", failures: 0, catchUpRequested: true };
+  const { service, updates, requestCount } = workerFixture(account);
+  service.provider.getAtcoderSessionContext = async accountId => ({
+    accountId,
+    session: "private-session",
+    cooldownMs: 60000
+  });
+  await service.tick(Method.AtCoder);
+  assert.equal(requestCount(), 0);
+  assert.equal(updates.length, 1);
+  assert.ok(+account.nextSyncAt > Date.now());
+  account.nextSyncAt = new Date(0);
+  updates.length = 0;
+  assert.equal(account.failures, 0);
+  service.provider.getAtcoderSessionContext = async accountId => ({
+    accountId,
+    session: "private-session",
+    cooldownMs: 0
+  });
+  service.watches = { findBy: async () => [] };
+  service.provider.getPage = async () => {
+    throw new Error("REMOTE_COOLDOWN");
+  };
+  await service.tick(Method.AtCoder);
+  assert.deepEqual(updates, [], "a pause beginning during a queued request must not penalize this account");
+  service.provider.getPage = async () => ({
+    submissions: [],
+    cursor: account.cursor,
+    scan: null,
+    more: false,
+    pending: false
+  });
+  await service.tick(Method.AtCoder);
+  assert.ok(account.lastSyncedAt instanceof Date);
 });

@@ -1,198 +1,242 @@
 const assert = require("node:assert/strict");
-const { test, beforeEach, afterEach } = require("node:test");
+const { test } = require("node:test");
 const path = require("node:path");
 require("reflect-metadata");
 require("tsconfig-paths").register({ baseUrl: path.resolve(__dirname, "../dist"), paths: { "@/*": ["*"] } });
-const { SiteSettingService } = require("../dist/site-setting/site-setting.service");
-const { SiteSettingController } = require("../dist/site-setting/site-setting.controller");
+const { AtcoderSessionService, normalizeAtcoderSession } = require("../dist/remote-judge/atcoder-session.service");
+const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.service");
 const { RemoteProviderService } = require("../dist/remote-judge/remote-provider.service");
-const { SubmissionMethod } = require("../dist/remote-judge/remote-judge.types");
-const originalSession = process.env.NSOJ_ATCODER_SESSION;
-const originalFetch = global.fetch;
-beforeEach(() => {
-  delete process.env.NSOJ_ATCODER_SESSION;
-});
-afterEach(() => {
-  if (originalSession == null) delete process.env.NSOJ_ATCODER_SESSION;
-  else process.env.NSOJ_ATCODER_SESSION = originalSession;
-  global.fetch = originalFetch;
-});
-const admin = { id: 9, isAdmin: true };
+const { SiteSettingController } = require("../dist/site-setting/site-setting.controller");
+const { RemoteAccountEntity } = require("../dist/remote-judge/remote-account.entity");
+const { getMetadataArgsStorage } = require("typeorm");
+
 function fixture() {
-  const stored = new Map();
-  const config = {
-    config: { security: { sessionSecret: "test-site-secret" }, preference: { security: { allowRegister: true } } }
-  };
+  const accounts = new Map([
+    [
+      1,
+      { id: 1, userId: 11, platform: "AtCoder", handle: "Coder", handleKey: "coder", atcoderSessionConfigured: false }
+    ],
+    [
+      2,
+      { id: 2, userId: 22, platform: "AtCoder", handle: "Other", handleKey: "other", atcoderSessionConfigured: false }
+    ]
+  ]);
   const repository = {
-    findOneBy: async ({ key }) => (stored.has(key) ? structuredClone(stored.get(key)) : null),
-    save: async entity => {
-      stored.set(entity.key, structuredClone(entity));
+    findOne: async ({ where, select }) => {
+      const row = [...accounts.values()].find(row => row.id === where.id && row.platform === where.platform);
+      return row ? Object.fromEntries(select.map(key => [key, structuredClone(row[key])])) : undefined;
+    },
+    findOneBy: async where =>
+      [...accounts.values()].find(row => Object.entries(where).every(([key, value]) => row[key] === value)),
+    findBy: async where => [...accounts.values()].filter(row => row.userId === where.userId),
+    create: value => ({ atcoderSessionConfigured: false, catchUpVersion: 0, ...value }),
+    save: async value => {
+      if (
+        [...accounts.values()].some(
+          row => row.platform === value.platform && (row.userId === value.userId || row.handleKey === value.handleKey)
+        )
+      )
+        throw Object.assign(new Error("duplicate"), { code: "ER_DUP_ENTRY" });
+      value.id = Math.max(0, ...accounts.keys()) + 1;
+      accounts.set(value.id, value);
+      return value;
+    },
+    update: async ({ id }, update) => {
+      const row = accounts.get(id);
+      for (const [key, value] of Object.entries(update))
+        row[key] = typeof value === "function" ? (row[key] || 0) + 1 : value;
     }
   };
-  const service = new SiteSettingService(repository, config);
-  return {
-    stored,
-    config,
-    service,
-    controller: new SiteSettingController(service),
-    otherProcess: new SiteSettingService(repository, config)
+  const config = { config: { security: { sessionSecret: "private-test-key" } } };
+  const sessions = new AtcoderSessionService(repository, config);
+  const service = Object.create(RemoteJudgeService.prototype);
+  service.accounts = repository;
+  service.configService = config;
+  service.atcoderSessions = sessions;
+  const pending = new Map();
+  service.lockService = {
+    lock: async (key, fn) => {
+      const previous = pending.get(key) || Promise.resolve();
+      let release;
+      const ready = new Promise(resolve => {
+        release = resolve;
+      });
+      const tail = previous.then(() => ready);
+      pending.set(key, tail);
+      await previous;
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (pending.get(key) === tail) pending.delete(key);
+      }
+    }
   };
+  service.connection = {
+    transaction: async callback => {
+      const snapshot = structuredClone([...accounts]);
+      try {
+        return await callback({ getRepository: () => repository });
+      } catch (error) {
+        accounts.clear();
+        for (const [id, row] of snapshot) accounts.set(id, row);
+        throw error;
+      }
+    }
+  };
+  service.redisService = { getSharedClient: () => ({ set: async () => "OK" }) };
+  const checks = [];
+  service.provider = {
+    identifyAtcoderSession: async (session, id) => {
+      checks.push([id, session]);
+      return session === "private-two" ? "Other" : session === "private-new" ? "NewCoder" : "Coder";
+    }
+  };
+  return { service, sessions, accounts, config, checks };
 }
 
-test("remote judge settings require site administration for both reads and mutations", async () => {
-  const { controller, stored } = fixture();
-  for (const user of [undefined, { id: 1 }, { id: 2, isAdmin: false, privileges: ["ManageProblem"] }]) {
-    assert.deepEqual(await controller.getRemoteJudgeSettings(user), { error: "PERMISSION_DENIED" });
-    assert.deepEqual(await controller.updateRemoteJudgeSettings(user, { atcoderSession: "test-session" }), {
-      error: "PERMISSION_DENIED"
-    });
-    assert.deepEqual(await controller.updateRemoteJudgeSettings(user, { clearAtcoderSession: true }), {
-      error: "PERMISSION_DENIED"
-    });
-  }
-  assert.equal(stored.size, 0);
-});
-
-test("sessions are encrypted with fresh nonces, isolated from preferences and never returned in responses", async () => {
-  const { controller, service, stored } = fixture();
-  const secret = "test-session-never-return-this";
-  const result = await controller.updateRemoteJudgeSettings(admin, { atcoderSession: secret });
-  assert.equal(result.settings.atcoderSessionConfigured, true);
-  assert.equal(result.settings.atcoderSessionSource, "site");
-  assert.equal(await service.getAtcoderSession(), secret);
-  const first = JSON.stringify([...stored.values()]);
-  assert.doesNotMatch(first, /test-session-never-return-this/);
-  assert.equal(stored.get("remote-judge:atcoder-session").updatedByUserId, admin.id);
-  for (const value of [
-    result,
-    await controller.getRemoteJudgeSettings(admin),
-    await service.getPreference(),
-    await service.getPreferenceConfigToBeSentToUser()
-  ]) {
-    assert.doesNotMatch(JSON.stringify(value), /test-session-never-return-this|ciphertext|"iv"|"tag"/);
-  }
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: secret });
-  assert.notEqual(JSON.stringify([...stored.values()]), first);
-  assert.equal(await service.getAtcoderSession(), secret);
-});
-
-test("live site configuration takes precedence across processes and clearing disables environment fallback", async () => {
-  const { controller, service, otherProcess } = fixture();
-  process.env.NSOJ_ATCODER_SESSION = "test-environment-session";
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionSource, "environment");
-  const redis = { pttl: async () => 0, set: async () => "OK" };
-  const provider = new RemoteProviderService(
-    { getSharedClient: () => redis },
-    { lock: async (_, fn) => fn() },
-    otherProcess
+test("personal sessions are encrypted, hidden from account responses, bound to account identity and clearable", async () => {
+  const { service, sessions, accounts, checks } = fixture();
+  const response = await service.setAtcoderSession({ id: 11 }, { atcoderSession: "REVEL_SESSION=private-one" });
+  assert.deepEqual(checks, [[1, "private-one"]]);
+  assert.equal(await sessions.get(1), "private-one");
+  assert.equal(response.accounts[0].atcoderSessionConfigured, true);
+  assert.doesNotMatch(JSON.stringify(response), /private-one|ciphertext|"iv"|"tag"/);
+  assert.doesNotMatch(JSON.stringify(accounts.get(1)), /private-one/);
+  const first = accounts.get(1).atcoderSession;
+  await service.setAtcoderSession({ id: 11 }, { atcoderSession: "private-one" });
+  assert.notDeepEqual(accounts.get(1).atcoderSession, first);
+  await service.setAtcoderSession({ id: 22 }, { atcoderSession: "private-two" });
+  assert.equal(await sessions.get(1), "private-one");
+  assert.equal(await sessions.get(2), "private-two");
+  accounts.get(2).atcoderSession = accounts.get(1).atcoderSession;
+  await assert.rejects(sessions.get(2), /REMOTE_SESSION_UNREADABLE/);
+  await service.setAtcoderSession({ id: 11 }, { clear: true });
+  assert.equal(await sessions.get(1), undefined);
+  assert.equal(accounts.get(1).atcoderSession, null);
+  assert.equal(accounts.get(1).atcoderSessionConfigured, false);
+  const column = getMetadataArgsStorage().columns.find(
+    col => col.target === RemoteAccountEntity && col.propertyName === "atcoderSession"
   );
-  const cookies = [];
-  global.fetch = async (_, options) => {
-    cookies.push(options.headers.Cookie);
-    return new Response("", { status: 200 });
+  assert.equal(column.options.select, false);
+});
+
+test("invalid or mismatched session changes preserve the current credential", async () => {
+  const { service, sessions } = fixture();
+  await service.setAtcoderSession({ id: 11 }, { atcoderSession: "private-old" });
+  for (const value of ["", "bad; other=value", "bad\r\nheader", "bad\x00value", "a".repeat(8193), 123]) {
+    assert.equal(normalizeAtcoderSession(value), undefined);
+    await assert.rejects(service.setAtcoderSession({ id: 11 }, { atcoderSession: value }), /INVALID_ATCODER_SESSION/);
+  }
+  await assert.rejects(
+    service.setAtcoderSession({ id: 11 }, { clear: true, atcoderSession: "value" }),
+    /INVALID_ATCODER_SESSION/
+  );
+  service.provider.identifyAtcoderSession = async () => "AnotherCoder";
+  await assert.rejects(
+    service.setAtcoderSession({ id: 11 }, { atcoderSession: "wrong-account" }),
+    /REMOTE_SESSION_IDENTITY_MISMATCH/
+  );
+  assert.equal(await sessions.get(1), "private-old");
+});
+
+test("global session routes and environment fallback are absent", async () => {
+  assert.equal(SiteSettingController.prototype.getRemoteJudgeSettings, undefined);
+  assert.equal(SiteSettingController.prototype.updateRemoteJudgeSettings, undefined);
+  const { sessions } = fixture();
+  const previous = process.env.NSOJ_ATCODER_SESSION;
+  process.env.NSOJ_ATCODER_SESSION = "private-global-must-not-be-used";
+  try {
+    assert.equal(await sessions.get(1), undefined);
+    assert.equal(await sessions.get(undefined), undefined);
+  } finally {
+    if (previous === undefined) delete process.env.NSOJ_ATCODER_SESSION;
+    else process.env.NSOJ_ATCODER_SESSION = previous;
+  }
+});
+
+test("session identification reads the logged-in handle and requires a logout marker", async () => {
+  const provider = Object.create(RemoteProviderService.prototype);
+  const calls = [];
+  provider.request = async (...args) => {
+    calls.push(args);
+    return '<script>var userScreenName = "CoDeR";</script><form action="/logout?continue=%2F"></form>';
   };
-  assert.equal(await provider.hasAtcoderDirectSession(), true);
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "REVEL_SESSION=test-site-one" });
-  await provider.request(SubmissionMethod.AtCoder, "https://atcoder.jp/contests/abc480/submissions", true);
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "test-site-two" });
-  await provider.request(SubmissionMethod.AtCoder, "https://atcoder.jp/contests/abc480/submissions", true);
-  assert.deepEqual(cookies, ["REVEL_SESSION=test-site-one", "REVEL_SESSION=test-site-two"]);
-  await controller.updateRemoteJudgeSettings(admin, {});
-  assert.equal(await otherProcess.getAtcoderSession(), "test-site-two");
-  const cleared = await controller.updateRemoteJudgeSettings(admin, { clearAtcoderSession: true });
-  assert.equal(cleared.settings.atcoderSessionConfigured, false);
-  assert.equal(await provider.hasAtcoderDirectSession(), false);
-  assert.equal(await service.getAtcoderSession(), undefined);
-  await assert.rejects(provider.request(SubmissionMethod.AtCoder, "https://atcoder.jp/", true), /REMOTE_AUTH_REQUIRED/);
-  assert.equal(cookies.length, 2);
+  assert.equal(await provider.identifyAtcoderSession("private-new", 1), "CoDeR");
+  assert.equal(calls[0][4], 1);
+  assert.equal(calls[0][5], "private-new");
+  provider.request = async () => '<script>var userScreenName = "other";</script><a href="/logout">Sign out</a>';
+  assert.equal(await provider.identifyAtcoderSession("other-session", 1), "other");
+  provider.request = async () => '<script>var userScreenName = "coder";</script>';
+  await assert.rejects(provider.identifyAtcoderSession("expired", 1), /REMOTE_AUTH_REQUIRED/);
 });
 
-test("invalid sessions are rejected without modifying stored credentials or echoing their content", async () => {
-  const { controller, service } = fixture();
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "test-existing-session" });
-  for (const invalid of ["", " ", null, 123, "bad\r\nCookie: extra", "bad; extra=value", "a".repeat(8193)]) {
-    await assert.rejects(
-      controller.updateRemoteJudgeSettings(admin, { atcoderSession: invalid }),
-      error => error.message === "INVALID_ATCODER_SESSION"
-    );
-    assert.equal(await service.getAtcoderSession(), "test-existing-session");
-  }
-  await assert.rejects(
-    controller.updateRemoteJudgeSettings(admin, { atcoderSession: "test-session", clearAtcoderSession: true }),
-    /INVALID_ATCODER_SESSION/
+test("saving a first session creates its binding and encrypted credential together", async () => {
+  const { service, sessions, accounts } = fixture();
+  const response = await service.setAtcoderSession({ id: 99 }, { atcoderSession: "private-new" });
+  const bound = [...accounts.values()].find(account => account.userId === 99);
+  assert.equal(bound.handle, "NewCoder");
+  assert.equal(bound.handleKey, "newcoder");
+  assert.equal(bound.atcoderSessionConfigured, true);
+  assert.ok(bound.verifiedAt instanceof Date);
+  assert.equal(bound.catchUpRequested, true);
+  assert.equal(await sessions.get(bound.id), "private-new");
+  assert.deepEqual(
+    response.accounts.map(account => account.handle),
+    ["NewCoder"]
   );
+  assert.doesNotMatch(JSON.stringify(response), /private-new|ciphertext/);
+  const verifiedAt = +bound.verifiedAt;
+  await service.setAtcoderSession({ id: 99 }, { atcoderSession: "private-new" });
+  assert.equal(accounts.size, 3);
+  assert.equal(+bound.verifiedAt, verifiedAt);
+  await service.setAtcoderSession({ id: 99 }, { clear: true });
+  assert.equal(accounts.size, 3);
+  assert.equal(bound.handle, "NewCoder");
+  assert.equal(await sessions.get(bound.id), undefined);
+});
+
+test("conflicting owners, failed verification and transaction failures leave no new binding", async () => {
+  const { service, accounts, sessions } = fixture();
   await assert.rejects(
-    controller.updateRemoteJudgeSettings(admin, { clearAtcoderSession: "yes" }),
-    /INVALID_ATCODER_SESSION/
+    service.setAtcoderSession({ id: 99 }, { atcoderSession: "private-one" }),
+    /ACCOUNT_ALREADY_BOUND/
   );
-});
-
-test("modified ciphertext and encryption key changes fail closed with a fixed error message", async () => {
-  const { service, controller, stored, config } = fixture();
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "test-sensitive-session" });
-  const row = stored.get("remote-judge:atcoder-session");
-  const ciphertext = row.value.ciphertext;
-  row.value.ciphertext = (ciphertext[0] === "A" ? "B" : "A") + ciphertext.slice(1);
-  await assert.rejects(service.getAtcoderSession(), error => error.message === "REMOTE_SESSION_UNREADABLE");
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionError, "REMOTE_SESSION_UNREADABLE");
-  row.value.ciphertext = ciphertext;
-  config.config.security.sessionSecret = "different-key";
-  await assert.rejects(service.getAtcoderSession(), error => error.message === "REMOTE_SESSION_UNREADABLE");
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "test-replacement-session" });
-  assert.equal(await service.getAtcoderSession(), "test-replacement-session");
-});
-
-test("session health distinguishes expired login from temporary access failures and recovers after success", async () => {
-  const { controller, service } = fixture();
-  const secret = "test-health-session";
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: secret });
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "unchecked");
-  await service.recordAtcoderSessionCheck(secret, "REMOTE_AUTH_REQUIRED");
-  let result = await controller.getRemoteJudgeSettings(admin);
-  assert.equal(result.settings.atcoderSessionStatus, "expired");
-  assert.equal(result.settings.atcoderSessionError, "REMOTE_AUTH_REQUIRED");
-  assert.ok(result.settings.atcoderSessionLastCheckedAt instanceof Date);
-  assert.doesNotMatch(JSON.stringify(result), /test-health-session|fingerprint|ciphertext/);
-  for (const error of ["REMOTE_RATE_LIMITED", "REMOTE_PARSE_FAILED", "REMOTE_UNAVAILABLE"]) {
-    await service.recordAtcoderSessionCheck(secret, error);
-    assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "unavailable");
-  }
-  await service.recordAtcoderSessionCheck(secret);
-  result = await controller.getRemoteJudgeSettings(admin);
-  assert.equal(result.settings.atcoderSessionStatus, "valid");
-  assert.equal(result.settings.atcoderSessionError, undefined);
-});
-
-test("replacement sessions ignore stale health and late failures from old requests", async () => {
-  const { controller, service, stored } = fixture();
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "old-session" });
-  await service.recordAtcoderSessionCheck("old-session", "REMOTE_AUTH_REQUIRED");
-  const stale = structuredClone(stored.get("remote-judge:atcoder-session-health"));
-  const saved = await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "new-session" });
-  assert.equal(saved.settings.atcoderSessionStatus, "unchecked");
-  await service.recordAtcoderSessionCheck("old-session", "REMOTE_AUTH_REQUIRED");
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "unchecked");
-  await service.recordAtcoderSessionCheck("new-session");
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "valid");
-  stored.set(stale.key, stale);
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "unchecked");
-  await controller.updateRemoteJudgeSettings(admin, { clearAtcoderSession: true });
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "missing");
-});
-
-test("actual sync attempts publish health, while an empty target list does not falsely validate a session", async () => {
-  const { service, controller } = fixture();
-  await controller.updateRemoteJudgeSettings(admin, { atcoderSession: "sync-check-session" });
-  const provider = new RemoteProviderService({}, {}, service);
-  const account = { platform: SubmissionMethod.AtCoder, cursor: "0" };
-  await provider.getPage(account, []);
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "unchecked");
-  provider.atcoderLivePage = async () => {
+  assert.equal(accounts.size, 2);
+  service.provider.identifyAtcoderSession = async () => {
     throw new Error("REMOTE_AUTH_REQUIRED");
   };
-  await assert.rejects(provider.getPage(account, [{ contestId: "abc480", since: 0 }]), /REMOTE_AUTH_REQUIRED/);
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "expired");
-  provider.atcoderLivePage = async () => ({ submissions: [], pending: false });
-  await provider.getPage(account, [{ contestId: "abc480", since: 0 }]);
-  assert.equal((await service.getRemoteJudgeSettings()).atcoderSessionStatus, "valid");
+  await assert.rejects(service.setAtcoderSession({ id: 99 }, { atcoderSession: "expired" }), /REMOTE_AUTH_REQUIRED/);
+  assert.equal(accounts.size, 2);
+  service.provider.identifyAtcoderSession = async () => "NewCoder";
+  service.atcoderSessions = {
+    encrypt: () => {
+      throw new Error("TEST_STORAGE_FAILED");
+    }
+  };
+  await assert.rejects(service.setAtcoderSession({ id: 99 }, { atcoderSession: "private-new" }), /TEST_STORAGE_FAILED/);
+  assert.equal(accounts.size, 2);
+  assert.equal(await sessions.get(3), undefined);
+});
+
+test("simultaneous first-time saves cannot attach one AtCoder identity to two NSOJ users", async () => {
+  const { service, accounts } = fixture();
+  const outcomes = await Promise.allSettled([
+    service.setAtcoderSession({ id: 33 }, { atcoderSession: "private-new" }),
+    service.setAtcoderSession({ id: 44 }, { atcoderSession: "private-new" })
+  ]);
+  assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1);
+  assert.equal(outcomes.find(outcome => outcome.status === "rejected").reason.message, "ACCOUNT_ALREADY_BOUND");
+  assert.equal([...accounts.values()].filter(account => account.handleKey === "newcoder").length, 1);
+});
+
+test("AtCoder profile-code binding is retired and clearing an unbound session is harmless", async () => {
+  const { service, accounts } = fixture();
+  await assert.rejects(
+    service.beginBinding({ id: 99 }, { platform: "AtCoder", handle: "NewCoder" }),
+    /ATCODER_SESSION_REQUIRED/
+  );
+  await assert.rejects(service.verifyBinding({ id: 99 }, "AtCoder"), /ATCODER_SESSION_REQUIRED/);
+  assert.deepEqual((await service.setAtcoderSession({ id: 99 }, { clear: true })).accounts, []);
+  assert.equal(accounts.size, 2);
 });

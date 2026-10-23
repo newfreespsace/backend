@@ -27,17 +27,19 @@ import { logger } from "@/logger";
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteWatchEntity } from "./remote-watch.entity";
-import { AtcoderLiveTarget, RemotePage, RemoteProviderService } from "./remote-provider.service";
+import { AtcoderLiveTarget, AtcoderSessionContext, RemotePage, RemoteProviderService } from "./remote-provider.service";
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
   SetSubmissionMethodDto,
-  SetCodeforcesCredentialsDto
+  SetCodeforcesCredentialsDto,
+  SetAtcoderSessionDto
 } from "./remote-judge.dto";
 import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote-judge.types";
 import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
+import { AtcoderSessionService, normalizeAtcoderSession } from "./atcoder-session.service";
 import { safeRemoteErrorDetails } from "./remote-error";
 
 @Injectable()
@@ -61,7 +63,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     private readonly audit: AuditService,
     private readonly codeforcesCredentials: CodeforcesCredentialsService,
     private readonly codeforcesImportBuffer: CodeforcesImportBufferService,
-    private readonly monitor: RemoteJudgeMonitorService
+    private readonly monitor: RemoteJudgeMonitorService,
+    private readonly atcoderSessions: AtcoderSessionService
   ) {}
 
   private get settings() {
@@ -103,6 +106,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         nextSyncAt: account.nextSyncAt,
         activeUntil: account.activeUntil,
         lastError: account.lastError,
+        atcoderSessionConfigured: !!account.atcoderSessionConfigured,
         codeforcesSourceEnabled: !!account.codeforcesSourceEnabled,
         codeforcesSourceError: account.codeforcesSourceError,
         codeforcesSourceRetryAt: account.codeforcesSourceRetryAt,
@@ -116,6 +120,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   async beginBinding(user: UserEntity, request: BindRemoteAccountDto) {
+    if (request.platform === SubmissionMethod.AtCoder) throw new BadRequestException("ATCODER_SESSION_REQUIRED");
     if (!/^[a-zA-Z0-9_.-]{3,64}$/.test(request.handle)) throw new BadRequestException("INVALID_HANDLE");
     const redis = this.redisService.getSharedClient();
     if (!(await redis.set(`remote-bind-rate:${user.id}`, "1", "EX", 30, "NX")))
@@ -132,6 +137,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   async verifyBinding(user: UserEntity, platform: SubmissionMethod) {
+    if (platform === SubmissionMethod.AtCoder) throw new BadRequestException("ATCODER_SESSION_REQUIRED");
     return await this.lockService.lock(`RemoteAccountUser_${user.id}_${platform}`, async () => {
       const redis = this.redisService.getSharedClient();
       const key = `remote-bind:${user.id}:${platform}`;
@@ -176,6 +182,96 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           await this.accounts.delete({ id: account.id });
         });
       await this.redisService.getSharedClient().del(`remote-bind:${user.id}:${platform}`);
+      return await this.list(user);
+    });
+  }
+
+  async setAtcoderSession(user: UserEntity, request: SetAtcoderSessionDto) {
+    const session = normalizeAtcoderSession(request.atcoderSession);
+    if (
+      (request.clear !== undefined && typeof request.clear !== "boolean") ||
+      (request.clear && request.atcoderSession !== undefined) ||
+      (!request.clear && !session)
+    )
+      throw new BadRequestException("INVALID_ATCODER_SESSION");
+    const platform = SubmissionMethod.AtCoder;
+    return await this.lockService.lock(`RemoteAccountUser_${user.id}_${platform}`, async () => {
+      const account = await this.accounts.findOneBy({ userId: user.id, platform });
+      if (request.clear) {
+        if (account)
+          await this.lockService.lock(`RemoteAccount_${account.id}`, async () => {
+            await this.accounts.update(
+              { id: account.id },
+              {
+                atcoderSession: null,
+                atcoderSessionConfigured: false,
+                lastError: "REMOTE_AUTH_REQUIRED",
+                lastErrorAt: new Date(),
+                failures: 0,
+                nextSyncAt: new Date(),
+                catchUpRequested: false
+              }
+            );
+          });
+        return await this.list(user);
+      }
+      const redis = this.redisService.getSharedClient();
+      if (!(await redis.set(`remote-atcoder-session-check:${user.id}`, "1", "EX", 10, "NX")))
+        throw new BadRequestException("BIND_COOLDOWN");
+      const handle = await this.provider.identifyAtcoderSession(session, account?.id);
+      const handleKey = handle.toLowerCase();
+      // A refresh must never silently move existing watches or submission history to another account.
+      if (account && account.handleKey !== handleKey) throw new Error("REMOTE_SESSION_IDENTITY_MISMATCH");
+      await this.lockService.lock(`RemoteAccountHandle_${platform}_${handleKey}`, async () => {
+        const owner = await this.accounts.findOneBy({ platform, handleKey });
+        if (owner && owner.userId !== user.id) throw new BadRequestException("ACCOUNT_ALREADY_BOUND");
+        const save = async () => {
+          try {
+            // Allocate the account ID and encrypt with its identity in one transaction. Failed
+            // encryption or storage cannot leave a half-created binding behind.
+            await this.connection.transaction(async manager => {
+              const repository = manager.getRepository(RemoteAccountEntity);
+              const target =
+                account ||
+                (await repository.save(
+                  repository.create({
+                    userId: user.id,
+                    platform,
+                    handle,
+                    handleKey,
+                    verifiedAt: new Date(),
+                    cursor: "0",
+                    nextSyncAt: new Date(),
+                    activeUntil: new Date(0),
+                    catchUpRequested: true,
+                    scan: null,
+                    failures: 0,
+                    lastError: null
+                  })
+                ));
+              await repository.update(
+                { id: target.id },
+                {
+                  atcoderSession: this.atcoderSessions.encrypt(target, session),
+                  atcoderSessionConfigured: true,
+                  lastError: null,
+                  lastErrorAt: null,
+                  failures: 0,
+                  nextSyncAt: new Date(),
+                  catchUpRequested: true,
+                  catchUpVersion: () => "catchUpVersion + 1"
+                }
+              );
+            });
+          } catch (error) {
+            if (error?.driverError?.code === "ER_DUP_ENTRY" || error?.code === "ER_DUP_ENTRY")
+              throw new BadRequestException("ACCOUNT_ALREADY_BOUND");
+            throw error;
+          }
+        };
+        if (account) await this.lockService.lock(`RemoteAccount_${account.id}`, save);
+        else await save();
+      });
       return await this.list(user);
     });
   }
@@ -552,7 +648,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     const candidate = await this.accounts
       .createQueryBuilder("account")
       .where(
-        "account.platform = :platform AND account.nextSyncAt <= :now AND (account.activeUntil > :now OR account.catchUpRequested = 1)",
+        "account.platform = :platform AND account.nextSyncAt <= :now AND (account.activeUntil > :now OR account.catchUpRequested = 1) AND (account.platform != 'AtCoder' OR account.atcoderSessionConfigured = 1)",
         {
           platform,
           now
@@ -591,10 +687,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             Object.assign(account, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
           }
           let watches: RemoteWatchEntity[];
+          let atcoderSession: AtcoderSessionContext;
           const liveTargets = new Map<string, AtcoderLiveTarget>();
           if (platform === SubmissionMethod.AtCoder) {
             // Keep the account due while paused so a newly saved session takes effect on the next turn.
-            if (!(await this.provider.hasAtcoderDirectSession())) return;
+            atcoderSession = await this.provider.getAtcoderSessionContext(account.id);
+            if (!atcoderSession.session) return;
+            const { cooldownMs } = atcoderSession;
+            if (cooldownMs > 0) {
+              // Release this user's position in the due queue so their pause cannot starve others.
+              await this.accounts.update({ id: account.id }, { nextSyncAt: new Date(Date.now() + cooldownMs) });
+              return;
+            }
             watches = await this.watches.findBy({ accountId: account.id });
             const recent = watches.filter(watch => +watch.until >= Date.now() - 86400000);
             const ids = [...new Set(recent.map(watch => watch.problemId))];
@@ -615,12 +719,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           const page =
             platform === SubmissionMethod.Codeforces
               ? await this.codeforcesImportPage(account)
-              : await this.provider.getPage(account, [...liveTargets.values()]);
+              : await this.provider.getPage(account, [...liveTargets.values()], atcoderSession);
           const problems = await this.remoteProblems(platform, page.submissions);
           watches ??= await this.watches.findBy({ accountId: account.id });
           if (page.submissions.length) this.monitor?.setTaskPhase(platform, "Importing");
           for (const row of page.submissions) await this.importResult(account, user, row, problems, watches);
           await page.acknowledge?.();
+          if (page.warning)
+            await this.monitor?.recordError(account, user, {
+              error: page.warning.error,
+              details: page.warning.details,
+              at: new Date()
+            });
           const newSourceError =
             page.sourceError &&
             (page.sourceError !== account.codeforcesSourceError ||
@@ -640,7 +750,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
                     codeforcesSourceRetryAt: page.sourceRetryAt || null
                   }
                 : {}),
-              nextSyncAt: new Date(Date.now() + (page.more ? 1000 : this.settings.intervalSeconds * 1000)),
+              nextSyncAt: new Date(
+                Date.now() + (page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000)
+              ),
               // A return-to-site request arriving during this sync must survive its completion.
               catchUpRequested:
                 page.more || page.pending
@@ -656,6 +768,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               kind: "Source"
             });
         } catch (error) {
+          if (error.message === "REMOTE_COOLDOWN") return;
           const failures = account.failures + 1;
           const at = new Date();
           const retryAt = new Date(

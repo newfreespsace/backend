@@ -70,6 +70,12 @@ export class RemoteAccountEntity {
   lastErrorAt: Date;
 
   @Column({ type: "json", nullable: true, select: false })
+  atcoderSession: { iv: string; tag: string; ciphertext: string };
+
+  @Column({ type: "boolean", default: false })
+  atcoderSessionConfigured: boolean;
+
+  @Column({ type: "json", nullable: true, select: false })
   codeforcesCredentials: { iv: string; tag: string; ciphertext: string };
 
   @Column({ type: "boolean", default: false })
