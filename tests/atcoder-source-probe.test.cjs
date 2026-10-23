@@ -402,3 +402,19 @@ test("the read-only status probe queries only the requested ID and never prints 
   const missing = await checkStatus(url, "private-session", async () => new Response('{"Result":{}}'));
   assert.equal(missing.reason, "STATUS_NOT_RETURNED");
 });
+
+test("status probe accepts provisional verdicts while judging is still in progress", async () => {
+  const { checkStatus } = require("../scripts/check-atcoder-source.cjs");
+  const result = await checkStatus(
+    url,
+    "private-session",
+    async () =>
+      new Response(
+        JSON.stringify({
+          Result: { 12345678: { Html: "<td colspan='3' class='waiting-judge'><span>6/26 TLE</span></td>", Score: "0" } }
+        })
+      )
+  );
+  assert.equal(result.statusReadable, true);
+  assert.equal(result.verdict, "6/26 TLE");
+});

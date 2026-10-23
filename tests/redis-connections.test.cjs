@@ -65,14 +65,18 @@ test("repeated provider requests, binding operations and worker turns do not all
     update: async () => {}
   };
   let fetches = 0;
+  let listFetches = 0;
   global.fetch = async address => {
     fetches++;
-    if (new URL(address).pathname.endsWith("/submissions"))
+    if (new URL(address).pathname.endsWith("/status/json")) return new Response('{"Result":{}}');
+    if (new URL(address).pathname.endsWith("/submissions")) {
+      listFetches++;
       return new Response(
         `<table><thead><tr>${["Submission Time", "Task", "User", "Language", "Score", "Status"]
           .map(header => `<th>${header}</th>`)
           .join("")}</tr></thead><tbody></tbody></table>`
       );
+    }
     return new Response('{"status":"OK","result":[]}');
   };
   for (let i = 0; i < 100; i++) {
@@ -88,7 +92,8 @@ test("repeated provider requests, binding operations and worker turns do not all
     await judge.tick(Method.Codeforces);
     await judge.tick(Method.AtCoder);
   }
-  assert.equal(fetches, 201, "cached empty searches do not repeatedly fetch the full list");
+  assert.equal(fetches, 301);
+  assert.equal(listFetches, 1, "cached empty searches use JSON rather than repeatedly fetching the full list");
   assert.equal(redis.duplicateCount(), 0, "ordinary remote operations must reuse the shared command connection");
 });
 

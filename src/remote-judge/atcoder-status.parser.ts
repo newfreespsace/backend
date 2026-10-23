@@ -1,10 +1,14 @@
 import * as cheerio from "cheerio";
 
+import { SubmissionStatus } from "@/submission/submission-status.enum";
+
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { RemoteSyncError } from "./remote-error";
 
-/** Only update submissions whose identity and metadata were previously verified in the list. */
-export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): RemoteSubmission[] {
+export type AtcoderStatusUpdate = Pick<RemoteSubmission, "id" | "verdict" | "status" | "time" | "memory" | "points">;
+
+/** Status responses can discover IDs, but do not establish task, language or submission time. */
+export function parseAtcoderStatusResponse(body: string): AtcoderStatusUpdate[] {
   const fail = (id?: string): never => {
     throw new RemoteSyncError("REMOTE_ATCODER_STATUS_FAILED", {
       stage: "parse",
@@ -20,11 +24,10 @@ export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): R
   } catch {
     fail();
   }
-  const rows: RemoteSubmission[] = [];
-  for (const row of known) {
-    if (!Object.prototype.hasOwnProperty.call(result, row.id)) continue;
-    const entry = result[row.id];
-    if (!entry || typeof entry.Html !== "string" || entry.Html.length > 65536) fail(row.id);
+  const rows: AtcoderStatusUpdate[] = [];
+  for (const [id, entry] of Object.entries(result)) {
+    if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) fail();
+    if (!entry || typeof entry.Html !== "string" || entry.Html.length > 65536) fail(id);
     const $ = cheerio.load(`<table><tbody><tr>${entry.Html}</tr></tbody></table>`);
     const cells = $("tbody > tr").first().children("td");
     const verdict = cells
@@ -32,14 +35,19 @@ export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): R
       .text()
       .trim()
       .replace(/\s*\/\s*/g, "/");
-    if (!/^(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE|WJ|WR|Judging|\d+\/\d+)$/.test(verdict)) fail(row.id);
+    if (
+      !/^(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE|WJ|WR|Judging|\d+\/\d+(?:\s+(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE))?)$/.test(
+        verdict
+      )
+    )
+      fail(id);
     const resource = (index: number, units: Record<string, number>) => {
       const raw = cells.eq(index).text().trim();
       if (!raw || raw === "-") return null;
-      const match = raw.match(/^([\d,]+(?:\.\d+)?)\s*(\w+)$/);
-      if (!match || !units[match[2]]) fail(row.id);
+      const match = raw.match(/^(?:>\s*)?([\d,]+(?:\.\d+)?)\s*(\w+)$/);
+      if (!match || !units[match[2]]) fail(id);
       const value = Number(match[1].replace(/,/g, "")) * units[match[2]];
-      if (!Number.isFinite(value) || value < 0) fail(row.id);
+      if (!Number.isFinite(value) || value < 0) fail(id);
       return value;
     };
     const score = entry.Score === "" ? undefined : entry.Score;
@@ -49,15 +57,23 @@ export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): R
         !/^-?\d+(?:\.\d+)?$/.test(String(score)) ||
         !Number.isFinite(Number(score)))
     )
-      fail(row.id);
+      fail(id);
     rows.push({
-      ...row,
+      id,
       verdict,
-      status: remoteVerdict(SubmissionMethod.AtCoder, verdict === "Judging" ? "WJ" : verdict),
+      status: cells.eq(0).hasClass("waiting-judge")
+        ? SubmissionStatus.Pending
+        : remoteVerdict(SubmissionMethod.AtCoder, verdict === "Judging" ? "WJ" : verdict),
       time: resource(1, { ms: 1, s: 1000 }),
       memory: resource(2, { B: 1, KiB: 1024, MiB: 1048576, KB: 1024 }),
       ...(score !== undefined ? { points: Number(score) } : {})
     });
   }
   return rows;
+}
+
+/** Only import statuses after their identity and metadata have been verified in the list. */
+export function parseAtcoderStatuses(body: string, known: RemoteSubmission[]): RemoteSubmission[] {
+  const updates = new Map(parseAtcoderStatusResponse(body).map(row => [row.id, row]));
+  return known.filter(row => updates.has(row.id)).map(row => ({ ...row, ...updates.get(row.id) }));
 }

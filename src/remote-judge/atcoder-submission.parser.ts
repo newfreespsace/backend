@@ -11,7 +11,7 @@ function numericValue(text: string): number | null {
 }
 
 function resourceValue(text: string, units: Record<string, number>): number | null {
-  const match = text.trim().match(/^([\d,.]+)\s*(\w+)$/);
+  const match = text.trim().match(/^(?:>\s*)?([\d,.]+)\s*(\w+)$/);
   if (!match || !units[match[2]]) return null;
   const value = numericValue(match[1]);
   return value == null ? null : value * units[match[2]];

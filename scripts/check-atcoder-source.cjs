@@ -347,7 +347,12 @@ async function checkStatus(input, session, fetchPage = fetch) {
       .text()
       .trim()
       .replace(/\s*\/\s*/g, "/");
-    if (!/^(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE|WJ|WR|Judging|\d+\/\d+)$/.test(verdict)) throw new Error();
+    if (
+      !/^(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE|WJ|WR|Judging|\d+\/\d+(?:\s+(?:AC|WA|CE|RE|TLE|MLE|OLE|IE|QLE))?)$/.test(
+        verdict
+      )
+    )
+      throw new Error();
     return { ...result, statusReadable: true, reason: "STATUS_FOUND", verdict };
   } catch {
     return { ...result, reason: "INVALID_STATUS_RESPONSE" };

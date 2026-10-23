@@ -163,15 +163,20 @@ test("parser failures identify the contest, page, submission and invalid field w
   }
 });
 
-test("AtCoder HTTP errors carry the failed contest and page into synchronization diagnostics", async () => {
+test("AtCoder JSON access denial carries the contest into diagnostics without requesting HTML", async () => {
   const { provider } = fixture();
-  global.fetch = async () => new Response("private upstream body", { status: 403 });
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    return new Response("private upstream body", { status: 403 });
+  };
   await assert.rejects(provider.getPage(account, targets), error => {
     assert.equal(error.message, "REMOTE_ACCESS_DENIED");
-    assert.deepEqual(error.details, { stage: "request", httpStatus: 403, contestId: "abc480", page: 1 });
+    assert.deepEqual(error.details, { stage: "request", httpStatus: 403, contestId: "abc480" });
     assert.doesNotMatch(JSON.stringify(error), /private upstream|test-dedicated-session/);
     return true;
   });
+  assert.equal(requests, 1);
 });
 
 test("results come exclusively from AtCoder, with deferred checkpoints", async () => {
@@ -184,10 +189,12 @@ test("results come exclusively from AtCoder, with deferred checkpoints", async (
   await result.acknowledge();
   assert.equal(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).boundary, 80223806);
   assert.equal(calls[0].url.hostname, "atcoder.jp");
-  assert.equal(calls[0].url.searchParams.get("f.User"), "coder");
-  assert.equal(calls[0].url.searchParams.get("lang"), "en");
+  assert.ok(calls[0].url.pathname.endsWith("/status/json"));
+  assert.equal(calls[0].url.search, "");
+  assert.equal(calls[1].url.searchParams.get("f.User"), "coder");
+  assert.equal(calls[1].url.searchParams.get("lang"), "en");
   assert.equal(calls[0].authenticated, true);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
 });
 
 test("distinct submissions in the same second are retained and overlapping IDs are deduplicated", async () => {
@@ -208,7 +215,7 @@ test("expired sessions, access failures, rate limits and verification pages neve
       throw new Error(code);
     });
     await assert.rejects(provider.getPage(account, targets), error => error.message === code);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
     assert.equal(calls[0].url.origin, "https://atcoder.jp");
     assert.equal(values.has("remote-atcoder-pages:1:abc480"), false);
   }
@@ -402,7 +409,8 @@ test("explicit HTTP and HTML challenges have a distinct error and do not advance
       assert.equal(error.message, "REMOTE_VERIFICATION_REQUIRED");
       assert.equal(error.details.reason, "CHALLENGE_PAGE");
       assert.equal(error.details.httpStatus, status);
-      assert.equal(error.details.page, 1);
+      assert.equal(error.details.contestId, "abc480");
+      assert.equal(error.details.page, undefined);
       assert.doesNotMatch(JSON.stringify(error), /private verification|test-dedicated-session|<form/);
       return true;
     });
@@ -437,11 +445,11 @@ test("shared session cooldown blocks other accounts and source fetches, expires,
     return new Response(html([row()]));
   };
   await provider.getPage(account, targets);
-  assert.equal(requests, 2);
+  assert.equal(requests, 3);
   personalSession = "test-dedicated-session";
   for (const key of expirations.keys()) expirations.set(key, Date.now() - 1);
   await provider.getPage(account, targets);
-  assert.equal(requests, 3);
+  assert.equal(requests, 5);
 });
 
 test("login failures cool down the shared session but isolated 403s and malformed contest pages do not", async () => {
@@ -577,7 +585,7 @@ test("known pending IDs poll JSON without refreshing the full list and stop at a
   let verdict = "WJ";
   const { provider, calls, values } = fixture(
     () => html([row({ id: 321, verdict: "WJ" })]),
-    url => statusJson(url.searchParams.getAll("sids[]"), verdict)
+    () => statusJson(["321"], verdict)
   );
   let result = await provider.getPage(account, targets);
   assert.equal(result.pending, true);
@@ -594,11 +602,11 @@ test("known pending IDs poll JSON without refreshing the full list and stop at a
   await result.acknowledge();
   await provider.getPage(account, targets);
   assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
-  assert.equal(calls.filter(call => call.url.pathname.endsWith("/status/json")).length, 2);
+  assert.equal(calls.filter(call => call.url.pathname.endsWith("/status/json")).length, 3);
   assert.deepEqual(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).pendingRows, []);
 });
 
-test("status updates only apply to known IDs; omitted IDs remain pending and oversized batches rotate", async () => {
+test("unknown JSON IDs require verified metadata, while omitted IDs remain pending", async () => {
   const { provider, calls } = fixture(
     () => html(Array.from({ length: 23 }, (_, index) => row({ id: index + 1, verdict: "WJ" }))),
     () => statusJson(["999999"])
@@ -612,12 +620,10 @@ test("status updates only apply to known IDs; omitted IDs remain pending and ove
   await result.acknowledge();
   result = await provider.getPage(account, targets);
   assert.equal(result.pending, true);
-  const batches = calls
-    .filter(call => call.url.pathname.endsWith("/status/json"))
-    .map(call => call.url.searchParams.getAll("sids[]"));
-  assert.equal(batches[0].length, 20);
-  assert.equal(batches[1].length, 20);
-  assert.ok(batches[1].includes("23"));
+  const statusCalls = calls.filter(call => call.url.pathname.endsWith("/status/json"));
+  assert.equal(statusCalls.length, 2);
+  assert.ok(statusCalls.every(call => call.url.search === ""));
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
 });
 
 test("status parser validates JSON, verdicts, scores and resources without accepting foreign metadata", () => {
@@ -659,18 +665,18 @@ test("each user's requests and cooldown resolve only their own credential", asyn
   const { provider } = fixture();
   provider.atcoderSessions = { get: async id => (id === 1 ? "private-one" : id === 2 ? "private-two" : undefined) };
   const cookies = [];
-  global.fetch = async (_, options) => {
+  global.fetch = async (address, options) => {
     cookies.push(options.headers.Cookie);
     return options.headers.Cookie === "REVEL_SESSION=private-one"
       ? new Response("", { status: 429 })
-      : new Response(html([row()]));
+      : new Response(new URL(address).pathname.endsWith("/status/json") ? statusJson(["80223806"]) : html([row()]));
   };
   await assert.rejects(provider.getPage(account, targets), /REMOTE_RATE_LIMITED/);
   const second = await provider.getPage({ ...account, id: 2 }, targets);
   assert.equal(second.submissions.length, 1);
   assert.equal((await provider.getAtcoderSessionContext(2)).cooldownMs, 0);
   await assert.rejects(provider.getPage({ ...account, id: 3 }, targets), /REMOTE_AUTH_REQUIRED/);
-  assert.deepEqual(cookies, ["REVEL_SESSION=private-one", "REVEL_SESSION=private-two"]);
+  assert.deepEqual(cookies, ["REVEL_SESSION=private-one", "REVEL_SESSION=private-two", "REVEL_SESSION=private-two"]);
 });
 
 test("legacy pending IDs without cached metadata are still discovered beyond the previous boundary", async () => {
@@ -686,7 +692,165 @@ test("legacy pending IDs without cached metadata are still discovered beyond the
   const result = await provider.getPage(account, targets);
   assert.equal(result.submissions.find(row => row.id === "38").status, Status.Accepted);
   assert.equal(result.pending, false);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   await result.acknowledge();
   assert.deepEqual(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).pendingIds, []);
+});
+
+function longRunningStatus(verdict, finished = false) {
+  return JSON.stringify({
+    Result: {
+      80271618: {
+        Html: finished
+          ? "<td class='text-center'><span class='label label-warning' title='Time Limit Exceeded'>TLE</span></td><td class='text-right'>&gt; 2000 ms</td><td class='text-right'>1616 KiB</td>"
+          : `<td colspan='3' class='text-center waiting-judge' data-id='80271618'><span class='label label-warning' title='Time Limit Exceeded'>${verdict}</span></td>`,
+        Score: "0"
+      }
+    }
+  });
+}
+
+test("long-running progress with a provisional TLE remains pending until the final JSON result, without more HTML", async () => {
+  let finished = false;
+  const { provider, values, calls } = fixture(
+    () => html([row({ id: 80271618, verdict: "WJ" })]),
+    () => longRunningStatus("6/26 TLE", finished)
+  );
+  let result = await provider.getPage(account, targets);
+  assert.equal(result.submissions[0].verdict, "6/26 TLE");
+  assert.equal(result.submissions[0].status, Status.Pending);
+  assert.equal(result.submissions[0].time, null);
+  assert.equal(result.submissions[0].memory, null);
+  assert.equal(result.warning, undefined);
+  assert.equal(result.pending, true);
+  await result.acknowledge();
+  finished = true;
+  result = await provider.getPage(account, targets);
+  assert.equal(result.submissions[0].status, Status.TimeLimitExceeded);
+  assert.equal(result.submissions[0].verdict, "TLE");
+  assert.equal(result.submissions[0].time, 2000);
+  assert.equal(result.submissions[0].memory, 1616 * 1024);
+  assert.equal(result.submissions[0].points, 0);
+  assert.equal(result.pending, false);
+  assert.equal(result.warning, undefined);
+  // The new result and checkpoint are committed only after the caller imports them.
+  assert.equal(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).pendingRows.length, 1);
+  await result.acknowledge();
+  assert.equal(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).pendingRows.length, 0);
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+});
+
+test("JSON discovers new IDs after a completed scan and fetches metadata only once per new submission", async () => {
+  let ids = [100];
+  const { provider, calls } = fixture(
+    () => html(ids.map(id => row({ id, verdict: "AC" }))),
+    () => statusJson(ids.map(String))
+  );
+  let result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+  ids = [101, 100];
+  result = await provider.getPage(account, targets);
+  assert.equal(result.submissions.find(row => row.id === "101").taskId, "abc480_a");
+  assert.equal(result.pending, false);
+  await result.acknowledge();
+  await provider.getPage(account, targets);
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 2);
+  assert.equal(calls.filter(call => call.url.pathname.endsWith("/status/json")).length, 4);
+});
+
+test("an empty JSON discovery result does not repeatedly request HTML, but periodic reconciliation still runs", async () => {
+  const { provider, calls, values } = fixture(() => html());
+  let result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  const saved = JSON.parse(values.get("remote-atcoder-pages:1:abc480"));
+  assert.ok(saved.nextDiscoveryAt >= Date.now() + 299000);
+  result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+  saved.nextDiscoveryAt = 0;
+  values.set("remote-atcoder-pages:1:abc480", JSON.stringify(saved));
+  await provider.getPage(account, targets);
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 2);
+});
+
+test("more than twenty pending submissions all receive JSON updates without HTML or batch rotation", async () => {
+  let verdict = "WJ";
+  const ids = Array.from({ length: 23 }, (_, i) => String(i + 1));
+  const { provider, calls } = fixture(
+    () => html(ids.map(id => row({ id, verdict: "WJ" }))),
+    () => statusJson(ids, verdict)
+  );
+  let result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  verdict = "AC";
+  result = await provider.getPage(account, targets);
+  assert.equal(result.submissions.length, 23);
+  assert.ok(result.submissions.every(row => row.status === Status.Accepted));
+  assert.equal(result.pending, false);
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+});
+
+test("metadata absent from a lagging list stays unresolved and retries are throttled", async () => {
+  let listed = false;
+  const { provider, calls, values } = fixture(
+    () => html(listed ? [row({ id: 321, verdict: "AC" })] : []),
+    () => statusJson(["321"])
+  );
+  let result = await provider.getPage(account, targets);
+  assert.deepEqual(result.submissions, []);
+  assert.equal(result.pending, true);
+  await result.acknowledge();
+  result = await provider.getPage(account, targets);
+  assert.deepEqual(result.submissions, []);
+  await result.acknowledge();
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+  const saved = JSON.parse(values.get("remote-atcoder-pages:1:abc480"));
+  saved.metadataRetryAt = 0;
+  values.set("remote-atcoder-pages:1:abc480", JSON.stringify(saved));
+  listed = true;
+  result = await provider.getPage(account, targets);
+  assert.equal(result.submissions[0].id, "321");
+  assert.equal(result.pending, false);
+});
+
+test("a later final HTML result takes precedence over an earlier pending JSON snapshot", async () => {
+  const { provider } = fixture(
+    () => html([row({ id: 321, verdict: "AC" })]),
+    () => statusJson(["321"], "WJ")
+  );
+  const result = await provider.getPage(account, targets);
+  assert.equal(result.submissions[0].status, Status.Accepted);
+  assert.equal(result.pending, false);
+});
+
+test("bounded metadata cache does not rediscover older JSON IDs on every turn", async () => {
+  const ids = Array.from({ length: 205 }, (_, i) => String(i + 1));
+  const { provider, values, calls } = fixture(
+    () => html(ids.map(id => row({ id, verdict: "AC" }))),
+    () => statusJson(ids)
+  );
+  const result = await provider.getPage(account, targets);
+  await result.acknowledge();
+  assert.equal(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).knownRows.length, 200);
+  const next = await provider.getPage(account, targets);
+  assert.equal(next.pending, false);
+  assert.equal(calls.filter(call => !call.url.pathname.endsWith("/status/json")).length, 1);
+});
+
+test("HTML fallback accepts progress verdicts and greater-than resource displays too", () => {
+  const pending = parseAtcoderSubmissionPage(html([row({ verdict: "6/26 TLE" })]), "abc480", "coder", 1);
+  assert.equal(pending.submissions[0].status, Status.Pending);
+  const final = parseAtcoderSubmissionPage(html([row({ verdict: "TLE", exec: "&gt; 2000 ms" })]), "abc480", "coder", 1);
+  assert.equal(final.submissions[0].status, Status.TimeLimitExceeded);
+  assert.equal(final.submissions[0].time, 2000);
+});
+
+test("the waiting-judge marker prevents a provisional terminal verdict from being finalized", () => {
+  const { parseAtcoderStatusResponse } = require("../dist/remote-judge/atcoder-status.parser");
+  const [result] = parseAtcoderStatusResponse(longRunningStatus("TLE"));
+  assert.equal(result.verdict, "TLE");
+  assert.equal(result.status, Status.Pending);
 });
