@@ -51,12 +51,24 @@ export class NotificationService {
   }
 
   async unreadCount(userId: number) {
-    return { count: await this.recipients.countBy({ userId, readAt: IsNull() }) };
+    return {
+      count: await this.recipients.countBy({
+        userId,
+        readAt: IsNull(),
+        deletedAt: IsNull(),
+        notification: { revokedAt: IsNull() }
+      })
+    };
   }
 
   async query(userId: number, query: QueryNotificationsDto) {
     const [rows, total] = await this.recipients.findAndCount({
-      where: { userId, ...(query.unreadOnly ? { readAt: IsNull() } : {}) },
+      where: {
+        userId,
+        deletedAt: IsNull(),
+        notification: { revokedAt: IsNull() },
+        ...(query.unreadOnly ? { readAt: IsNull() } : {})
+      },
       relations: { notification: true },
       order: { id: "DESC" },
       skip: query.skip,
@@ -76,7 +88,7 @@ export class NotificationService {
 
   async get(userId: number, id: string) {
     const row = await this.recipients.findOne({
-      where: { userId, notificationId: id },
+      where: { userId, notificationId: id, deletedAt: IsNull(), notification: { revokedAt: IsNull() } },
       relations: { notification: true }
     });
     if (!row) throw new NotFoundException();
@@ -94,11 +106,49 @@ export class NotificationService {
   async markRead(userId: number, id?: string, all = false) {
     if (!all && !id) throw new BadRequestException("Specify a notification or all");
     await this.recipients.update(
-      { userId, readAt: IsNull(), ...(!all ? { notificationId: id } : {}) },
+      { userId, deletedAt: IsNull(), readAt: IsNull(), ...(!all ? { notificationId: id } : {}) },
       { readAt: new Date() }
     );
     await this.changed([userId]);
     return await this.unreadCount(userId);
+  }
+
+  async deleteReceived(userId: number, id: string) {
+    await this.dataSource.transaction(async manager => {
+      const recipients = manager.getRepository(NotificationRecipientEntity);
+      const recipient = await recipients.findOneBy({ userId, notificationId: id });
+      if (!recipient) throw new NotFoundException();
+      await recipients.update({ userId, notificationId: id, deletedAt: IsNull() }, { deletedAt: new Date() });
+      await manager
+        .getRepository(NotificationPushJobEntity)
+        .update({ userId, notificationId: id, status: In(["pending", "processing"]) }, { status: "cancelled" });
+    });
+    await this.changed([userId]);
+    return await this.unreadCount(userId);
+  }
+
+  async revoke(admin: UserEntity, id: string) {
+    if (!admin?.isAdmin || !admin.isActive) throw new ForbiddenException();
+    const userIds = await this.dataSource.transaction(async manager => {
+      const notifications = manager.getRepository(NotificationEntity);
+      const notification = await notifications.findOneBy({ id });
+      if (!notification) throw new NotFoundException();
+      const now = new Date();
+      // Keep the first revocation and the idempotency record, including on retries.
+      await notifications.update({ id, revokedAt: IsNull() }, { revokedAt: now, revokedById: admin.id });
+      const recipients = manager.getRepository(NotificationRecipientEntity);
+      const affected = await recipients.find({
+        where: { notificationId: id, deletedAt: IsNull() },
+        select: { userId: true }
+      });
+      await recipients.update({ notificationId: id, deletedAt: IsNull() }, { deletedAt: now });
+      await manager
+        .getRepository(NotificationPushJobEntity)
+        .update({ notificationId: id, status: In(["pending", "processing"]) }, { status: "cancelled" });
+      return [...new Set([admin.id, ...affected.map(recipient => recipient.userId)])];
+    });
+    await this.changed(userIds);
+    return { success: true };
   }
 
   async send(sender: UserEntity, request: SendNotificationDto) {
@@ -116,6 +166,8 @@ export class NotificationService {
           audience: request.audience,
           usernames: [...request.usernames].sort(),
           groupId: request.groupId,
+          // Omit empty groupIds to preserve hashes from older single-group clients.
+          ...(request.groupIds?.length ? { groupIds: [...request.groupIds].sort((a, b) => a - b) } : {}),
           push: request.push
         })
       )
@@ -141,19 +193,27 @@ export class NotificationService {
           users.andWhere("user.username IN (:...usernames)", { usernames: request.usernames });
           audienceLabel = request.usernames.join(", ").slice(0, 1000);
         } else if (request.audience === "group") {
-          const group =
-            request.groupId && (await manager.getRepository(GroupEntity).findOneBy({ id: request.groupId }));
-          if (!group) throw new BadRequestException("Group does not exist");
-          users.innerJoin(
-            GroupMembershipEntity,
-            "membership",
-            "membership.userId = user.id AND membership.groupId = :groupId",
-            { groupId: request.groupId }
-          );
-          audienceLabel = `群组 #${request.groupId}`;
+          const groupIds = [...new Set([...(request.groupIds || []), ...(request.groupId ? [request.groupId] : [])])];
+          if (!groupIds.length || groupIds.length > 500)
+            throw new BadRequestException("Choose between 1 and 500 recipient groups");
+          const groups = await manager.getRepository(GroupEntity).findBy({ id: In(groupIds) });
+          if (groups.length !== groupIds.length) throw new BadRequestException("Group does not exist");
+          users
+            .innerJoin(
+              GroupMembershipEntity,
+              "membership",
+              "membership.userId = user.id AND membership.groupId IN (:...groupIds)",
+              { groupIds }
+            )
+            .distinct(true);
+          const names = new Map(groups.map(group => [group.id, group.name || `群组 #${group.id}`]));
+          audienceLabel = groupIds
+            .map(id => names.get(id))
+            .join(", ")
+            .slice(0, 1000);
         }
         const selected = await users.getRawMany<{ id: number }>();
-        userIds = selected.map(row => Number(row.id));
+        userIds = [...new Set(selected.map(row => Number(row.id)))];
         if (!userIds.length || (request.audience === "users" && userIds.length !== request.usernames.length))
           throw new BadRequestException("Recipient does not exist or is inactive");
         const notification = manager.getRepository(NotificationEntity).create({
@@ -225,7 +285,9 @@ export class NotificationService {
         audienceLabel: item.audienceLabel,
         recipientCount: item.recipientCount,
         push: item.push,
-        createdAt: item.createdAt
+        createdAt: item.createdAt,
+        revokedAt: item.revokedAt,
+        revokedById: item.revokedById
       })),
       total
     };

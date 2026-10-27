@@ -1,12 +1,12 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const path = require("node:path");
-const { randomUUID, createECDH, randomBytes } = require("node:crypto");
+const { randomUUID, createECDH, randomBytes, createHash } = require("node:crypto");
 require("reflect-metadata");
 require("tsconfig-paths").register({ baseUrl: path.resolve(__dirname, "../dist"), paths: { "@/*": ["*"] } });
 const { plainToInstance } = require("class-transformer");
 const { validate } = require("class-validator");
-const { DataSource } = require("typeorm");
+const { DataSource, IsNull } = require("typeorm");
 const E = require("../dist/notification/notification.entity");
 const {
   NotificationEntity: N,
@@ -22,7 +22,12 @@ const { AuthSessionService } = require("../dist/auth/auth-session.service");
 const { UserEntity: U } = require("../dist/user/user.entity");
 const { GroupEntity: G } = require("../dist/group/group.entity");
 const { GroupMembershipEntity: M } = require("../dist/group/group-membership.entity");
-const { SendNotificationDto, BindPushDto, QueryNotificationsDto } = require("../dist/notification/notification.dto");
+const {
+  SendNotificationDto,
+  BindPushDto,
+  QueryNotificationsDto,
+  NotificationIdDto
+} = require("../dist/notification/notification.dto");
 const {
   validateNotificationPath,
   validatePushEndpoint,
@@ -44,6 +49,7 @@ function matches(row, where) {
       if (value._type === "not") return row[key] !== value._value;
       throw new Error(`Unexpected operator ${value._type}`);
     }
+    if (value && typeof value === "object" && !(value instanceof Date)) return !!row[key] && matches(row[key], value);
     return value instanceof Date ? +row[key] === +value : row[key] === value;
   });
 }
@@ -66,6 +72,11 @@ function fixture() {
     repositories = new Map();
   const repo = entity => {
     if (repositories.has(entity)) return repositories.get(entity);
+    const matchesRow = (row, where) =>
+      matches(
+        entity === R ? { ...row, notification: rows.get(N).find(item => item.id === row.notificationId) } : row,
+        where
+      );
     const repository = {
       create: data => ({ ...data }),
       insert: async values => {
@@ -91,19 +102,19 @@ function fixture() {
           .get(entity)
           .find(item => item.id === value.id || (entity === S && item.endpointHash === value.endpointHash));
       },
-      findOneBy: async where => rows.get(entity).find(row => matches(row, where)) || null,
+      findOneBy: async where => rows.get(entity).find(row => matchesRow(row, where)) || null,
       findOne: async options => {
         const row = await repository.findOneBy(options.where);
         return row && options.relations
           ? { ...row, notification: rows.get(N).find(item => item.id === row.notificationId) }
           : row;
       },
-      findBy: async where => rows.get(entity).filter(row => matches(row, where)),
+      findBy: async where => rows.get(entity).filter(row => matchesRow(row, where)),
       find: async options => repository.findBy(options.where),
       findAndCount: async options => {
         const selected = rows
           .get(entity)
-          .filter(row => !options.where || matches(row, options.where))
+          .filter(row => !options.where || matchesRow(row, options.where))
           .sort((a, b) => b.id - a.id);
         return [
           selected
@@ -116,9 +127,9 @@ function fixture() {
           selected.length
         ];
       },
-      countBy: async where => rows.get(entity).filter(row => matches(row, where)).length,
+      countBy: async where => rows.get(entity).filter(row => matchesRow(row, where)).length,
       update: async (where, values) => {
-        const selected = rows.get(entity).filter(row => matches(row, where));
+        const selected = rows.get(entity).filter(row => matchesRow(row, where));
         selected.forEach(row => Object.assign(row, values));
         return { affected: selected.length };
       },
@@ -126,6 +137,9 @@ function fixture() {
         const parameters = {};
         return {
           select() {
+            return this;
+          },
+          distinct() {
             return this;
           },
           where(_sql, params) {
@@ -148,7 +162,11 @@ function fixture() {
                   user.isActive &&
                   (!parameters.usernames || parameters.usernames.includes(user.username)) &&
                   (!parameters.groupId ||
-                    rows.get(M).some(member => member.groupId === parameters.groupId && member.userId === user.id))
+                    rows.get(M).some(member => member.groupId === parameters.groupId && member.userId === user.id)) &&
+                  (!parameters.groupIds ||
+                    rows
+                      .get(M)
+                      .some(member => parameters.groupIds.includes(member.groupId) && member.userId === user.id))
               )
               .map(user => ({ id: user.id }))
         };
@@ -207,6 +225,23 @@ test("new entities build MySQL metadata alongside the existing entities", async 
   await source.buildMetadatas();
   for (const entity of Object.values(E)) assert.ok(source.getMetadata(entity));
   assert.ok(source.getMetadata(R).indices.some(index => index.isUnique && index.columns.length === 2));
+  for (const [entity, columns] of [
+    [N, ["revokedAt", "revokedById"]],
+    [R, ["deletedAt"]]
+  ]) {
+    for (const column of columns)
+      assert.equal(source.getMetadata(entity).findColumnWithPropertyName(column).isNullable, true);
+  }
+  const sql = source
+    .getRepository(R)
+    .createQueryBuilder("recipient")
+    .setFindOptions({
+      where: { userId: 2, deletedAt: IsNull(), notification: { revokedAt: IsNull() } }
+    })
+    .getSql();
+  assert.match(sql, /JOIN `notification`/);
+  assert.match(sql, /`deletedAt` IS NULL/);
+  assert.match(sql, /`revokedAt` IS NULL/);
 });
 test("validation rejects forged user IDs, oversized audiences and invalid pagination", async () => {
   const options = { whitelist: true, forbidNonWhitelisted: true };
@@ -219,6 +254,9 @@ test("validation rejects forged user IDs, oversized audiences and invalid pagina
     ).length
   );
   assert.ok((await validate(plainToInstance(QueryNotificationsDto, { take: 1000 }), options)).length);
+  assert.equal((await validate(plainToInstance(NotificationIdDto, { id: randomUUID() }), options)).length, 0);
+  assert.ok((await validate(plainToInstance(NotificationIdDto, { id: "not-a-uuid" }), options)).length);
+  assert.ok((await validate(plainToInstance(NotificationIdDto, { id: randomUUID(), userId: 3 }), options)).length);
   const f = fixture();
   assert.equal((await validate(f.request(), options)).length, 0);
   assert.ok((await validate(f.request({ usernames: Array.from({ length: 501 }, (_, i) => `u${i}`) }), options)).length);
@@ -315,6 +353,94 @@ test("all/group audiences snapshot active accounts; unknown recipients roll back
     assert.equal(f.rows.get(N).length, 0);
   }
 });
+
+test("multiple groups form a deduplicated audience and enqueue each subscribed device once", async () => {
+  const f = fixture();
+  f.rows.get(G)[0].name = "基础班";
+  f.rows.get(G).push({ id: 11, name: "提高班" });
+  f.rows.get(M).push({ groupId: 11, userId: 2 }, { groupId: 11, userId: 3 }, { groupId: 11, userId: 4 });
+  for (const [userId, device] of [
+    [2, "alice-1"],
+    [2, "alice-2"],
+    [3, "bob"]
+  ]) {
+    await f.service.bindPush(userId, 10, new Date(Date.now() + 3600000), {
+      endpoint: `https://fcm.googleapis.com/${device}`,
+      keys: keys()
+    });
+  }
+  const builder = f.repo(U).createQueryBuilder;
+  f.repo(U).createQueryBuilder = (...args) => {
+    const query = builder(...args),
+      getRows = query.getRawMany;
+    query.getRawMany = async () => {
+      const selected = await getRows();
+      return [...selected, selected[0]];
+    };
+    return query;
+  };
+  const request = f.request({ audience: "group", usernames: [], groupIds: [10, 11], push: true });
+  const sent = await f.service.send(admin, request);
+  assert.equal(sent.recipientCount, 2);
+  assert.deepEqual(
+    f.rows.get(R).map(row => row.userId),
+    [2, 3]
+  );
+  assert.equal(f.rows.get(J).length, 3);
+  assert.equal(f.rows.get(N)[0].audienceLabel, "基础班, 提高班");
+  assert.deepEqual(f.published, [{ userIds: [2, 3] }]);
+  assert.deepEqual(await f.service.send(admin, { ...request, groupIds: [11, 10] }), sent);
+  assert.equal(f.rows.get(R).length, 2);
+  await assert.rejects(() => f.service.send(admin, { ...request, groupIds: [10] }), { status: 409 });
+});
+
+test("group selection validates every group and rejects malformed or excessive arrays", async () => {
+  const options = { whitelist: true, forbidNonWhitelisted: true };
+  const f = fixture();
+  assert.equal((await validate(f.request({ groupIds: [10, 11] }), options)).length, 0);
+  for (const groupIds of [[0], [-1], [1.5], ["10"], [10, 10], null, Array.from({ length: 501 }, (_, i) => i + 1)]) {
+    assert.ok((await validate(f.request({ groupIds }), options)).length);
+  }
+  for (const groupIds of [[], [999], [10, 999]]) {
+    const invalid = fixture();
+    await assert.rejects(
+      () => invalid.service.send(admin, invalid.request({ audience: "group", usernames: [], groupIds })),
+      { status: 400 }
+    );
+    assert.equal(invalid.rows.get(N).length, 0);
+    assert.equal(invalid.rows.get(R).length, 0);
+    assert.equal(invalid.published.length, 0);
+  }
+});
+
+test("legacy groupId requests retain their old idempotency hash and can coexist with groupIds", async () => {
+  const f = fixture();
+  const request = f.request({ audience: "group", usernames: [], groupId: 10 });
+  const sent = await f.service.send(admin, request);
+  const oldHash = createHash("sha256")
+    .update(
+      JSON.stringify({
+        senderId: admin.id,
+        body: request.body.trim(),
+        targetPath: request.targetPath,
+        audience: request.audience,
+        usernames: [],
+        groupId: 10,
+        push: request.push
+      })
+    )
+    .digest("hex");
+  assert.equal(f.rows.get(N)[0].requestHash, oldHash);
+  assert.deepEqual(await f.service.send(admin, request), sent);
+  const mixed = fixture();
+  mixed.rows.get(G).push({ id: 11, name: "提高班" });
+  mixed.rows.get(M).push({ groupId: 11, userId: 3 });
+  await mixed.service.send(admin, mixed.request({ audience: "group", usernames: [], groupId: 10, groupIds: [10, 11] }));
+  assert.deepEqual(
+    mixed.rows.get(R).map(row => row.userId),
+    [2, 3]
+  );
+});
 test("send retries are idempotent, reject content conflicts and roll back failed fanout", async () => {
   const f = fixture(),
     request = f.request();
@@ -354,6 +480,118 @@ test("push jobs snapshot only enabled devices belonging to the targeted user", a
   assert.equal(f.rows.get(J).length, 2);
   assert.ok(f.rows.get(J).every(job => job.userId === 2));
 });
+
+test("personal deletion is owner-scoped, preserves other recipients and cancels only that user's pending pushes", async () => {
+  const f = fixture();
+  for (const userId of [2, 3])
+    await f.service.bindPush(userId, 10, new Date(Date.now() + 3600000), {
+      endpoint: `https://fcm.googleapis.com/${userId}`,
+      keys: keys()
+    });
+  const result = await f.service.send(admin, f.request({ audience: "all", usernames: [], push: true }));
+  await assert.rejects(() => f.service.deleteReceived(4, result.id), { status: 404 });
+  assert.equal((await f.service.unreadCount(2)).count, 1);
+  assert.deepEqual(await f.service.deleteReceived(2, result.id), { count: 0 });
+  const removed = f.rows.get(R).find(row => row.userId === 2);
+  assert.ok(removed.deletedAt instanceof Date);
+  const originalDate = +removed.deletedAt;
+  assert.equal((await f.service.query(2, { take: 20 })).total, 0);
+  assert.equal((await f.service.query(2, { take: 20, unreadOnly: true })).total, 0);
+  await assert.rejects(() => f.service.get(2, result.id), { status: 404 });
+  assert.equal((await f.service.get(3, result.id)).item.body, "Private content");
+  assert.equal((await f.service.unreadCount(3)).count, 1);
+  assert.equal(f.rows.get(J).find(job => job.userId === 2).status, "cancelled");
+  assert.equal(f.rows.get(J).find(job => job.userId === 3).status, "pending");
+  assert.equal(f.rows.get(N).length, 1);
+  assert.equal(f.rows.get(N)[0].recipientCount, 3);
+  assert.equal((await f.service.history({ take: 20 })).total, 1);
+  assert.deepEqual(await f.service.deleteReceived(2, result.id), { count: 0 });
+  assert.equal(+removed.deletedAt, originalDate);
+  assert.deepEqual(f.published.at(-1), { userIds: [2] });
+  await f.service.markRead(2, result.id);
+  assert.equal(removed.readAt, null);
+});
+
+test("deleting a read notification does not change the remaining unread count", async () => {
+  const f = fixture();
+  const first = await f.service.send(admin, f.request());
+  await f.service.markRead(2, first.id);
+  const second = await f.service.send(admin, f.request());
+  assert.deepEqual(await f.service.deleteReceived(2, first.id), { count: 1 });
+  const list = await f.service.query(2, { take: 20 });
+  assert.equal(list.total, 1);
+  assert.equal(list.items[0].id, second.id);
+});
+
+test("admin revocation hides notifications from all recipients and preserves the first actor and send idempotency", async () => {
+  const f = await preparedWorker();
+  const request = f.request({ audience: "all", usernames: [], push: true });
+  const sent = await f.service.send(admin, request);
+  await assert.rejects(() => f.service.revoke({ id: 2, isActive: true }, sent.id), { status: 403 });
+  await assert.rejects(() => f.service.revoke({ ...admin, isActive: false }, sent.id), { status: 403 });
+  await assert.rejects(() => f.service.revoke(admin, randomUUID()), { status: 404 });
+  await f.service.revoke(admin, sent.id);
+  const notification = f.rows.get(N).find(row => row.id === sent.id);
+  assert.ok(notification.revokedAt instanceof Date);
+  assert.equal(notification.revokedById, admin.id);
+  const originalDate = +notification.revokedAt;
+  for (const userId of [1, 2, 3]) {
+    await assert.rejects(() => f.service.get(userId, sent.id), { status: 404 });
+    assert.ok(!(await f.service.query(userId, { take: 20 })).items.some(item => item.id === sent.id));
+  }
+  assert.ok(
+    f.rows
+      .get(R)
+      .filter(row => row.notificationId === sent.id)
+      .every(row => row.deletedAt)
+  );
+  assert.ok(
+    f.rows
+      .get(J)
+      .filter(row => row.notificationId === sent.id)
+      .every(row => row.status === "cancelled")
+  );
+  assert.deepEqual(f.published.at(-1), { userIds: [1, 2, 3] });
+  const history = (await f.service.history({ take: 20 })).items.find(item => item.id === sent.id);
+  assert.equal(history.revokedById, admin.id);
+  assert.equal(+history.revokedAt, originalDate);
+  await f.service.revoke({ ...admin, id: 3 }, sent.id);
+  assert.equal(notification.revokedById, admin.id);
+  assert.equal(+notification.revokedAt, originalDate);
+  const before = f.rows.get(R).length;
+  assert.deepEqual(await f.service.send(admin, request), sent);
+  assert.equal(f.rows.get(R).length, before);
+  await assert.rejects(() => f.service.send(admin, { ...request, body: "Changed" }), { status: 409 });
+});
+
+test("revoked parent records stay inaccessible even if a recipient has not been marked deleted", async () => {
+  const f = await preparedWorker();
+  f.rows.get(N)[0].revokedAt = new Date();
+  assert.equal((await f.service.query(2, { take: 20 })).total, 0);
+  assert.equal((await f.service.unreadCount(2)).count, 0);
+  await assert.rejects(() => f.service.get(2, f.job.notificationId), { status: 404 });
+});
+
+test("delete and revoke roll back together with push cancellation when the database fails", async () => {
+  for (const action of ["delete", "revoke"]) {
+    const f = await preparedWorker();
+    f.published.length = 0;
+    f.repo(J).update = async () => {
+      throw new Error("database unavailable");
+    };
+    await assert.rejects(
+      () =>
+        action === "delete"
+          ? f.service.deleteReceived(2, f.job.notificationId)
+          : f.service.revoke(admin, f.job.notificationId),
+      /database unavailable/
+    );
+    assert.equal(f.rows.get(R)[0].deletedAt, undefined);
+    assert.equal(f.rows.get(N)[0].revokedAt, undefined);
+    assert.equal((await f.service.unreadCount(2)).count, 1);
+    assert.equal(f.published.length, 0);
+  }
+});
 test("worker rechecks session, account, recipient and binding; encrypted payload omits content", async t => {
   const original = webPush.sendNotification,
     calls = [];
@@ -384,6 +622,12 @@ test("worker rechecks session, account, recipient and binding; encrypted payload
     },
     f => {
       f.rows.get(R)[0].readAt = new Date();
+    },
+    f => {
+      f.rows.get(R)[0].deletedAt = new Date();
+    },
+    f => {
+      f.rows.get(N)[0].revokedAt = new Date();
     },
     f => {
       f.worker.sessions = { isSessionActive: async () => false };
@@ -422,6 +666,52 @@ test("queue retries temporary errors, disables expired endpoints and claims each
   };
   await Promise.all([concurrent.worker.deliver(concurrent.job), concurrent.worker.deliver(concurrent.job)]);
   assert.equal(count, 1);
+});
+
+test("in-flight delivery cannot overwrite a concurrent deletion or revocation", async t => {
+  const original = webPush.sendNotification;
+  t.after(() => {
+    webPush.sendNotification = original;
+  });
+  for (const action of ["delete", "revoke"]) {
+    const f = await preparedWorker();
+    let started, release;
+    const sending = new Promise(resolve => {
+      started = resolve;
+    });
+    webPush.sendNotification = () => {
+      started();
+      return new Promise(resolve => {
+        release = resolve;
+      });
+    };
+    const delivery = f.worker.deliver(f.job);
+    await sending;
+    if (action === "delete") await f.service.deleteReceived(2, f.job.notificationId);
+    else await f.service.revoke(admin, f.job.notificationId);
+    release();
+    await delivery;
+    assert.equal(f.rows.get(J)[0].status, "cancelled");
+  }
+});
+
+test("deleted or revoked jobs never start delivery even when an old queued job is retried", async t => {
+  const original = webPush.sendNotification;
+  t.after(() => {
+    webPush.sendNotification = original;
+  });
+  let sent = 0;
+  webPush.sendNotification = async () => {
+    sent++;
+  };
+  for (const action of ["delete", "revoke"]) {
+    const f = await preparedWorker();
+    if (action === "delete") await f.service.deleteReceived(2, f.job.notificationId);
+    else await f.service.revoke(admin, f.job.notificationId);
+    await f.worker.deliver(f.job);
+    assert.equal(f.rows.get(J)[0].status, "cancelled");
+  }
+  assert.equal(sent, 0);
 });
 test("logout disables session subscriptions and disconnects realtime clients; errors are not swallowed", async () => {
   const f = fixture();
@@ -508,6 +798,28 @@ test("controller denies non-admin history and takes binding identity from the se
   );
   assert.equal(received[0], 2);
   assert.equal(received[1], 10);
+});
+
+test("deletion uses the authenticated recipient and revocation requires an active administrator", () => {
+  const calls = [];
+  const controller = new NotificationController({
+    deleteReceived: (...args) => {
+      calls.push(["delete", ...args]);
+    },
+    revoke: (...args) => {
+      calls.push(["revoke", ...args]);
+    }
+  });
+  const id = randomUUID();
+  controller.deleteReceived({ id: 2, isActive: true }, { id, userId: 3 });
+  assert.deepEqual(calls[0], ["delete", 2, id]);
+  controller.deleteReceived(admin, { id });
+  assert.deepEqual(calls[1], ["delete", admin.id, id]);
+  assert.throws(() => controller.deleteReceived({ id: 2, isActive: false }, { id }), { status: 403 });
+  assert.throws(() => controller.revoke({ id: 2, isActive: true }, { id }), { status: 403 });
+  assert.throws(() => controller.revoke({ ...admin, isActive: false }, { id }), { status: 403 });
+  controller.revoke(admin, { id });
+  assert.deepEqual(calls[2], ["revoke", admin, id]);
 });
 
 test("request logs redact subscription endpoints and encryption secrets without mutating the request", () => {

@@ -39,6 +39,11 @@ export class ReadNotificationDto {
   all = false;
 }
 
+export class NotificationIdDto {
+  @IsUUID()
+  id: string;
+}
+
 export class SendNotificationDto {
   @IsString()
   @Length(1, 10000)
@@ -62,6 +67,13 @@ export class SendNotificationDto {
   @IsInt()
   @Min(1)
   groupId?: number;
+
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  groupIds: number[] = [];
 
   @IsBoolean()
   push = false;

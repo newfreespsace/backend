@@ -11,6 +11,7 @@ import { NotificationService } from "./notification.service";
 import {
   BindPushDto,
   DisablePushDto,
+  NotificationIdDto,
   QueryNotificationsDto,
   ReadNotificationDto,
   SendNotificationDto
@@ -50,6 +51,17 @@ export class NotificationController {
   @Post("send")
   send(@CurrentUser() user: UserEntity, @Body() request: SendNotificationDto) {
     return this.service.send(this.user(user), request);
+  }
+
+  @Post("delete")
+  deleteReceived(@CurrentUser() user: UserEntity, @Body() request: NotificationIdDto) {
+    return this.service.deleteReceived(this.user(user).id, request.id);
+  }
+
+  @Post("revoke")
+  revoke(@CurrentUser() user: UserEntity, @Body() request: NotificationIdDto) {
+    if (!this.user(user).isAdmin) throw new ForbiddenException();
+    return this.service.revoke(user, request.id);
   }
 
   @Post("history")

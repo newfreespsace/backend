@@ -94,7 +94,13 @@ export class NotificationPushService implements OnModuleInit, OnModuleDestroy {
         !subscription ||
         !(await this.sessions.isSessionActive(job.userId, subscription.sessionId)) ||
         !(await this.users.countBy({ id: job.userId, isActive: true })) ||
-        !(await this.recipients.countBy({ notificationId: job.notificationId, userId: job.userId, readAt: IsNull() }))
+        !(await this.recipients.countBy({
+          notificationId: job.notificationId,
+          userId: job.userId,
+          readAt: IsNull(),
+          deletedAt: IsNull(),
+          notification: { revokedAt: IsNull() }
+        }))
       )
         return;
       validatePushEndpoint(subscription.endpoint);

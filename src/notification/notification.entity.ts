@@ -38,11 +38,18 @@ export class NotificationEntity {
 
   @CreateDateColumn()
   createdAt: Date;
+
+  @Column({ type: "datetime", nullable: true })
+  revokedAt: Date | null;
+
+  @Column({ type: "int", nullable: true })
+  revokedById: number | null;
 }
 
 @Entity("notification_recipient")
 @Index(["notificationId", "userId"], { unique: true })
 @Index(["userId", "readAt", "id"])
+@Index(["userId", "deletedAt", "readAt", "id"])
 @Index(["userId", "id"])
 export class NotificationRecipientEntity {
   @PrimaryGeneratedColumn()
@@ -64,6 +71,9 @@ export class NotificationRecipientEntity {
 
   @Column({ type: "datetime", nullable: true })
   readAt: Date | null;
+
+  @Column({ type: "datetime", nullable: true })
+  deletedAt: Date | null;
 }
 
 @Entity("notification_push_subscription")
