@@ -42,6 +42,14 @@ const {GraphInspector} = require("@nestjs/core/inspector/graph-inspector");
       wrapper.setInstanceByContextId(STATIC_CONTEXT,{instance:{},isResolved:true});
     }
   }
+  // Gateways sharing /api/socket reuse the first Engine.IO server's options.
+  // Adding notifications must preserve the judge's existing payload limit.
+  const {GATEWAY_METADATA,GATEWAY_OPTIONS} = require("@nestjs/websockets/constants");
+  const socketGateways = wrappers.filter(({wrapper}) => typeof wrapper.metatype === "function" &&
+    Reflect.getMetadata(GATEWAY_METADATA,wrapper.metatype)).map(({wrapper}) =>
+      Reflect.getMetadata(GATEWAY_OPTIONS,wrapper.metatype)).filter(options => options.path === "/api/socket");
+  assert.equal(socketGateways[0].maxHttpBufferSize,1e9);
+
   const injector = new Injector();
   let checked = 0;
   for (const {mod,wrapper} of wrappers) {

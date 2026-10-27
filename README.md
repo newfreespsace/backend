@@ -35,6 +35,12 @@ GRANT ALL PRIVILEGES ON `lyrio`.* TO "lyrio"@"localhost" IDENTIFIED BY "lyrio-pa
 
 Then fill the database connection information in the configuration file.
 
+Optional environment variables, including browser push VAPID settings, can be stored
+in `.env.local` beside `package.json` (copy `.env.example` to create it). The backend
+loads this file automatically on startup; existing shell/deployment variables take
+precedence. The local file is excluded from Git. Restart the backend after editing it.
+See [NOTIFICATIONS.md](NOTIFICATIONS.md) for the browser push settings.
+
 ## Redis
 
 Install Redis (>= 5) and change the `redis` url in the config (if your redis isn't listening on the default address and port).

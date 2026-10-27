@@ -3,6 +3,8 @@ import { APP_GUARD } from "@nestjs/core";
 
 import { RemoteJudgeModule } from "@/remote-judge/remote-judge.module";
 
+import { NotificationModule } from "./notification/notification.module";
+
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { ErrorFilter } from "./error.filter";
@@ -69,7 +71,8 @@ import { UsacoGuideModule } from "./usaco-guide/usaco-guide.module";
     forwardRef(() => ProblemReviewModule),
     RemoteJudgeModule,
     UsacoGuideModule,
-    TrainingModule
+    TrainingModule,
+    NotificationModule
   ],
   controllers: [AppController],
   providers: [

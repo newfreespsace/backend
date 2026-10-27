@@ -1,5 +1,5 @@
 function isSensitiveField(key: string): boolean {
-  return /^(apiKey|apiSecret|atcoderSession|token)$/i.test(key);
+  return /^(apiKey|apiSecret|atcoderSession|token|endpoint|p256dh|auth|bindingVersion)$/i.test(key);
 }
 
 /** Make a logging-only copy. Never mutate credentials used by the controller. */

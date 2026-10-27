@@ -1,3 +1,5 @@
+import "./config/load-local-env";
+
 import util from "util";
 import cluster from "cluster";
 

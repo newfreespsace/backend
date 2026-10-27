@@ -10,6 +10,8 @@ import { MigrationModule } from "@/migration/migration.module";
 import { SiteSettingModule } from "@/site-setting/site-setting.module";
 import { ContestModule } from "@/contest/contest.module";
 
+import { PushSubscriptionEntity } from "@/notification/notification.entity";
+
 import { UserAuthEntity } from "./user-auth.entity";
 import { AuthService } from "./auth.service";
 import { AuthController } from "./auth.controller";
@@ -19,7 +21,7 @@ import { AuthIpLocationService } from "./auth-ip-location.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([UserAuthEntity]),
+    TypeOrmModule.forFeature([UserAuthEntity, PushSubscriptionEntity]),
     forwardRef(() => UserModule),
     forwardRef(() => GroupModule),
     forwardRef(() => RedisModule),

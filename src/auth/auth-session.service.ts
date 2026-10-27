@@ -3,16 +3,23 @@ import fs from "fs-extra";
 
 import { Injectable } from "@nestjs/common";
 
+import { InjectRepository } from "@nestjs/typeorm";
+
 import type { Response } from "express";
 
 import jwt from "jsonwebtoken";
 import { Redis } from "ioredis";
 import moment from "moment-timezone";
 
+import { Not, Repository } from "typeorm";
+
 import { UserEntity } from "@/user/user.entity";
 import { ConfigService } from "@/config/config.service";
 import { UserService } from "@/user/user.service";
 import { RedisService } from "@/redis/redis.service";
+
+import { PushSubscriptionEntity } from "@/notification/notification.entity";
+import { NOTIFICATION_CHANNEL } from "@/notification/notification.events";
 
 import { SESSION_COOKIE_NAME } from "./auth.constants";
 
@@ -50,7 +57,8 @@ export class AuthSessionService {
   constructor(
     private readonly configService: ConfigService,
     private readonly userService: UserService,
-    private readonly redisService: RedisService
+    private readonly redisService: RedisService,
+    @InjectRepository(PushSubscriptionEntity) private readonly pushSubscriptions: Repository<PushSubscriptionEntity>
   ) {
     if (!moment.tz.zone(this.configService.config.security.sessionTimezone))
       throw new Error(`Invalid session timezone: ${this.configService.config.security.sessionTimezone}`);
@@ -133,20 +141,32 @@ export class AuthSessionService {
   }
 
   async revokeSession(userId: number, sessionId: number): Promise<void> {
+    await this.pushSubscriptions.update({ userId, sessionId }, { enabled: false });
     await this.redis.callSessionManager("revoke", userId, sessionId);
+    await this.redisService
+      .getSharedClient()
+      .publish(NOTIFICATION_CHANNEL, JSON.stringify({ revoke: { userId, sessionId } }));
   }
 
   async revokeAllSessionsExcept(userId: number, sessionId: number): Promise<void> {
+    await this.pushSubscriptions.update(
+      { userId, ...(sessionId == null ? {} : { sessionId: Not(sessionId) }) },
+      { enabled: false }
+    );
     await this.redis.callSessionManager("revoke_all_except", userId, sessionId);
+    await this.redisService
+      .getSharedClient()
+      .publish(NOTIFICATION_CHANNEL, JSON.stringify({ revoke: { userId, exceptSessionId: sessionId } }));
   }
 
   async endSession(sessionKey: string): Promise<void> {
+    let identity: [number, number];
     try {
-      const [userId, sessionId] = this.decodeSessionKey(sessionKey);
-      await this.revokeSession(userId, sessionId);
+      identity = this.decodeSessionKey(sessionKey);
     } catch {
-      // Do nothing if we can't decide the session key.
+      return; // An invalid token has no session to revoke.
     }
+    await this.revokeSession(...identity);
   }
 
   async accessSession(sessionKey: string): Promise<[sessionId: number, user: UserEntity]> {
@@ -166,6 +186,11 @@ export class AuthSessionService {
     } catch {
       return [null, null];
     }
+  }
+
+  async isSessionActive(userId: number, sessionId: number): Promise<boolean> {
+    const sessions = await this.listUserSessions(userId);
+    return sessions.some(session => session.sessionId === sessionId && session.expiresAt > Date.now());
   }
 
   async listUserSessions(userId: number): Promise<SessionInfo[]> {
