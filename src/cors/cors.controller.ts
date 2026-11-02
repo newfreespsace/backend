@@ -21,7 +21,12 @@ const xdomainScript = minifyJs(fs.readFileSync(require.resolve("xdomain/dist/xdo
 // streamSaver
 const streamSaverMitmHtml = (async () => {
   const $ = cheerio.load(fs.readFileSync(require.resolve("streamsaver/mitm.html"), "utf-8"));
-  const script = $("script").html();
+  const workerLookup = "navigator.serviceWorker.getRegistration('./')";
+  const source = $("script").html();
+  // getRegistration also matches a worker with a broader scope, such as the
+  // notification worker at /. Always register StreamSaver's own scoped worker.
+  if (!source.includes(workerLookup)) throw new Error("Unexpected StreamSaver worker registration code");
+  const script = source.replace(workerLookup, "navigator.serviceWorker.register('sw.js', { scope: './' })");
   const minifiedScript = (await minifyJs(script)).code;
   return `<script>${minifiedScript}</script>`;
 })();
@@ -64,7 +69,7 @@ export class CorsController {
 
   @Get("streamsaver/mitm.html")
   @Header("Content-Type", "text/html")
-  @Header("Cache-Control", "public, max-age=31536000")
+  @Header("Cache-Control", "no-cache")
   @ApiOperation({
     summary: "Get the proxy page for streamsaver (used for download-as-archive)."
   })
