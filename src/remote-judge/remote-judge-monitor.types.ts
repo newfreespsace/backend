@@ -13,11 +13,27 @@ export type RemoteMonitorState =
   | "Unknown";
 export type RemoteTaskPhase = "Syncing" | "Collecting" | "Importing";
 
-export interface RemoteMonitorAccount {
+interface RemoteMonitorTaskAccount {
   accountId: number;
   userId: number;
   username: string;
   handle: string;
+}
+
+export interface RemoteMonitorWaitingTask {
+  account: RemoteMonitorTaskAccount;
+  status: "Queued" | "RetryQueued" | "RetryWaiting" | "Scheduled";
+  nextSyncAt: string;
+}
+
+export interface RemoteMonitorPublicTask {
+  id: string;
+  status: "Running" | RemoteMonitorWaitingTask["status"];
+  time: string;
+  phase?: RemoteTaskPhase;
+}
+
+export interface RemoteMonitorAccount extends RemoteMonitorTaskAccount {
   lastError: string | null;
   lastErrorAt: string | null;
   nextSyncAt: string | null;
@@ -30,7 +46,7 @@ export interface RemoteMonitorAccount {
 
 export interface RemoteMonitorError {
   id: string;
-  account: Pick<RemoteMonitorAccount, "accountId" | "userId" | "username" | "handle">;
+  account: RemoteMonitorTaskAccount;
   kind: "Result" | "Source";
   error: string;
   at: string;
@@ -44,6 +60,7 @@ export interface RemotePlatformMonitor {
   lastSyncedAt: string | null;
   lastHeartbeatAt: string | null;
   sourceSupport: "PersonalKey" | "PersonalSession" | "Unavailable";
+  taskStatuses?: RemoteMonitorPublicTask[];
   admin?: {
     boundAccounts: number;
     activeAccounts: number;
@@ -58,6 +75,7 @@ export interface RemotePlatformMonitor {
     oldestQueuedAt: string | null;
     liveWorkers: number;
     tasks: { account: RemoteMonitorAccount; phase: RemoteTaskPhase; startedAt: string }[];
+    waitingTasks: RemoteMonitorWaitingTask[];
     errors: RemoteMonitorAccount[];
     errorsTruncated: boolean;
     recentErrors: RemoteMonitorError[];

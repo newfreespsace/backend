@@ -7,7 +7,7 @@ const { RemoteJudgeMonitorService } = require("../dist/remote-judge/remote-judge
 const { RemoteJudgeController } = require("../dist/remote-judge/remote-judge.controller");
 const { SubmissionEntity } = require("../dist/submission/submission.entity");
 
-const CACHE = "remote-monitor:snapshot:v1";
+const CACHE = "remote-monitor:snapshot:v2";
 function fixture(t) {
   const values = new Map(),
     registries = new Map(),
@@ -147,7 +147,10 @@ function fixture(t) {
                   Object.assign(query.params, params);
                   return builder;
                 },
-                andWhere: () => builder,
+                andWhere: (_, params) => {
+                  Object.assign(query.params, params);
+                  return builder;
+                },
                 orderBy: () => builder,
                 addOrderBy: () => builder,
                 limit: () => builder,
@@ -162,7 +165,16 @@ function fixture(t) {
                       ...row,
                       sessionAccounts: row.platform === "AtCoder" ? data.atcoderSessionAccounts : 0
                     }));
-                  if (query.params.ids) return data.accounts.filter(row => query.params.ids.includes(row.accountId));
+                  if (query.params.now)
+                    return data.accounts
+                      .filter(
+                        row =>
+                          row.platform === query.params.platform &&
+                          (query.params.ids.includes(row.accountId) ||
+                            ((row.activeUntil > query.params.now || row.catchUpRequested) &&
+                              (row.platform !== "AtCoder" || row.atcoderSessionConfigured)))
+                      )
+                      .sort((left, right) => left.nextSyncAt - right.nextSyncAt || left.accountId - right.accountId);
                   return data.errors[query.params.platform].slice(0, 20);
                 },
                 getRawOne: async () => data.latest[query.params.platform]
@@ -171,7 +183,7 @@ function fixture(t) {
             }
           }
   };
-  const config = { config: { remoteJudge: { enabled: true } } };
+  const config = { config: { remoteJudge: { enabled: true }, security: { sessionSecret: "test-monitor-task-id" } } };
   const redisService = {
     getSharedClient: () => redis,
     getClient: () => {
@@ -208,6 +220,8 @@ const account = (overrides = {}) => ({
   userId: 2,
   username: "student",
   handle: "remote-coder",
+  platform: "Codeforces",
+  activeUntil: new Date(Date.now() + 60000),
   lastError: "REMOTE_UNAVAILABLE",
   lastErrorAt: new Date(),
   nextSyncAt: new Date(Date.now() + 60000),
@@ -354,6 +368,49 @@ test("cluster workers share live tasks and their stages, and expired workers are
   await second.publishing;
   f.values.delete(CACHE);
   assert.equal((await f.service.getSnapshot(admin)).platforms[0].admin.tasks.length, 0);
+});
+
+test("each tracked account has a schedule state unless a worker is already processing it", async t => {
+  const f = fixture(t);
+  const past = new Date(Date.now() - 60000);
+  const future = new Date(Date.now() + 60000);
+  f.data.accounts = [
+    account({ accountId: 7, nextSyncAt: past, failures: 1, activeUntil: past }),
+    account({ accountId: 8, nextSyncAt: past, handle: "private-queued" }),
+    account({ accountId: 9, nextSyncAt: past, failures: 1 }),
+    account({ accountId: 10, nextSyncAt: future, failures: 1 }),
+    account({ accountId: 11, nextSyncAt: future, catchUpRequested: true, activeUntil: past }),
+    account({ accountId: 12, nextSyncAt: past, activeUntil: past }),
+    account({ accountId: 13, nextSyncAt: past, platform: "AtCoder", atcoderSessionConfigured: false }),
+    account({ accountId: 14, nextSyncAt: past, platform: "AtCoder", atcoderSessionConfigured: true })
+  ];
+  f.service.startTask("Codeforces", 7, "Importing");
+  await f.service.publishing;
+  const { platforms } = await f.service.getSnapshot(admin);
+  assert.deepEqual(platforms[0].admin.tasks.map(task => [task.account.accountId, task.phase]), [[7, "Importing"]]);
+  assert.deepEqual(platforms[0].admin.waitingTasks.map(task => [task.account.accountId, task.status, task.nextSyncAt]), [
+    [8, "Queued", past.toISOString()],
+    [9, "RetryQueued", past.toISOString()],
+    [10, "RetryWaiting", future.toISOString()],
+    [11, "Scheduled", future.toISOString()]
+  ]);
+  assert.deepEqual(platforms[1].admin.waitingTasks.map(task => [task.account.accountId, task.status]), [[14, "Queued"]]);
+  assert.deepEqual(Object.keys(platforms[0].admin.waitingTasks[0].account), ["accountId", "userId", "username", "handle"]);
+  const publicSnapshot = await f.service.getSnapshot({ id: 2 });
+  const visibleTasks = publicSnapshot.platforms[0].taskStatuses;
+  assert.deepEqual(visibleTasks.map(task => task.status), ["Running", "Queued", "RetryQueued", "RetryWaiting", "Scheduled"]);
+  assert.equal(visibleTasks[0].phase, "Importing");
+  assert.equal(visibleTasks[1].time, past.toISOString());
+  assert.ok(visibleTasks.every(task => /^[a-f0-9]{12}$/.test(task.id)));
+  assert.equal(new Set(visibleTasks.map(task => task.id)).size, visibleTasks.length);
+  assert.doesNotMatch(JSON.stringify(publicSnapshot), /waitingTasks|private-queued|accountId|username|handle|lastError/);
+
+  f.service.startTask("Codeforces", 9, "Syncing");
+  await f.service.publishing;
+  f.values.delete(CACHE);
+  const refreshed = await f.service.getSnapshot();
+  assert.equal(refreshed.platforms[0].taskStatuses[0].id, visibleTasks[2].id);
+  assert.equal(refreshed.platforms[0].taskStatuses[0].status, "Running");
 });
 
 test("Redis rejection deltas handle first samples, increases, resets and an unavailable connection", async t => {

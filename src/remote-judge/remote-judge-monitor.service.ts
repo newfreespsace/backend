@@ -1,5 +1,5 @@
 /* eslint-disable no-await-in-loop -- Bounded monitoring queries and cache coordination. */
-import { randomBytes } from "crypto";
+import { createHmac, randomBytes } from "crypto";
 
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { InjectDataSource } from "@nestjs/typeorm";
@@ -18,7 +18,9 @@ import {
   RemoteJudgeMonitorSnapshot,
   RemoteMonitorAccount,
   RemoteMonitorError,
+  RemoteMonitorPublicTask,
   RemoteMonitorState,
+  RemoteMonitorWaitingTask,
   RemotePlatformMonitor,
   RemoteTaskPhase
 } from "./remote-judge-monitor.types";
@@ -26,7 +28,7 @@ import { safeRemoteErrorDetails } from "./remote-error";
 import { CODEFORCES_COOLDOWN_KEY } from "./codeforces-policy";
 
 const platforms = [SubmissionMethod.Codeforces, SubmissionMethod.AtCoder];
-const CACHE_KEY = "remote-monitor:snapshot:v1";
+const CACHE_KEY = "remote-monitor:snapshot:v2";
 const CACHE_MS = 10000;
 const HEARTBEAT_MS = 45000;
 const ERROR_HISTORY_LIMIT = 50;
@@ -281,13 +283,19 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       .addSelect("account.codeforcesSourceRetryAt", "sourceRetryAt");
   }
 
-  private account(row: Record<string, unknown>): RemoteMonitorAccount {
-    const retry = iso(row.sourceRetryAt);
+  private accountIdentity(row: Record<string, unknown>) {
     return {
       accountId: Number(row.accountId),
       userId: Number(row.userId),
       username: String(row.username || ""),
-      handle: String(row.handle || ""),
+      handle: String(row.handle || "")
+    };
+  }
+
+  private account(row: Record<string, unknown>): RemoteMonitorAccount {
+    const retry = iso(row.sourceRetryAt);
+    return {
+      ...this.accountIdentity(row),
       lastError: safeError(row.lastError),
       lastErrorAt: iso(row.lastErrorAt),
       nextSyncAt: iso(row.nextSyncAt),
@@ -379,7 +387,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       const count = (field: string) => Math.max(0, Number(sum[field]) || 0);
       const workers = workerGroups[platforms.indexOf(platform)];
       const tasks = workers.flatMap(worker => (worker.task ? [worker.task] : []));
-      const activeIds = [...new Set(tasks.map(task => task.accountId))];
+      const activeIds = new Set(tasks.map(task => task.accountId));
       const [
         errors,
         activeAccounts,
@@ -397,9 +405,13 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           .addOrderBy("account.id", "ASC")
           .limit(20)
           .getRawMany(),
-        activeIds.length
+        this.enabled
           ? this.accountQuery()
-              .where("account.platform = :platform AND account.id IN (:...ids)", { platform, ids: activeIds })
+              .addSelect("account.failures", "failures")
+              .where("account.platform = :platform", { platform, now })
+              .andWhere(activeIds.size ? `(${WORK} OR account.id IN (:...ids))` : WORK, { ids: [...activeIds] })
+              .orderBy("account.nextSyncAt", "ASC")
+              .addOrderBy("account.id", "ASC")
               .getRawMany()
           : Promise.resolve([]),
         this.connection
@@ -430,6 +442,18 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
             : Promise.resolve(0)
         )
       ]);
+      const accountsById = new Map(activeAccounts.map(row => [Number(row.accountId), row]));
+      const waitingTasks: RemoteMonitorWaitingTask[] = [];
+      for (const row of activeAccounts) {
+        if (activeIds.has(Number(row.accountId))) continue;
+        const nextSyncAt = iso(row.nextSyncAt);
+        if (!nextSyncAt) continue;
+        const due = Date.parse(nextSyncAt) <= +now;
+        const failed = Number(row.failures) > 0;
+        let status: RemoteMonitorWaitingTask["status"] = failed ? "RetryWaiting" : "Scheduled";
+        if (due) status = failed ? "RetryQueued" : "Queued";
+        waitingTasks.push({ account: this.accountIdentity(row), status, nextSyncAt });
+      }
       const lastSyncedAt = iso(sum.lastSyncedAt);
       const lastHeartbeatAt =
         workers
@@ -503,9 +527,10 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           oldestQueuedAt: iso(sum.oldestQueuedAt),
           liveWorkers: workers.length,
           tasks: tasks.flatMap(task => {
-            const account = activeAccounts.find(row => Number(row.accountId) === task.accountId);
+            const account = accountsById.get(task.accountId);
             return account ? [{ account: this.account(account), phase: task.phase, startedAt: task.startedAt }] : [];
           }),
+          waitingTasks,
           errors: errors.map(row => {
             const account = this.account(row);
             const recent = history.events.find(
@@ -590,8 +615,31 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
     return await this.collecting;
   }
 
+  private publicTasks(detail: NonNullable<RemotePlatformMonitor["admin"]>): RemoteMonitorPublicTask[] {
+    const taskId = (accountId: number) =>
+      createHmac("sha256", this.configService.config.security.sessionSecret)
+        .update(`remote-monitor:task:${accountId}`)
+        .digest("hex")
+        .slice(0, 12);
+
+    return [
+      ...detail.tasks.map(task => ({
+        id: taskId(task.account.accountId),
+        status: "Running" as const,
+        phase: task.phase,
+        time: task.startedAt
+      })),
+      ...detail.waitingTasks.map(task => ({
+        id: taskId(task.account.accountId),
+        status: task.status,
+        time: task.nextSyncAt
+      }))
+    ];
+  }
+
   async getSnapshot(user?: UserEntity): Promise<RemoteJudgeMonitorSnapshot> {
     const snapshot = await this.snapshot();
+    const { enabled } = this;
     // Project every response, including cached and degraded ones, before crossing the public boundary.
     return {
       updatedAt: snapshot.updatedAt,
@@ -599,10 +647,11 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       unavailable: snapshot.unavailable,
       platforms: snapshot.platforms.map(row => ({
         platform: row.platform,
-        state: !this.enabled ? "Disabled" : snapshot.stale ? "Unknown" : row.state,
+        state: !enabled ? "Disabled" : snapshot.stale ? "Unknown" : row.state,
         lastSyncedAt: row.lastSyncedAt,
         lastHeartbeatAt: row.lastHeartbeatAt,
         sourceSupport: row.sourceSupport,
+        ...(enabled && row.admin ? { taskStatuses: this.publicTasks(row.admin) } : {}),
         ...(user?.isAdmin && row.admin ? { admin: row.admin } : {})
       })),
       ...(user?.isAdmin && snapshot.admin ? { admin: snapshot.admin } : {})
