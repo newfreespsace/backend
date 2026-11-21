@@ -213,6 +213,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
               {
                 atcoderSession: null,
                 atcoderSessionConfigured: false,
+                resultAcquisition: null,
                 lastError: "REMOTE_AUTH_REQUIRED",
                 lastErrorAt: new Date(),
                 failures: 0,
@@ -645,6 +646,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
       });
     // Restart legacy in-flight scans so every page participates in the ordered batch.
     const scan = account.scan?.bufferKey ? account.scan : null;
+    this.monitor?.setTaskPhase(SubmissionMethod.Codeforces, scan || account.cursor === "0" ? "Collecting" : "Syncing");
     const page = await this.provider.getPage({ ...account, scan });
     if (account.codeforcesSourceError && !page.sourceError) {
       // Persist the repair request before clearing source errors or acknowledging buffered pages.
@@ -693,7 +695,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         codeforcesSourceRetryAt: page.sourceRetryAt || null
       }
     );
-    return await this.bufferedCodeforcesPage(account, importScan, page);
+    return { ...(await this.bufferedCodeforcesPage(account, importScan, page)), acquisition: page.acquisition };
   }
 
   private async tick(platform: SubmissionMethod): Promise<void> {
@@ -790,7 +792,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           const page =
             platform === SubmissionMethod.Codeforces
               ? await this.codeforcesImportPage(account)
-              : await this.provider.getPage(account, [...liveTargets.values()], atcoderSession);
+              : await this.provider.getPage(account, [...liveTargets.values()], atcoderSession, phase =>
+                  this.monitor?.setTaskPhase(platform, phase)
+                );
           const problems = await this.remoteProblems(platform, page.submissions);
           watches ??= await this.watches.findBy({ accountId: account.id });
           if (page.submissions.length) this.monitor?.setTaskPhase(platform, "Importing");
@@ -832,6 +836,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             {
               cursor: page.cursor,
               scan: page.scan,
+              ...(page.acquisition || platform === SubmissionMethod.AtCoder
+                ? { resultAcquisition: page.acquisition ?? null }
+                : {}),
               lastSyncedAt: new Date(),
               lastError: null,
               lastErrorAt: null,

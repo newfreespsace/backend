@@ -376,7 +376,12 @@ test("each tracked account has a schedule state unless a worker is already proce
   const future = new Date(Date.now() + 60000);
   f.data.accounts = [
     account({ accountId: 7, nextSyncAt: past, failures: 1, activeUntil: past }),
-    account({ accountId: 8, nextSyncAt: past, handle: "private-queued" }),
+    account({
+      accountId: 8,
+      nextSyncAt: past,
+      handle: "private-queued",
+      acquisition: JSON.stringify({ fetchedCount: 3, waitingForVerdict: true, submissionId: "private-result" })
+    }),
     account({ accountId: 9, nextSyncAt: past, failures: 1 }),
     account({ accountId: 10, nextSyncAt: future, failures: 1 }),
     account({ accountId: 11, nextSyncAt: future, catchUpRequested: true, activeUntil: past }),
@@ -401,9 +406,11 @@ test("each tracked account has a schedule state unless a worker is already proce
   assert.deepEqual(visibleTasks.map(task => task.status), ["Running", "Queued", "RetryQueued", "RetryWaiting", "Scheduled"]);
   assert.equal(visibleTasks[0].phase, "Importing");
   assert.equal(visibleTasks[1].time, past.toISOString());
+  assert.deepEqual(visibleTasks[1].acquisition, { fetchedCount: 3, waitingForVerdict: true });
+  assert.deepEqual(platforms[0].admin.waitingTasks[0].acquisition, visibleTasks[1].acquisition);
   assert.ok(visibleTasks.every(task => /^[a-f0-9]{12}$/.test(task.id)));
   assert.equal(new Set(visibleTasks.map(task => task.id)).size, visibleTasks.length);
-  assert.doesNotMatch(JSON.stringify(publicSnapshot), /waitingTasks|private-queued|accountId|username|handle|lastError/);
+  assert.doesNotMatch(JSON.stringify(publicSnapshot), /waitingTasks|private-queued|accountId|username|handle|lastError|private-result/);
 
   f.service.startTask("Codeforces", 9, "Syncing");
   await f.service.publishing;

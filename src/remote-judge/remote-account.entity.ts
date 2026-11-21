@@ -3,6 +3,7 @@ import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn } 
 import { UserEntity } from "@/user/user.entity";
 
 import { SubmissionMethod } from "./remote-judge.types";
+import type { RemoteTaskAcquisition } from "./remote-judge-monitor.types";
 
 @Entity("remote_account")
 @Index(["userId", "platform"], { unique: true })
@@ -34,6 +35,9 @@ export class RemoteAccountEntity {
 
   @Column({ type: "datetime", nullable: true })
   lastSyncedAt: Date;
+
+  @Column({ type: "json", nullable: true })
+  resultAcquisition: RemoteTaskAcquisition | null;
 
   @Column({ type: "datetime" })
   nextSyncAt: Date;

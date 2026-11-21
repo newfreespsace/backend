@@ -26,6 +26,7 @@ import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.pars
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
 import { RemoteErrorDetails, RemoteSyncError, safeRemoteErrorDetails } from "./remote-error";
 import { CODEFORCES_COOLDOWN_KEY, CODEFORCES_FAILURES_KEY, CODEFORCES_REQUEST_INTERVAL_MS } from "./codeforces-policy";
+import type { RemoteTaskAcquisition, RemoteTaskPhase } from "./remote-judge-monitor.types";
 
 const CODEFORCES_RESULT_PAGE_SIZE = 5;
 const CODEFORCES_SOURCE_PAGE_SIZE = 5;
@@ -123,6 +124,7 @@ export interface RemotePage {
   pending: boolean;
   acknowledge?: () => Promise<void>;
   pollAfterMs?: number;
+  acquisition?: RemoteTaskAcquisition;
   warning?: { error: string; details: RemoteErrorDetails };
   sourceError?: string;
   sourceErrorDetails?: RemoteErrorDetails;
@@ -395,13 +397,21 @@ export class RemoteProviderService {
   async getPage(
     account: RemoteAccountEntity,
     liveTargets?: AtcoderLiveTarget[],
-    context?: AtcoderSessionContext
+    context?: AtcoderSessionContext,
+    onPhase?: (phase: RemoteTaskPhase) => void
   ): Promise<RemotePage> {
     if (account.platform === SubmissionMethod.Codeforces) return await this.codeforcesPage(account);
     const session = await this.requireAtcoderSession(account.id, context);
     const live = liveTargets?.length
-      ? await this.atcoderLivePage(account, liveTargets, session)
-      : { submissions: [], pending: false, pollAfterMs: undefined, acknowledge: undefined, warning: undefined };
+      ? await this.atcoderLivePage(account, liveTargets, session, onPhase)
+      : {
+          submissions: [],
+          pending: false,
+          pollAfterMs: undefined,
+          acknowledge: undefined,
+          warning: undefined,
+          acquisition: undefined
+        };
     return {
       submissions: [...new Map(live.submissions.map(row => [row.id, row])).values()].sort(
         (a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id)
@@ -412,7 +422,8 @@ export class RemoteProviderService {
       pending: live.pending,
       pollAfterMs: live.pollAfterMs,
       acknowledge: live.acknowledge,
-      warning: live.warning
+      warning: live.warning,
+      acquisition: live.acquisition
     };
   }
 
@@ -473,7 +484,12 @@ export class RemoteProviderService {
     return parseAtcoderSource(html, expected);
   }
 
-  private async atcoderLivePage(account: RemoteAccountEntity, targets: AtcoderLiveTarget[], session: string) {
+  private async atcoderLivePage(
+    account: RemoteAccountEntity,
+    targets: AtcoderLiveTarget[],
+    session: string,
+    onPhase?: (phase: RemoteTaskPhase) => void
+  ) {
     const redis = this.redisService.getSharedClient();
     const ordered = [...targets].sort((a, b) => a.contestId.localeCompare(b.contestId));
     const rotationKey = `remote-atcoder-rotation:${account.id}`;
@@ -490,6 +506,7 @@ export class RemoteProviderService {
     const rows = new Map<string, RemoteSubmission>();
     const statusUrl = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`;
     let updates: AtcoderStatusUpdate[];
+    onPhase?.("CheckingVerdicts");
     try {
       updates = parseAtcoderStatusResponse(
         await this.request(SubmissionMethod.AtCoder, statusUrl, true, undefined, account.id, session)
@@ -527,6 +544,7 @@ export class RemoteProviderService {
       )
       .sort((a, b) => (a[1].failures || 0) - (b[1].failures || 0) || Number(a[0]) - Number(b[0]))
       .slice(0, 5);
+    if (due.length) onPhase?.("FetchingDetails");
     for (const [id, item] of due) {
       const url = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/${id}`;
       try {
@@ -588,11 +606,23 @@ export class RemoteProviderService {
       if (!ordered.some(item => item.contestId === contestId)) pendingContests.delete(contestId);
     if (scan.pendingIds.length) pendingContests.add(target.contestId);
     else pendingContests.delete(target.contestId);
+    const detailQueue = [...discoveries.values()].filter(
+      item => item.update && item.update.status !== SubmissionStatus.Pending
+    );
+    const observedAt = Date.now();
     return {
       submissions: [...rows.values()],
       pending: pendingContests.size > 0,
       pollAfterMs: pendingContests.size > 0 ? 5000 : undefined,
       warning,
+      acquisition: {
+        fetchedCount: updates.length,
+        waitingForVerdict:
+          scan.pendingRows.length > 0 ||
+          [...discoveries.values()].some(item => item.update?.status === SubmissionStatus.Pending),
+        waitingForDetails: detailQueue.some(item => !(item.retryAt > observedAt)),
+        retryingDetails: detailQueue.some(item => item.retryAt > observedAt)
+      },
       // Persist only after imports succeed; never cache source code in Redis.
       acknowledge: async () => {
         await redis.set(key, JSON.stringify(scan), "EX", 86400);
@@ -724,6 +754,7 @@ export class RemoteProviderService {
       sourceRetryAt,
       more,
       pending: Number.isFinite(pendingMin),
+      acquisition: { fetchedCount: submissions.length, waitingForVerdict: Number.isFinite(pendingMin) },
       cursor: more ? cursor : String(Number.isFinite(pendingMin) ? Math.min(head, pendingMin - 1) : head),
       scan: more
         ? { offset: scan.offset + rows.length, head, pendingMin: Number.isFinite(pendingMin) ? pendingMin : undefined }

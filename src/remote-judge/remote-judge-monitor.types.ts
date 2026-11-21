@@ -11,7 +11,15 @@ export type RemoteMonitorState =
   | "Unconfigured"
   | "AuthExpired"
   | "Unknown";
-export type RemoteTaskPhase = "Syncing" | "Collecting" | "Importing";
+export const remoteTaskPhases = ["Syncing", "Collecting", "CheckingVerdicts", "FetchingDetails", "Importing"] as const;
+export type RemoteTaskPhase = typeof remoteTaskPhases[number];
+
+export interface RemoteTaskAcquisition {
+  fetchedCount: number;
+  waitingForVerdict: boolean;
+  waitingForDetails?: boolean;
+  retryingDetails?: boolean;
+}
 
 interface RemoteMonitorTaskAccount {
   accountId: number;
@@ -24,6 +32,7 @@ export interface RemoteMonitorWaitingTask {
   account: RemoteMonitorTaskAccount;
   status: "Queued" | "RetryQueued" | "RetryWaiting" | "Scheduled";
   nextSyncAt: string;
+  acquisition?: RemoteTaskAcquisition;
 }
 
 export interface RemoteMonitorPublicTask {
@@ -31,6 +40,7 @@ export interface RemoteMonitorPublicTask {
   status: "Running" | RemoteMonitorWaitingTask["status"];
   time: string;
   phase?: RemoteTaskPhase;
+  acquisition?: RemoteTaskAcquisition;
 }
 
 export interface RemoteMonitorAccount extends RemoteMonitorTaskAccount {

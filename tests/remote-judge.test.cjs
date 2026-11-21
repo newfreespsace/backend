@@ -1238,6 +1238,8 @@ test("the sync worker retains structured failures while clearing only the active
   };
   const { service } = workerFixture(account);
   const failures = [];
+  const acquisition = { fetchedCount: 2, waitingForVerdict: true };
+  account.resultAcquisition = acquisition;
   service.monitor = {
     startTask() {},
     setTaskPhase() {},
@@ -1256,10 +1258,20 @@ test("the sync worker retains structured failures while clearing only the active
   assert.equal(failures[0].error, "REMOTE_PARSE_FAILED");
   assert.equal(+failures[0].at, +account.lastErrorAt);
   assert.equal(+failures[0].retryAt, +account.nextSyncAt);
-  service.provider.getPage = async () => ({ submissions: [], cursor: "900", scan: null, more: false, pending: false });
+  assert.deepEqual(account.resultAcquisition, acquisition);
+  service.provider.getPage = async () => ({
+    submissions: [],
+    cursor: "900",
+    scan: null,
+    more: false,
+    pending: false,
+    acquisition: { fetchedCount: 1, waitingForVerdict: false, retryingDetails: false }
+  });
   account.nextSyncAt = new Date(0);
   await service.tick(Method.AtCoder);
   assert.equal(account.lastError, null);
+  assert.equal(account.resultAcquisition.fetchedCount, 1);
+  assert.equal(account.resultAcquisition.waitingForVerdict, false);
   assert.equal(failures.length, 1);
 });
 

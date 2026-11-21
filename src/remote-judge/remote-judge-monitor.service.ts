@@ -22,6 +22,8 @@ import {
   RemoteMonitorState,
   RemoteMonitorWaitingTask,
   RemotePlatformMonitor,
+  RemoteTaskAcquisition,
+  remoteTaskPhases,
   RemoteTaskPhase
 } from "./remote-judge-monitor.types";
 import { safeRemoteErrorDetails } from "./remote-error";
@@ -65,6 +67,21 @@ function iso(value: unknown): string | null {
 
 function safeError(value: unknown): string | null {
   return typeof value === "string" && /^REMOTE_[A-Z_]{1,72}$/.test(value) ? value : value ? "REMOTE_SYNC_FAILED" : null;
+}
+
+function taskAcquisition(value: unknown): RemoteTaskAcquisition | undefined {
+  try {
+    const data = (typeof value === "string" ? JSON.parse(value) : value) as RemoteTaskAcquisition;
+    if (!Number.isSafeInteger(data?.fetchedCount) || data.fetchedCount < 0) return undefined;
+    return {
+      fetchedCount: data.fetchedCount,
+      waitingForVerdict: data.waitingForVerdict === true,
+      ...(data.waitingForDetails === true ? { waitingForDetails: true } : {}),
+      ...(data.retryingDetails === true ? { retryingDetails: true } : {})
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 @Injectable()
@@ -255,7 +272,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           row.task &&
           Number.isSafeInteger(row.task.accountId) &&
           row.task.accountId > 0 &&
-          ["Syncing", "Collecting", "Importing"].includes(row.task.phase) &&
+          remoteTaskPhases.includes(row.task.phase) &&
           iso(row.task.startedAt)
             ? row.task
             : null;
@@ -408,6 +425,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         this.enabled
           ? this.accountQuery()
               .addSelect("account.failures", "failures")
+              .addSelect("account.resultAcquisition", "acquisition")
               .where("account.platform = :platform", { platform, now })
               .andWhere(activeIds.size ? `(${WORK} OR account.id IN (:...ids))` : WORK, { ids: [...activeIds] })
               .orderBy("account.nextSyncAt", "ASC")
@@ -452,7 +470,13 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         const failed = Number(row.failures) > 0;
         let status: RemoteMonitorWaitingTask["status"] = failed ? "RetryWaiting" : "Scheduled";
         if (due) status = failed ? "RetryQueued" : "Queued";
-        waitingTasks.push({ account: this.accountIdentity(row), status, nextSyncAt });
+        const acquisition = taskAcquisition(row.acquisition);
+        waitingTasks.push({
+          account: this.accountIdentity(row),
+          status,
+          nextSyncAt,
+          ...(acquisition ? { acquisition } : {})
+        });
       }
       const lastSyncedAt = iso(sum.lastSyncedAt);
       const lastHeartbeatAt =
@@ -632,7 +656,8 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       ...detail.waitingTasks.map(task => ({
         id: taskId(task.account.accountId),
         status: task.status,
-        time: task.nextSyncAt
+        time: task.nextSyncAt,
+        ...(task.acquisition ? { acquisition: task.acquisition } : {})
       }))
     ];
   }

@@ -458,19 +458,26 @@ test("detail parsing establishes ID, task, author, language and original JST tim
 
 test("pending JSON IDs request no HTML; the first final JSON result requests details in the same turn", async () => {
   let verdict = "WJ";
+  const phases = [];
   const { provider, calls, values } = fixture(
     () => detail(),
     () => statusJson(["321"], verdict)
   );
-  let result = await provider.getPage(account, targets);
+  let result = await provider.getPage(account, targets, undefined, phase => phases.push(phase));
   assert.deepEqual(result.submissions, []);
   assert.equal(result.pending, true);
+  assert.deepEqual(phases, ["CheckingVerdicts"]);
+  assert.equal(result.acquisition.waitingForVerdict, true);
+  assert.equal(result.acquisition.fetchedCount, 1);
   assert.equal(detailCalls(calls).length, 0);
   assert.equal(values.has("remote-atcoder-pages:1:abc480"), false);
   await result.acknowledge();
   verdict = "AC";
-  result = await provider.getPage(account, targets);
+  phases.length = 0;
+  result = await provider.getPage(account, targets, undefined, phase => phases.push(phase));
   assert.equal(result.pending, false);
+  assert.deepEqual(phases, ["CheckingVerdicts", "FetchingDetails"]);
+  assert.equal(result.acquisition.waitingForVerdict, false);
   assert.equal(detailCalls(calls).length, 1);
   assert.equal(result.submissions[0].id, "321");
   assert.equal(result.submissions[0].status, Status.Accepted);
@@ -741,6 +748,8 @@ test("a failed lower ID remains retryable after a higher ID advances the complet
     () => statusJson(ids)
   );
   const first = await provider.getPage(account, targets);
+  assert.equal(first.acquisition.waitingForVerdict, false);
+  assert.equal(first.acquisition.retryingDetails, true);
   assert.deepEqual(
     first.submissions.map(row => row.id),
     ["322"]
@@ -755,6 +764,7 @@ test("a failed lower ID remains retryable after a higher ID advances the complet
   const next = await provider.getPage(account, targets);
   assert.equal(next.submissions[0].id, "321");
   assert.equal(next.pending, false);
+  assert.equal(next.acquisition.retryingDetails, false);
 });
 
 test("detail challenges pause the personal session and retain diagnostics without committing the checkpoint", async () => {
