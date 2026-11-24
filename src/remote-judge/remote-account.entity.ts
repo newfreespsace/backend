@@ -5,11 +5,21 @@ import { UserEntity } from "@/user/user.entity";
 import { SubmissionMethod } from "./remote-judge.types";
 import type { RemoteTaskAcquisition } from "./remote-judge-monitor.types";
 
+export interface CodeforcesLiveSyncState {
+  since: number;
+  cursor: string;
+  scan?: RemoteAccountEntity["scan"];
+  pending?: boolean;
+  failures?: number;
+  lastError?: string;
+}
+
 @Entity("remote_account")
 @Index(["userId", "platform"], { unique: true })
 @Index(["platform", "handleKey"], { unique: true })
 @Index(["platform", "activeUntil", "nextSyncAt"])
 @Index(["platform", "catchUpRequested", "nextSyncAt"])
+@Index(["platform", "codeforcesLiveAt"])
 export class RemoteAccountEntity {
   @PrimaryGeneratedColumn()
   id: number;
@@ -71,6 +81,12 @@ export class RemoteAccountEntity {
     nextHistoryAt?: number;
     submissionUntil?: number;
   };
+
+  @Column({ type: "datetime", nullable: true })
+  codeforcesLiveAt: Date | null;
+
+  @Column({ type: "json", nullable: true })
+  codeforcesLiveState: CodeforcesLiveSyncState | null;
 
   @Column({ type: "integer", default: 0 })
   failures: number;

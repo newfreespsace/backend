@@ -8,6 +8,7 @@ import { ProblemModule } from "@/problem/problem.module";
 import { SubmissionModule } from "@/submission/submission.module";
 import { ContestModule } from "@/contest/contest.module";
 import { ConfigModule } from "@/config/config.module";
+import { MetricsModule } from "@/metrics/metrics.module";
 
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteWatchEntity } from "./remote-watch.entity";
@@ -20,17 +21,26 @@ import { CodeforcesImportBufferService } from "./codeforces-import-buffer.servic
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
 import { AtcoderSourceService } from "./atcoder-source.service";
 import { AtcoderSessionService } from "./atcoder-session.service";
+import { AtcoderSubmissionStateEntity } from "./atcoder-submission-state.entity";
+import { AtcoderSubmissionStateService } from "./atcoder-submission-state.service";
+import { RemoteJudgeMetricsService } from "./remote-judge-metrics.service";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([RemoteAccountEntity, RemoteWatchEntity, CodeforcesImportBufferEntity]),
+    TypeOrmModule.forFeature([
+      RemoteAccountEntity,
+      RemoteWatchEntity,
+      CodeforcesImportBufferEntity,
+      AtcoderSubmissionStateEntity
+    ]),
     RedisModule,
     UserModule,
     ProblemModule,
     SubmissionModule,
     ContestModule,
     ConfigModule,
-    AuditModule
+    AuditModule,
+    MetricsModule
   ],
   providers: [
     RemoteProviderService,
@@ -39,7 +49,9 @@ import { AtcoderSessionService } from "./atcoder-session.service";
     CodeforcesImportBufferService,
     RemoteJudgeMonitorService,
     AtcoderSourceService,
-    AtcoderSessionService
+    AtcoderSessionService,
+    AtcoderSubmissionStateService,
+    RemoteJudgeMetricsService
   ],
   controllers: [RemoteJudgeController]
 })

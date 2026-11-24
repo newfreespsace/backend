@@ -28,6 +28,7 @@ import {
 } from "./remote-judge-monitor.types";
 import { safeRemoteErrorDetails } from "./remote-error";
 import { CODEFORCES_COOLDOWN_KEY } from "./codeforces-policy";
+import { ATCODER_PENDING_WORK } from "./atcoder-policy";
 
 const platforms = [SubmissionMethod.Codeforces, SubmissionMethod.AtCoder];
 const CACHE_KEY = "remote-monitor:snapshot:v2";
@@ -35,9 +36,14 @@ const CACHE_MS = 10000;
 const HEARTBEAT_MS = 45000;
 const ERROR_HISTORY_LIMIT = 50;
 const ERROR_HISTORY_SECONDS = 7 * 86400;
-const WORK =
-  "(account.activeUntil > :now OR account.catchUpRequested = 1) AND (account.platform != 'AtCoder' OR account.atcoderSessionConfigured = 1)";
-const DUE = `${WORK} AND account.nextSyncAt <= :now`;
+const STANDARD_WORK = "(account.activeUntil > :now OR account.catchUpRequested = 1)";
+const WORK = `(${STANDARD_WORK} OR account.codeforcesLiveAt IS NOT NULL OR (account.platform = 'AtCoder' AND ${ATCODER_PENDING_WORK}))
+  AND (account.platform != 'AtCoder' OR account.atcoderSessionConfigured = 1)`;
+const SCHEDULED_AT = `CASE WHEN ${STANDARD_WORK} THEN LEAST(account.nextSyncAt, COALESCE(account.codeforcesLiveAt, account.nextSyncAt))
+  ELSE COALESCE(account.codeforcesLiveAt, account.nextSyncAt) END`;
+const DUE = `${WORK} AND (${SCHEDULED_AT}) <= :now`;
+const FAILURES =
+  "GREATEST(account.failures, COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(account.codeforcesLiveState, '$.failures')) AS UNSIGNED), 0))";
 const HISTORY =
   "account.platform = :cf AND (account.scan IS NOT NULL OR (account.cursor = '0' AND account.catchUpRequested = 1))";
 
@@ -295,7 +301,6 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       .addSelect("account.handle", "handle")
       .addSelect("account.lastError", "lastError")
       .addSelect("account.lastErrorAt", "lastErrorAt")
-      .addSelect("account.nextSyncAt", "nextSyncAt")
       .addSelect("account.codeforcesSourceError", "sourceError")
       .addSelect("account.codeforcesSourceRetryAt", "sourceRetryAt");
   }
@@ -384,7 +389,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
       .addSelect("SUM(CASE WHEN account.atcoderSessionConfigured = 1 THEN 1 ELSE 0 END)", "sessionAccounts")
       .addSelect(`SUM(CASE WHEN ${WORK} THEN 1 ELSE 0 END)`, "activeAccounts")
       .addSelect(`SUM(CASE WHEN ${queued} THEN 1 ELSE 0 END)`, "queuedAccounts")
-      .addSelect(`SUM(CASE WHEN ${WORK} AND account.failures > 0 THEN 1 ELSE 0 END)`, "retryingAccounts")
+      .addSelect(`SUM(CASE WHEN ${WORK} AND ${FAILURES} > 0 THEN 1 ELSE 0 END)`, "retryingAccounts")
       .addSelect(`SUM(CASE WHEN ${WORK} AND ${HISTORY} THEN 1 ELSE 0 END)`, "historyAccounts")
       .addSelect("SUM(CASE WHEN account.lastError IS NOT NULL THEN 1 ELSE 0 END)", "errorAccounts")
       .addSelect("SUM(CASE WHEN account.codeforcesSourceError IS NOT NULL THEN 1 ELSE 0 END)", "sourceErrorAccounts")
@@ -392,7 +397,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         "SUM(CASE WHEN account.lastError IS NOT NULL OR account.codeforcesSourceError IS NOT NULL THEN 1 ELSE 0 END)",
         "abnormalAccounts"
       )
-      .addSelect(`MIN(CASE WHEN ${queued} THEN account.nextSyncAt ELSE NULL END)`, "oldestQueuedAt")
+      .addSelect(`MIN(CASE WHEN ${queued} THEN (${SCHEDULED_AT}) ELSE NULL END)`, "oldestQueuedAt")
       .addSelect("MAX(account.lastSyncedAt)", "lastSyncedAt")
       .where("account.platform IN (:...platforms)", { platforms, now, cf: SubmissionMethod.Codeforces, runningIds })
       .groupBy("account.platform")
@@ -415,6 +420,7 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
         sourceFailedSubmissions
       ] = await Promise.all([
         this.accountQuery()
+          .addSelect("account.nextSyncAt", "nextSyncAt")
           .where("account.platform = :platform", { platform })
           .andWhere("(account.lastError IS NOT NULL OR account.codeforcesSourceError IS NOT NULL)")
           .orderBy("account.lastErrorAt", "DESC")
@@ -424,11 +430,12 @@ export class RemoteJudgeMonitorService implements OnModuleInit, OnModuleDestroy 
           .getRawMany(),
         this.enabled
           ? this.accountQuery()
-              .addSelect("account.failures", "failures")
+              .addSelect(FAILURES, "failures")
+              .addSelect(SCHEDULED_AT, "nextSyncAt")
               .addSelect("account.resultAcquisition", "acquisition")
               .where("account.platform = :platform", { platform, now })
               .andWhere(activeIds.size ? `(${WORK} OR account.id IN (:...ids))` : WORK, { ids: [...activeIds] })
-              .orderBy("account.nextSyncAt", "ASC")
+              .orderBy("nextSyncAt", "ASC")
               .addOrderBy("account.id", "ASC")
               .getRawMany()
           : Promise.resolve([]),

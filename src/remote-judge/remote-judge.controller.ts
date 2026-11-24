@@ -10,6 +10,7 @@ import {
   BindRemoteAccountDto,
   RemoteContextDto,
   RemoteActivateDto,
+  RemoteVisibleResultDto,
   RemotePlatformDto,
   SetSubmissionMethodDto,
   SetCodeforcesCredentialsDto,
@@ -71,6 +72,11 @@ export class RemoteJudgeController {
   @Post("status")
   status(@CurrentUser() user: UserEntity, @Body() request: RemoteContextDto) {
     return this.service.status(user, request);
+  }
+
+  @Post("resultVisible")
+  resultVisible(@CurrentUser() user: UserEntity, @Body() request: RemoteVisibleResultDto) {
+    return this.run(() => this.service.recordVisibleResult(user, request));
   }
 
   @Post("setAtcoderSession")

@@ -1013,14 +1013,16 @@ export class ProblemService {
   async updateProblemStatistics(
     problemId: number,
     incSubmissionCount: number,
-    incAcceptedSubmissionCount: number
+    incAcceptedSubmissionCount: number,
+    transaction?: EntityManager
   ): Promise<void> {
+    const repository = transaction ? transaction.getRepository(ProblemEntity) : this.problemRepository;
     if (incSubmissionCount !== 0) {
-      await this.problemRepository.increment({ id: problemId }, "submissionCount", incSubmissionCount);
+      await repository.increment({ id: problemId }, "submissionCount", incSubmissionCount);
     }
 
     if (incAcceptedSubmissionCount !== 0) {
-      await this.problemRepository.increment({ id: problemId }, "acceptedSubmissionCount", incAcceptedSubmissionCount);
+      await repository.increment({ id: problemId }, "acceptedSubmissionCount", incAcceptedSubmissionCount);
     }
   }
 

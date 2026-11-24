@@ -17,6 +17,7 @@ const {
 } = require("../dist/remote-judge/remote-judge.types");
 const { RemoteProviderService } = require("../dist/remote-judge/remote-provider.service");
 const { RemoteJudgeService } = require("../dist/remote-judge/remote-judge.service");
+const { RemoteJudgeMetricsService } = require("../dist/remote-judge/remote-judge-metrics.service");
 const {
   RemoteActivateDto,
   RemotePlatformDto,
@@ -26,9 +27,11 @@ const { RemoteAccountEntity } = require("../dist/remote-judge/remote-account.ent
 const { RemoteWatchEntity } = require("../dist/remote-judge/remote-watch.entity");
 const { CodeforcesImportBufferService } = require("../dist/remote-judge/codeforces-import-buffer.service");
 const { CodeforcesImportBufferEntity } = require("../dist/remote-judge/codeforces-import-buffer.entity");
+const { AtcoderSubmissionStateEntity } = require("../dist/remote-judge/atcoder-submission-state.entity");
 const { SubmissionService } = require("../dist/submission/submission.service");
 const { SubmissionEntity, ContestSubmissionPhase } = require("../dist/submission/submission.entity");
 const { SubmissionDetailEntity } = require("../dist/submission/submission-detail.entity");
+const { RemoteSubmissionCompletionEntity } = require("../dist/submission/remote-submission-completion.entity");
 const { ProblemEntity, ProblemType } = require("../dist/problem/problem.entity");
 const { ProblemFileEntity } = require("../dist/problem/problem-file.entity");
 const { ProblemJudgeInfoEntity } = require("../dist/problem/problem-judge-info.entity");
@@ -186,6 +189,7 @@ function submissionFixture() {
   const service = Object.create(SubmissionService.prototype);
   const stored = new Map(),
     details = new Map();
+  const completions = new Map();
   const emitted = [];
   const writes = [];
   let nextId = 1;
@@ -199,15 +203,40 @@ function submissionFixture() {
     return item;
   };
   service.lockService = locks();
+  const completionRepository = {
+    findOneBy: async ({ submissionId }) => structuredClone(completions.get(submissionId)),
+    find: async () => [...completions.values()],
+    save: async job => completions.set(job.submissionId, structuredClone(job)),
+    delete: async ({ submissionId }) => completions.delete(submissionId),
+    update: async ({ submissionId }, change) => Object.assign(completions.get(submissionId), change)
+  };
+  const getRepository = entity => {
+    assert.equal(entity, RemoteSubmissionCompletionEntity);
+    return completionRepository;
+  };
   service.connection = {
-    transaction: async (...args) =>
-      args.at(-1)({
-        save,
-        increment: async (entity, _, field) => {
-          if (entity === ProblemEntity && field === "submissionCount") counts.submissions++;
-          if (entity !== ProblemEntity && field === "submissionCount") counts.userSubmissions++;
+    getRepository,
+    transaction: async (...args) => {
+      const snapshots = [stored, details, completions].map(rows => [rows, structuredClone(rows)]);
+      const before = { ...counts };
+      try {
+        return await args.at(-1)({
+          getRepository,
+          save,
+          increment: async (entity, _, field) => {
+            if (entity === ProblemEntity && field === "submissionCount") counts.submissions++;
+            if (entity !== ProblemEntity && field === "submissionCount") counts.userSubmissions++;
+          }
+        });
+      } catch (error) {
+        for (const [rows, snapshot] of snapshots) {
+          rows.clear();
+          for (const [key, value] of snapshot) rows.set(key, value);
         }
-      })
+        Object.assign(counts, before);
+        throw error;
+      }
+    }
   };
   service.submissionRepository = {
     findOneBy: async where => {
@@ -230,7 +259,7 @@ function submissionFixture() {
       return true;
     }
   };
-  service.submissionStatisticsService = { onSubmissionUpdated: async () => {} };
+  service.submissionStatisticsService = { invalidateProblemStatistics: async () => {} };
   service.contestService = { onSubmissionUpdated: async () => counts.contest++ };
   service.problemReviewService = { onAcceptedSubmission: async () => counts.review++ };
   service.metricSubmissionJudgeTime = { observe() {} };
@@ -243,8 +272,56 @@ function submissionFixture() {
       emitted.push(progress);
     }
   };
-  return { service, stored, details, counts, emitted, writes };
+  return { service, stored, details, completions, counts, emitted, writes };
 }
+
+test("a failed ranklist rebuild is replayed from the committed result without querying the original site again", async () => {
+  const { service, stored, completions, counts } = submissionFixture();
+  service.contestService.onSubmissionUpdated = async () => { throw new Error("temporary ranking error"); };
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote(), { id: 20, problemIndex: 1 });
+  assert.equal(stored.get(1).status, Status.Accepted);
+  assert.equal(counts.accepted, 1);
+  assert.equal(counts.events, 0);
+  assert.equal(completions.get(1).failures, 1);
+  completions.get(1).nextAttemptAt = new Date(0);
+  service.contestService.onSubmissionUpdated = async () => counts.contest++;
+  await service.retryRemoteCompletions();
+  assert.equal(completions.size, 0);
+  assert.equal(counts.contest, 1);
+  assert.equal(counts.accepted, 1);
+  assert.equal(counts.events, 1);
+});
+
+test("a failed terminal write rolls back metadata, score and resources together", async () => {
+  const { service, stored } = submissionFixture();
+  const task = problem();
+  task.remoteProblem.fullScore = 100;
+  const earlier = remote({ status: Status.PartiallyCorrect, verdict: "PARTIAL", points: 20 });
+  await service.importRemoteSubmission({ id: 1 }, task, earlier);
+  const transaction = service.connection.transaction;
+  service.connection.transaction = (isolation, update) => transaction(isolation, async manager => {
+    await update(manager);
+    throw new Error("rolled back");
+  });
+  const latest = { ...earlier, points: 50, time: 66 };
+  await assert.rejects(service.importRemoteSubmission({ id: 1 }, task, latest), /rolled back/);
+  assert.deepEqual([stored.get(1).remote.points, stored.get(1).score, stored.get(1).timeUsed], [20, 20, 31]);
+  service.connection.transaction = transaction;
+  await service.importRemoteSubmission({ id: 1 }, task, latest);
+  assert.deepEqual([stored.get(1).remote.points, stored.get(1).score, stored.get(1).timeUsed], [50, 50, 66]);
+});
+
+test("an older CF history snapshot can fill in source while preserving the newer live grade", async () => {
+  const { service, stored, details, counts } = submissionFixture();
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote({ observedAt: 200 }));
+  await service.importRemoteSubmission({ id: 1 }, problem(), remote({
+    observedAt: 100, status: Status.WrongAnswer, verdict: "WRONG_ANSWER", sourceCode: "int main() {}"
+  }));
+  assert.equal(stored.get(1).status, Status.Accepted);
+  assert.equal(stored.get(1).remote.verdict, "OK");
+  assert.equal(details.get(1).content.code, "int main() {}");
+  assert.equal(counts.accepted, 1);
+});
 
 test("concurrent and repeated sync creates one real submission, with original timestamp and resource usage", async () => {
   const { service, stored, details, counts } = submissionFixture();
@@ -757,6 +834,7 @@ test("two users cannot bind the same remote handle with different capitalization
 
 test("problem visits queue a coalesced history backfill without resetting an in-flight scan or bypassing cooldown", async () => {
   const service = Object.create(RemoteJudgeService.prototype);
+  service.provider = { getCodeforcesCooldownMs: async () => 0 };
   const nextSyncAt = new Date(Date.now() + 60000);
   const account = {
     id: 1,
@@ -839,6 +917,7 @@ function workerFixture(candidate) {
           return builder;
         },
         orderBy: () => builder,
+        limit: () => builder,
         getOne: async () => candidate
       };
       return builder;
@@ -888,13 +967,14 @@ function submissionActivationFixture(overrides = {}) {
   return { ...fixture, account };
 }
 
-test("clicking a CF submission brings idle polling forward while preserving pagination and history state", async () => {
+test("clicking a CF submission schedules a separate live poll while preserving history state", async () => {
   const scan = { offset: 41, head: 1000, bufferKey: "batch" };
   const { service, account, requestCount } = submissionActivationFixture({ scan });
   const before = Date.now();
   await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
-  assert.ok(+account.nextSyncAt >= before + 5000);
-  assert.ok(+account.nextSyncAt <= Date.now() + 5000);
+  assert.ok(+account.nextSyncAt > Date.now() + 5000);
+  assert.ok(+account.codeforcesLiveAt >= before + 5000);
+  assert.ok(+account.codeforcesLiveAt <= Date.now() + 5000);
   assert.ok(account.codeforcesSyncState.submissionUntil >= before + 120000);
   assert.equal(account.codeforcesSyncState.idlePolls, 0);
   assert.equal(account.codeforcesSyncState.historyRequested, true);
@@ -902,13 +982,80 @@ test("clicking a CF submission brings idle polling forward while preserving pagi
   assert.deepEqual(account.scan, scan);
   assert.equal(account.catchUpRequested, true);
   assert.equal(requestCount(), 0, "the activation endpoint schedules work without calling CF");
-  const due = account.nextSyncAt;
+  const due = account.codeforcesLiveAt;
   await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
-  assert.equal(+account.nextSyncAt, +due, "repeated clicks must not postpone a queued sync");
+  assert.equal(+account.codeforcesLiveAt, +due, "repeated clicks must not postpone a queued sync");
   const until = account.codeforcesSyncState.submissionUntil;
   await service.activate({ id: 1 }, { problemId: 7 });
-  assert.equal(+account.nextSyncAt, +due);
+  assert.equal(+account.codeforcesLiveAt, +due);
   assert.equal(account.codeforcesSyncState.submissionUntil, until, "ordinary heartbeats cannot extend the fast window");
+});
+
+test("CF live results are imported while the older history collection remains at its own checkpoint", async () => {
+  const scan = { offset: 41, head: 1000, bufferKey: "batch" };
+  const { service, account, requestCount } = submissionActivationFixture({ scan, cursor: "0" });
+  const historicalAt = account.nextSyncAt;
+  await service.activate({ id: 1 }, { problemId: 7, submissionIntent: true });
+  account.codeforcesLiveAt = new Date(0);
+  service.provider.getCodeforcesLivePage = async (_, state) => {
+    assert.equal(state.scan, undefined);
+    assert.equal(state.cursor, "0");
+    return { submissions: [remote({ id: "1001" })], cursor: "1001", scan: null, more: false, pending: false };
+  };
+  service.watches.findBy = async () => [];
+  service.remoteProblems = async () => [];
+  const imported = [];
+  service.importResult = async (_, __, row) => imported.push(row.id);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(imported, ["1001"]);
+  assert.equal(account.codeforcesLiveState.cursor, "1001");
+  assert.equal(account.nextSyncAt, historicalAt);
+  assert.deepEqual(account.scan, scan);
+  assert.equal(requestCount(), 0);
+});
+
+test("a CF platform cooldown still allows staged results to be imported without making a request", async () => {
+  const scan = { offset: 41, head: 1000, bufferKey: "batch", importCursor: "1000" };
+  const { service, account, requestCount } = submissionActivationFixture({ scan, nextSyncAt: new Date(0) });
+  await service.codeforcesImportBuffer.stage(account.id, "batch", [remote()]);
+  service.provider.getCodeforcesCooldownMs = async () => 900000;
+  service.watches.findBy = async () => [];
+  service.remoteProblems = async () => [];
+  const imported = [];
+  service.importResult = async (_, __, row) => imported.push(row.id);
+  await service.tick(Method.Codeforces);
+  assert.deepEqual(imported, ["101"]);
+  assert.equal(account.cursor, "1000");
+  assert.equal(requestCount(), 0);
+});
+
+test("foreground latency counts one authorized, visible sample per saved result revision", async () => {
+  const observations = [];
+  const keys = new Set();
+  const metrics = new RemoteJudgeMetricsService({
+    histogram: () => ({ labels: (...labels) => ({ observe: seconds => observations.push({ labels, seconds }) }) })
+  }, { getSharedClient: () => ({ set: async key => keys.has(key) ? null : (keys.add(key), "OK") }) });
+  const { service } = workerFixture(null);
+  service.metrics = metrics;
+  const contest = { id: 2 };
+  service.context = async () => ({ problem: problem(), contest });
+  service.contests = { shouldHideNoiResult: async () => true };
+  const stamp = Date.now() - 100;
+  service.submissions = { findSubmissionById: async () => ({
+    id: 3, status: Status.Accepted, submitterId: 1, problemId: 7, contestId: 2,
+    remote: remote({ resultSavedAt: stamp })
+  }) };
+  const request = { submissionId: 3, revision: stamp };
+  await service.recordVisibleResult({ id: 1 }, request);
+  service.contests.shouldHideNoiResult = async () => false;
+  await service.recordVisibleResult({ id: 4 }, request);
+  await service.recordVisibleResult({ id: 1 }, { ...request, revision: stamp - 1 });
+  assert.equal(observations.length, 0);
+  await service.recordVisibleResult({ id: 1 }, request);
+  await service.recordVisibleResult({ id: 1 }, request);
+  assert.equal(observations.length, 1);
+  assert.deepEqual(observations[0].labels, [Method.Codeforces, "save_to_foreground"]);
+  assert.ok(observations[0].seconds >= 0.1);
 });
 
 test("CF submission clicks respect account retry backoff and shared cooldowns", async () => {
@@ -1081,14 +1228,14 @@ test("upstream failure backs off without advancing the submission cursor", async
   assert.ok(+account.nextSyncAt >= start + 60000);
 });
 
-test("CF shared cooldown skips the queue without changing any account checkpoints", async () => {
+test("CF shared cooldown skips remote requests and selects only buffered imports", async () => {
   const account = { id: 1, cursor: "900", scan: { offset: 41, head: 1000 }, nextSyncAt: new Date(0), failures: 0 };
   const { service, updates, filters, requestCount } = workerFixture(account);
   service.provider.getCodeforcesCooldownMs = async () => 900000;
   await service.tick(Method.Codeforces);
   assert.equal(requestCount(), 0);
   assert.deepEqual(updates, []);
-  assert.deepEqual(filters, []);
+  assert.match(filters[0], /JSON_EXTRACT\(account.scan, '\$\.importCursor'\)/);
   assert.equal(account.scan.offset, 41);
 });
 
@@ -1407,7 +1554,7 @@ test("direct sync only queries recent watched contests and commits its checkpoin
   };
   const events = [];
   service.provider.getPage = async (_, liveTargets) => {
-    assert.deepEqual(liveTargets, [{ contestId: "abc480", since: Math.floor((now - 90000) / 1000) }]);
+    assert.deepEqual(liveTargets, [{ contestId: "abc480" }]);
     return {
       submissions: [remote()],
       cursor: "950",
@@ -1741,6 +1888,7 @@ test("remote language normalization keeps existing language filters useful", () 
 
 test("switching contest pages retains closed context intervals for delayed results", async () => {
   const service = Object.create(RemoteJudgeService.prototype);
+  service.provider = { getCodeforcesCooldownMs: async () => 0 };
   const account = { id: 1, userId: 1, platform: Method.Codeforces, cursor: "0" };
   const stored = [];
   let contestId = 20;
@@ -1850,6 +1998,10 @@ test("database metadata keeps existing problems local and remote submission keys
   assert.equal(buffer.findColumnWithPropertyName("payload").isSelect, false);
   assert.equal(buffer.foreignKeys[0].onDelete, "CASCADE");
   assert.equal(buffer.findColumnWithPropertyName("remoteId").type, "bigint");
+  const checkpoints = dataSource.getMetadata(AtcoderSubmissionStateEntity);
+  assert.deepEqual(checkpoints.primaryColumns.map(column => column.propertyName), ["accountId", "contestId", "submissionId"]);
+  assert.equal(checkpoints.foreignKeys[0].onDelete, "CASCADE");
+  assert.equal(dataSource.getMetadata(RemoteSubmissionCompletionEntity).foreignKeys[0].onDelete, "CASCADE");
 });
 
 test("AtCoder shared cooldown leaves other due accounts unchanged and resumes after the pause", async () => {

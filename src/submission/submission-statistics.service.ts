@@ -227,6 +227,10 @@ export class SubmissionStatisticsService {
   }
 
   async onProblemDeleted(problemId: number): Promise<void> {
+    await this.invalidateProblemStatistics(problemId);
+  }
+
+  async invalidateProblemStatistics(problemId: number): Promise<void> {
     await Promise.all([
       ...Object.values(SubmissionStatisticsType).map(type =>
         this.redisService.cacheDelete(REDIS_KEY_SUBMISSION_STATISTICS.format(problemId, type))

@@ -50,8 +50,8 @@ export class ProblemReviewService {
     };
   }
 
-  async onAcceptedSubmission(submission: SubmissionEntity): Promise<void> {
-    await this.problemReviewRepository.manager.transaction(async manager => {
+  async onAcceptedSubmission(submission: SubmissionEntity, transaction?: EntityManager): Promise<void> {
+    const update = async (manager: EntityManager) => {
       const preference = await manager.getRepository(UserPreferenceEntity).findOne({
         where: { userId: submission.submitterId },
         lock: { mode: "pessimistic_write" }
@@ -59,7 +59,9 @@ export class ProblemReviewService {
       const config = getProblemReviewPreference(preference?.preference.problemReview);
       if (!config.enabled) return;
       await this.advanceReview(submission, manager, config);
-    });
+    };
+    if (transaction) await update(transaction);
+    else await this.problemReviewRepository.manager.transaction(update);
   }
 
   private async advanceReview(

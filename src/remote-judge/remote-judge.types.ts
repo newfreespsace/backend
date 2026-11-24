@@ -31,6 +31,9 @@ export interface RemoteSubmission {
   sourceCode?: string;
   sourceAvailable?: boolean;
   resultSource?: "OriginalSite" | "AtCoderProblems";
+  // Internal observation time, used to order results from parallel sync paths.
+  observedAt?: number;
+  firstObservedAt?: number;
   url: string;
 }
 
@@ -43,10 +46,11 @@ export interface RemoteSourceSync {
   error?: string;
 }
 
-export interface RemoteSubmissionInfo extends Omit<RemoteSubmission, "sourceCode"> {
+export interface RemoteSubmissionInfo extends Omit<RemoteSubmission, "sourceCode" | "firstObservedAt"> {
   platform: SubmissionMethod;
   handle: string;
   historical: boolean;
+  resultSavedAt?: number;
   // Persisted inside the existing remote JSON; omitted from public metadata.
   sourceSync?: RemoteSourceSync;
   sourceStatus?: "Pending" | "Available" | "Failed";

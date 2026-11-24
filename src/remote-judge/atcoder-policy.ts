@@ -1,5 +1,10 @@
 import { RemoteSourceSync } from "./remote-judge.types";
 
+export const ATCODER_PENDING_WORK =
+  "EXISTS (SELECT 1 FROM atcoder_submission_state checkpoint " +
+  "INNER JOIN `user` account_owner ON account_owner.id = account.userId " +
+  "WHERE checkpoint.accountId = account.id AND checkpoint.pending = 1 AND account_owner.isActive = 1)";
+
 export function scheduleAtcoderSource(previous: RemoteSourceSync | undefined, final: boolean): RemoteSourceSync {
   if (!final || (previous?.readyAt && Date.parse(previous.readyAt) <= Date.now()))
     return previous || { status: "Pending", failures: 0 };

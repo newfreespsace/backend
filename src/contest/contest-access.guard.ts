@@ -41,6 +41,7 @@ export class ContestAccessGuard implements CanActivate {
 
     if (
       path === "remoteJudge/status" ||
+      path === "remoteJudge/resultVisible" ||
       path === "remoteJudge/activate" ||
       path === "submission/submit" ||
       path === "submission/querySubmission"

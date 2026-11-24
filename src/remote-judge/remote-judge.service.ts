@@ -31,6 +31,7 @@ import { AtcoderLiveTarget, AtcoderSessionContext, RemotePage, RemoteProviderSer
 import {
   BindRemoteAccountDto,
   RemoteContextDto,
+  RemoteVisibleResultDto,
   RemoteActivateDto,
   SetSubmissionMethodDto,
   SetCodeforcesCredentialsDto,
@@ -40,7 +41,9 @@ import { parseRemoteProblem, RemoteSubmission, SubmissionMethod } from "./remote
 import { CodeforcesCredentialsService, validCodeforcesCredentials } from "./codeforces-credentials.service";
 import { CodeforcesImportBufferService } from "./codeforces-import-buffer.service";
 import { RemoteJudgeMonitorService } from "./remote-judge-monitor.service";
+import { recentResultRevision, RemoteJudgeMetricsService } from "./remote-judge-metrics.service";
 import { AtcoderSessionService, normalizeAtcoderSession } from "./atcoder-session.service";
+import { ATCODER_PENDING_WORK } from "./atcoder-policy";
 import { safeRemoteErrorDetails } from "./remote-error";
 import {
   CODEFORCES_HISTORY_INTERVAL_MS,
@@ -72,7 +75,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     private readonly codeforcesCredentials: CodeforcesCredentialsService,
     private readonly codeforcesImportBuffer: CodeforcesImportBufferService,
     private readonly monitor: RemoteJudgeMonitorService,
-    private readonly atcoderSessions: AtcoderSessionService
+    private readonly atcoderSessions: AtcoderSessionService,
+    private readonly metrics: RemoteJudgeMetricsService
   ) {}
 
   private get settings() {
@@ -111,9 +115,12 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         handle: account.handle,
         verifiedAt: account.verifiedAt,
         lastSyncedAt: account.lastSyncedAt,
-        nextSyncAt: account.nextSyncAt,
+        nextSyncAt:
+          account.codeforcesLiveAt && account.codeforcesLiveAt < account.nextSyncAt
+            ? account.codeforcesLiveAt
+            : account.nextSyncAt,
         activeUntil: account.activeUntil,
-        lastError: account.lastError,
+        lastError: account.codeforcesLiveState?.lastError || account.lastError,
         atcoderSessionConfigured: !!account.atcoderSessionConfigured,
         codeforcesSourceEnabled: !!account.codeforcesSourceEnabled,
         codeforcesSourceError: account.codeforcesSourceError,
@@ -351,24 +358,44 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     return { problem, contest };
   }
 
-  private async scheduleCodeforcesSubmission(accountId: number): Promise<void> {
+  private async scheduleCodeforcesSubmission(accountId: number, intent: boolean): Promise<void> {
     await this.lockService.lock(`RemoteAccount_${accountId}`, async () => {
       const account = await this.accounts.findOneBy({ id: accountId });
       if (!account || account.platform !== SubmissionMethod.Codeforces) return;
       const cooldownMs = await this.provider.getCodeforcesCooldownMs();
       const now = Date.now();
       const soon = now + CODEFORCES_SUBMIT_INITIAL_DELAY_MS;
+      const state = account.codeforcesSyncState;
+      const tracking = intent
+        ? { ...state, idlePolls: 0, submissionUntil: now + CODEFORCES_SUBMIT_TRACKING_MS }
+        : state;
+      if (account.scan || account.cursor === "0" || account.codeforcesLiveState) {
+        if (!intent && account.codeforcesLiveAt) return;
+        const live = account.codeforcesLiveState || {
+          cursor: account.cursor,
+          since: Math.floor((now - this.settings.activeMinutes * 60000) / 1000)
+        };
+        const backoff = live.failures ? +account.codeforcesLiveAt : account.failures > 0 ? +account.nextSyncAt : 0;
+        await this.accounts.update(
+          { id: account.id },
+          {
+            codeforcesSyncState: tracking,
+            codeforcesLiveState: live,
+            codeforcesLiveAt: new Date(
+              Math.max(Math.min(soon, +account.codeforcesLiveAt || soon), backoff, now + cooldownMs)
+            )
+          }
+        );
+        return;
+      }
+      if (!intent) return;
       const due = +account.nextSyncAt;
       // Only idle polling may be brought forward. Preserve account errors and shared pauses.
       const next = account.lastError || account.failures > 0 ? Math.max(soon, due) : Math.min(soon, due);
       await this.accounts.update(
         { id: account.id },
         {
-          codeforcesSyncState: {
-            ...account.codeforcesSyncState,
-            idlePolls: 0,
-            submissionUntil: now + CODEFORCES_SUBMIT_TRACKING_MS
-          },
+          codeforcesSyncState: tracking,
           nextSyncAt: new Date(Math.max(next, now + cooldownMs))
         }
       );
@@ -439,7 +466,14 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           ...(request.problemId ? { activeUntil: new Date(Date.now() + this.settings.activeMinutes * 60000) } : {})
         }
       );
-      if (submissionIntent) await this.scheduleCodeforcesSubmission(account.id);
+      if (
+        submissionIntent ||
+        (request.problemId &&
+          account.platform === SubmissionMethod.Codeforces &&
+          (account.scan || account.cursor === "0") &&
+          !account.codeforcesLiveAt)
+      )
+        await this.scheduleCodeforcesSubmission(account.id, submissionIntent);
     }
     return await this.list(user);
   }
@@ -462,21 +496,42 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
       .addOrderBy("submission.id", "DESC")
       .getOne();
     const hideResult = contest && (await this.contests.shouldHideNoiResult(user, contest));
+    const revision = latest?.remote?.resultSavedAt;
     return {
       enabled: this.settings.enabled,
       bound: !!account,
       handle: account?.handle,
       lastSyncedAt: account?.lastSyncedAt,
-      lastError: account?.lastError,
+      lastError: account?.codeforcesLiveState?.lastError || account?.lastError,
       latest: latest
         ? {
             id: latest.id,
             status: hideResult ? "Submitted" : latest.status,
             submittedAt: latest.submitTime,
-            remote: hideResult ? undefined : this.submissions.getRemoteMeta(latest)
+            remote: hideResult ? undefined : this.submissions.getRemoteMeta(latest),
+            revision: !hideResult && !latest.remote?.historical && recentResultRevision(revision) ? revision : undefined
           }
         : null
     };
+  }
+
+  async recordVisibleResult(user: UserEntity, request: RemoteVisibleResultDto) {
+    if (!user || !recentResultRevision(request.revision)) return {};
+    const { problem, contest } = await this.context(user, request);
+    const submission = await this.submissions.findSubmissionById(request.submissionId);
+    if (
+      !submission?.remote ||
+      submission.submitterId !== user.id ||
+      submission.problemId !== problem.id ||
+      (submission.contestId ?? null) !== (contest?.id ?? null) ||
+      submission.remote.resultSavedAt !== request.revision ||
+      submission.remote.historical ||
+      submission.status === SubmissionStatus.Pending ||
+      (contest && (await this.contests.shouldHideNoiResult(user, contest)))
+    )
+      return {};
+    await this.metrics.recordForeground(submission.remote.platform, submission.id, request.revision);
+    return {};
   }
 
   async setMethod(user: UserEntity, request: SetSubmissionMethodDto) {
@@ -546,7 +601,8 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     user: UserEntity,
     row: RemoteSubmission,
     problems: ProblemEntity[],
-    watches: RemoteWatchEntity[]
+    watches: RemoteWatchEntity[],
+    rememberObservation = false
   ) {
     if (!Number.isSafeInteger(row.submittedAt) || row.submittedAt <= 0 || row.submittedAt > Date.now() / 1000 + 60)
       return;
@@ -567,8 +623,9 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           row.status === SubmissionStatus.WrongAnswer && row.points > 0 && problem.remoteProblem.fullScore
             ? SubmissionStatus.PartiallyCorrect
             : row.status;
+        const { firstObservedAt, ...remoteRow } = row;
         const remote = {
-          ...row,
+          ...remoteRow,
           status: normalizedStatus,
           platform: account.platform,
           handle: account.handle,
@@ -605,8 +662,17 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           contestContext ||
           (restricted.length === 0 &&
             (await this.problems.userHasPermission(user, problem, ProblemPermissionType.View)))
-        )
-          await this.submissions.importRemoteSubmission(user, problem, remote, contestContext);
+        ) {
+          const saved = await this.submissions.importRemoteSubmission(
+            user,
+            problem,
+            remote,
+            contestContext,
+            rememberObservation
+          );
+          if (saved && !remote.historical)
+            this.metrics?.observe(account.platform, "observation_to_save", firstObservedAt ?? row.observedAt, saved);
+        }
       });
     }
   }
@@ -648,18 +714,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     const scan = account.scan?.bufferKey ? account.scan : null;
     this.monitor?.setTaskPhase(SubmissionMethod.Codeforces, scan || account.cursor === "0" ? "Collecting" : "Syncing");
     const page = await this.provider.getPage({ ...account, scan });
-    if (account.codeforcesSourceError && !page.sourceError) {
-      // Persist the repair request before clearing source errors or acknowledging buffered pages.
-      account.codeforcesSyncState = {
-        ...account.codeforcesSyncState,
-        historyRequested: true,
-        nextHistoryAt: Math.max(
-          account.codeforcesSyncState?.nextHistoryAt || 0,
-          Date.now() + CODEFORCES_HISTORY_RESCAN_MS
-        )
-      };
-      await this.accounts.update({ id: account.id }, { codeforcesSyncState: account.codeforcesSyncState });
-    }
+    await this.requestCodeforcesSourceRepair(account, page);
     if (!scan && !page.more) {
       await this.codeforcesImportBuffer.discard(account.id);
       page.submissions.sort((a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id));
@@ -695,23 +750,49 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         codeforcesSourceRetryAt: page.sourceRetryAt || null
       }
     );
-    return { ...(await this.bufferedCodeforcesPage(account, importScan, page)), acquisition: page.acquisition };
+    return {
+      ...(await this.bufferedCodeforcesPage(account, importScan, page)),
+      acquisition: page.acquisition,
+      observedAt: page.observedAt
+    };
+  }
+
+  private async requestCodeforcesSourceRepair(account: RemoteAccountEntity, page: RemotePage): Promise<void> {
+    if (!account.codeforcesSourceError || page.sourceError) return;
+    account.codeforcesSyncState = {
+      ...account.codeforcesSyncState,
+      historyRequested: true,
+      nextHistoryAt: Math.max(
+        account.codeforcesSyncState?.nextHistoryAt || 0,
+        Date.now() + CODEFORCES_HISTORY_RESCAN_MS
+      )
+    };
+    await this.accounts.update({ id: account.id }, { codeforcesSyncState: account.codeforcesSyncState });
   }
 
   private async tick(platform: SubmissionMethod): Promise<void> {
-    // Skip the entire queue during a shared CF pause. Requests recheck under the provider lock.
-    if (platform === SubmissionMethod.Codeforces && (await this.provider.getCodeforcesCooldownMs()) > 0) return;
+    const codeforces = platform === SubmissionMethod.Codeforces;
+    const paused = codeforces && (await this.provider.getCodeforcesCooldownMs()) > 0;
     const now = new Date();
+    const active = "(account.activeUntil > :now OR account.catchUpRequested = 1)";
+    const historyDue = `(account.nextSyncAt <= :now AND ${active})`;
+    const liveDue = "account.codeforcesLiveAt <= :now";
+    const buffered = "JSON_EXTRACT(account.scan, '$.importCursor') IS NOT NULL";
+    const eligible = paused
+      ? `${historyDue} AND ${buffered}`
+      : codeforces
+      ? `(${liveDue} OR ${historyDue})`
+      : `account.nextSyncAt <= :now AND account.atcoderSessionConfigured = 1 AND (${active} OR ${ATCODER_PENDING_WORK})`;
     const candidate = await this.accounts
       .createQueryBuilder("account")
-      .where(
-        "account.platform = :platform AND account.nextSyncAt <= :now AND (account.activeUntil > :now OR account.catchUpRequested = 1) AND (account.platform != 'AtCoder' OR account.atcoderSessionConfigured = 1)",
-        {
-          platform,
-          now
-        }
+      .where(`account.platform = :platform AND ${eligible}`, { platform, now })
+      .orderBy(
+        codeforces && !paused
+          ? `CASE WHEN ${liveDue} THEN DATE_SUB(account.codeforcesLiveAt, INTERVAL 30 SECOND) ELSE account.nextSyncAt END`
+          : "account.nextSyncAt",
+        "ASC"
       )
-      .orderBy("account.nextSyncAt", "ASC")
+      .limit(1)
       .getOne();
     if (!candidate) return;
     const redis = this.redisService.getSharedClient();
@@ -721,13 +802,36 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.lockService.lock(`RemoteAccount_${candidate.id}`, async () => {
         const account = await this.accounts.findOneBy({ id: candidate.id });
-        if (!account || account.nextSyncAt > new Date() || !this.settings.enabled) return;
+        if (!account || !this.settings.enabled) return;
+        const live =
+          codeforces && !paused && account.codeforcesLiveAt && +account.codeforcesLiveAt <= Date.now()
+            ? account.codeforcesLiveState
+            : null;
+        const importingBuffer = codeforces && account.scan?.importCursor !== undefined;
+        if (!live && (account.nextSyncAt > new Date() || (paused && !importingBuffer))) return;
+        const startedAt = Date.now();
+        if (
+          live &&
+          !live.scan &&
+          !live.pending &&
+          !(+account.activeUntil > startedAt) &&
+          !(account.codeforcesSyncState?.submissionUntil > startedAt)
+        ) {
+          await this.accounts.update({ id: account.id }, { codeforcesLiveAt: null, codeforcesLiveState: null });
+          return;
+        }
+        this.metrics?.observe(
+          platform,
+          "queue_wait",
+          +(live ? account.codeforcesLiveAt : account.nextSyncAt),
+          startedAt
+        );
         this.monitor?.startTask(
           platform,
           account.id,
-          platform === SubmissionMethod.Codeforces && account.scan?.importCursor !== undefined
+          !live && importingBuffer
             ? "Importing"
-            : platform === SubmissionMethod.Codeforces && (account.scan || account.cursor === "0")
+            : !live && codeforces && (account.scan || account.cursor === "0")
             ? "Collecting"
             : "Syncing"
         );
@@ -735,15 +839,23 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
         try {
           user = await this.users.findUserById(account.userId);
           if (!user?.isActive) {
-            await this.accounts.update({ id: account.id }, { activeUntil: new Date(0), catchUpRequested: false });
+            await this.accounts.update(
+              { id: account.id },
+              {
+                activeUntil: new Date(0),
+                catchUpRequested: false,
+                codeforcesLiveAt: null,
+                codeforcesLiveState: null
+              }
+            );
             return;
           }
-          if (platform === SubmissionMethod.Codeforces && account.codeforcesSummaryVersion === 0) {
+          if (codeforces && !live && !importingBuffer && account.codeforcesSummaryVersion === 0) {
             // Existing accounts backfill summaries once on their next active sync.
             await this.accounts.update({ id: account.id }, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
             Object.assign(account, { codeforcesSummaryVersion: 1, cursor: "0", scan: null });
           }
-          if (platform === SubmissionMethod.Codeforces && !account.scan) {
+          if (codeforces && !live && !account.scan) {
             const state = account.codeforcesSyncState || {};
             if (
               account.cursor === "0" ||
@@ -761,7 +873,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           }
           let watches: RemoteWatchEntity[];
           let atcoderSession: AtcoderSessionContext;
-          const liveTargets = new Map<string, AtcoderLiveTarget>();
+          let liveTargets: AtcoderLiveTarget[];
           if (platform === SubmissionMethod.AtCoder) {
             // Keep the account due while paused so a newly saved session takes effect on the next turn.
             atcoderSession = await this.provider.getAtcoderSessionContext(account.id);
@@ -778,27 +890,30 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             const watchedProblems = ids.length
               ? await this.connection.getRepository(ProblemEntity).findBy({ id: In(ids), submissionMethod: platform })
               : [];
-            for (const problem of watchedProblems) {
-              if (!problem.remoteProblem) continue;
-              const { contestId } = problem.remoteProblem;
-              const since = Math.floor(
-                Math.min(...recent.filter(watch => watch.problemId === problem.id).map(watch => +watch.startedAt)) /
-                  1000
-              );
-              const previous = liveTargets.get(contestId);
-              liveTargets.set(contestId, { contestId, since: Math.min(previous?.since ?? since, since) });
-            }
+            liveTargets = [
+              ...new Set(
+                watchedProblems.flatMap(problem => (problem.remoteProblem ? [problem.remoteProblem.contestId] : []))
+              )
+            ].map(contestId => ({ contestId }));
           }
-          const page =
-            platform === SubmissionMethod.Codeforces
-              ? await this.codeforcesImportPage(account)
-              : await this.provider.getPage(account, [...liveTargets.values()], atcoderSession, phase =>
-                  this.monitor?.setTaskPhase(platform, phase)
-                );
+          const page = live
+            ? await this.provider.getCodeforcesLivePage(account, live)
+            : codeforces
+            ? await this.codeforcesImportPage(account)
+            : await this.provider.getPage(account, liveTargets, atcoderSession, phase =>
+                this.monitor?.setTaskPhase(platform, phase)
+              );
+          if (page.observedAt) this.metrics?.observe(platform, "upstream_observation", startedAt, page.observedAt);
+          if (live) {
+            await this.requestCodeforcesSourceRepair(account, page);
+            page.submissions.sort((a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id));
+          }
           const problems = await this.remoteProblems(platform, page.submissions);
           watches ??= await this.watches.findBy({ accountId: account.id });
           if (page.submissions.length) this.monitor?.setTaskPhase(platform, "Importing");
-          for (const row of page.submissions) await this.importResult(account, user, row, problems, watches);
+          for (const row of page.submissions) await this.importResult(account, user, row, problems, watches, !!live);
+          if (!codeforces && page.pending && !account.catchUpRequested)
+            await this.accounts.update({ id: account.id }, { catchUpRequested: true });
           await page.acknowledge?.();
           if (page.warning)
             await this.monitor?.recordError(account, user, {
@@ -810,56 +925,91 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             page.sourceError &&
             (page.sourceError !== account.codeforcesSourceError ||
               +page.sourceRetryAt !== +account.codeforcesSourceRetryAt);
-          let syncDelayMs = page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000;
-          let { codeforcesSyncState } = account;
-          if (platform === SubmissionMethod.Codeforces) {
+          const sourceStatus = {
+            codeforcesSourceError: page.sourceError || null,
+            codeforcesSourceRetryAt: page.sourceRetryAt || null
+          };
+          if (live) {
+            const now = Date.now();
             const tracking =
-              codeforcesSyncState?.submissionUntil > Date.now() ||
-              (!!codeforcesSyncState?.submissionUntil && page.pending);
-            const changed = page.more || page.pending || page.cursor !== account.cursor;
-            const idlePolls = changed || tracking ? 0 : Math.min(4, (codeforcesSyncState?.idlePolls || 0) + 1);
-            codeforcesSyncState = {
-              ...codeforcesSyncState,
-              idlePolls,
-              submissionUntil: tracking ? codeforcesSyncState.submissionUntil : undefined
-            };
-            syncDelayMs = page.more
-              ? page.scan?.importCursor !== undefined
-                ? 1000
-                : CODEFORCES_HISTORY_INTERVAL_MS
-              : tracking
-              ? CODEFORCES_SUBMIT_POLL_INTERVAL_MS
-              : Math.max(syncDelayMs, Math.min(300000, 30000 * 2 ** idlePolls));
-          }
-          await this.accounts.update(
-            { id: account.id },
-            {
-              cursor: page.cursor,
-              scan: page.scan,
-              ...(page.acquisition || platform === SubmissionMethod.AtCoder
-                ? { resultAcquisition: page.acquisition ?? null }
-                : {}),
-              lastSyncedAt: new Date(),
-              lastError: null,
-              lastErrorAt: null,
-              failures: 0,
-              ...(platform === SubmissionMethod.Codeforces
-                ? {
-                    codeforcesSourceError: page.sourceError || null,
-                    codeforcesSourceRetryAt: page.sourceRetryAt || null,
-                    codeforcesSyncState
-                  }
-                : {}),
-              nextSyncAt: new Date(Date.now() + syncDelayMs),
-              // A return-to-site request arriving during this sync must survive its completion.
-              catchUpRequested:
-                page.more ||
-                page.pending ||
-                (platform === SubmissionMethod.Codeforces && codeforcesSyncState?.submissionUntil > Date.now())
-                  ? true
-                  : () => `IF(catchUpVersion = ${Number(account.catchUpVersion) || 0}, 0, 1)`
+              account.codeforcesSyncState?.submissionUntil > now ||
+              (!!account.codeforcesSyncState?.submissionUntil && page.pending);
+            const keep =
+              page.more ||
+              page.pending ||
+              tracking ||
+              (+account.activeUntil > now && (account.scan || account.cursor === "0"));
+            await this.accounts.update(
+              { id: account.id },
+              {
+                codeforcesLiveAt: keep
+                  ? new Date(
+                      now +
+                        (tracking || page.pending || page.more
+                          ? CODEFORCES_SUBMIT_POLL_INTERVAL_MS
+                          : this.settings.intervalSeconds * 1000)
+                    )
+                  : null,
+                codeforcesLiveState: keep
+                  ? { since: live.since, cursor: page.cursor, scan: page.scan, pending: page.pending }
+                  : null,
+                ...(page.acquisition ? { resultAcquisition: page.acquisition } : {}),
+                lastSyncedAt: new Date(now),
+                ...sourceStatus
+              }
+            );
+          } else {
+            let syncDelayMs = page.more ? 1000 : page.pollAfterMs ?? this.settings.intervalSeconds * 1000;
+            let { codeforcesSyncState } = account;
+            if (platform === SubmissionMethod.Codeforces) {
+              const tracking =
+                !account.codeforcesLiveAt &&
+                (codeforcesSyncState?.submissionUntil > Date.now() ||
+                  (!!codeforcesSyncState?.submissionUntil && page.pending));
+              const changed = page.more || page.pending || page.cursor !== account.cursor;
+              const idlePolls = changed || tracking ? 0 : Math.min(4, (codeforcesSyncState?.idlePolls || 0) + 1);
+              codeforcesSyncState = {
+                ...codeforcesSyncState,
+                idlePolls,
+                submissionUntil: tracking || account.codeforcesLiveAt ? codeforcesSyncState?.submissionUntil : undefined
+              };
+              syncDelayMs = page.more
+                ? page.scan?.importCursor !== undefined
+                  ? 1000
+                  : CODEFORCES_HISTORY_INTERVAL_MS
+                : tracking
+                ? CODEFORCES_SUBMIT_POLL_INTERVAL_MS
+                : Math.max(syncDelayMs, Math.min(300000, 30000 * 2 ** idlePolls));
             }
-          );
+            await this.accounts.update(
+              { id: account.id },
+              {
+                cursor: page.cursor,
+                scan: page.scan,
+                ...(page.acquisition || platform === SubmissionMethod.AtCoder
+                  ? { resultAcquisition: page.acquisition ?? null }
+                  : {}),
+                lastSyncedAt: new Date(),
+                lastError: null,
+                lastErrorAt: null,
+                failures: 0,
+                ...(platform === SubmissionMethod.Codeforces
+                  ? {
+                      ...sourceStatus,
+                      codeforcesSyncState
+                    }
+                  : {}),
+                nextSyncAt: new Date(Date.now() + syncDelayMs),
+                // A return-to-site request arriving during this sync must survive its completion.
+                catchUpRequested:
+                  page.more ||
+                  page.pending ||
+                  (platform === SubmissionMethod.Codeforces && codeforcesSyncState?.submissionUntil > Date.now())
+                    ? true
+                    : () => `IF(catchUpVersion = ${Number(account.catchUpVersion) || 0}, 0, 1)`
+              }
+            );
+          }
           if (newSourceError)
             await this.monitor?.recordError(account, user, {
               error: page.sourceError,
@@ -870,13 +1020,18 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             });
         } catch (error) {
           const cooldownMs =
-            platform === SubmissionMethod.Codeforces ? await this.provider.getCodeforcesCooldownMs() : 0;
+            codeforces && (live || !importingBuffer) ? await this.provider.getCodeforcesCooldownMs() : 0;
           if (error.message === "REMOTE_COOLDOWN") {
             if (cooldownMs > 0)
-              await this.accounts.update({ id: account.id }, { nextSyncAt: new Date(Date.now() + cooldownMs) });
+              await this.accounts.update(
+                { id: account.id },
+                {
+                  [live ? "codeforcesLiveAt" : "nextSyncAt"]: new Date(Date.now() + cooldownMs)
+                }
+              );
             return;
           }
-          const failures = account.failures + 1;
+          const failures = (live ? live.failures || 0 : account.failures) + 1;
           const at = new Date();
           const retryAt = new Date(
             Date.now() +
@@ -885,12 +1040,14 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
           const code = /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_SYNC_FAILED";
           await this.accounts.update(
             { id: account.id },
-            {
-              failures,
-              lastError: code,
-              lastErrorAt: at,
-              nextSyncAt: retryAt
-            }
+            live
+              ? { codeforcesLiveAt: retryAt, codeforcesLiveState: { ...live, failures, lastError: code } }
+              : {
+                  failures,
+                  lastError: code,
+                  lastErrorAt: at,
+                  nextSyncAt: retryAt
+                }
           );
           await this.monitor?.recordError(account, user, { error: code, at, retryAt, details: error.details });
           logger.warn(

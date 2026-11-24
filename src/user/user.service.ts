@@ -336,22 +336,28 @@ export class UserService {
   async updateUserAcceptedCount(
     userId: number,
     problemId: number,
-    type: "NON_AC_TO_AC" | "AC_TO_NON_AC"
+    type: "NON_AC_TO_AC" | "AC_TO_NON_AC",
+    transaction?: EntityManager
   ): Promise<boolean> {
-    return await this.lockService.lock(`updateUserAcceptedCount_${userId}_${problemId}`, async () => {
+    const update = async () => {
+      const repository = transaction ? transaction.getRepository(UserEntity) : this.userRepository;
+      const count = await this.submissionService.getUserProblemAcceptedSubmissionCount(userId, problemId, transaction);
       if (type === "NON_AC_TO_AC") {
-        if ((await this.submissionService.getUserProblemAcceptedSubmissionCount(userId, problemId)) === 1) {
-          await this.userRepository.increment({ id: userId }, "acceptedProblemCount", 1);
+        if (count === 1) {
+          await repository.increment({ id: userId }, "acceptedProblemCount", 1);
           return true;
         }
       } else {
-        if ((await this.submissionService.getUserProblemAcceptedSubmissionCount(userId, problemId)) === 0) {
-          await this.userRepository.increment({ id: userId }, "acceptedProblemCount", -1);
+        if (count === 0) {
+          await repository.increment({ id: userId }, "acceptedProblemCount", -1);
         }
       }
 
       return false;
-    });
+    };
+    return transaction
+      ? await update()
+      : await this.lockService.lock(`updateUserAcceptedCount_${userId}_${problemId}`, update);
   }
 
   async getUserRank(user: UserEntity): Promise<number> {

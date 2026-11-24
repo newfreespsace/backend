@@ -36,6 +36,16 @@ export class RemoteActivateDto extends RemoteContextDto {
   submissionIntent?: boolean;
 }
 
+export class RemoteVisibleResultDto extends RemoteContextDto {
+  @IsInt()
+  @Min(1)
+  submissionId: number;
+
+  @IsInt()
+  @Min(1)
+  revision: number;
+}
+
 export class SetCodeforcesCredentialsDto {
   @IsOptional()
   @IsString()

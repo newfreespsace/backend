@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "crypto";
+import { isDeepStrictEqual } from "util";
 
 import { Injectable } from "@nestjs/common";
 
@@ -15,12 +16,14 @@ import { SubmissionStatus } from "@/submission/submission-status.enum";
 import { AtcoderSessionService } from "./atcoder-session.service";
 import { AtcoderStatusUpdate, parseAtcoderStatusResponse } from "./atcoder-status.parser";
 
-import { RemoteAccountEntity } from "./remote-account.entity";
+import { CodeforcesLiveSyncState, RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteSubmission, remoteVerdict, SubmissionMethod } from "./remote-judge.types";
 import { parseAtcoderSubmissionDetail } from "./atcoder-detail.parser";
 import { MAX_REMOTE_SOURCE_BYTES } from "./remote-source";
 import { assertAtcoderPage, ATCODER_USER_AGENT } from "./atcoder-request";
 import { safeAtcoderRequest } from "./atcoder-request-profile";
+import type { AtcoderSubmissionState } from "./atcoder-submission-state.entity";
+import { AtcoderSubmissionStateService } from "./atcoder-submission-state.service";
 import { CODEFORCES_USER_AGENT, safeCodeforcesRequest } from "./codeforces-request-profile";
 import { AtcoderSourceIdentity, parseAtcoderSource } from "./atcoder-source.parser";
 import { CodeforcesCredentials, CodeforcesCredentialsService } from "./codeforces-credentials.service";
@@ -52,7 +55,6 @@ class RemoteRequestError extends RemoteSyncError {}
 
 export interface AtcoderLiveTarget {
   contestId: string;
-  since: number;
 }
 
 /** Internal credentials scoped to one worker turn; never persist or return them through an API. */
@@ -62,16 +64,10 @@ export interface AtcoderSessionContext {
   readonly cooldownMs: number;
 }
 
-interface AtcoderLiveScan {
-  page: number;
-  head: number;
-  boundary: number;
+interface LegacyAtcoderLiveScan {
   pendingIds: string[];
   pendingRows?: RemoteSubmission[];
   knownRows?: RemoteSubmission[];
-  nextDiscoveryAt?: number;
-  metadataRetryAt?: number;
-  statusRetryAt?: number;
   discoveries?: Record<string, { update?: AtcoderStatusUpdate; failures?: number; retryAt?: number }>;
   detailsFetched?: string[];
 }
@@ -124,6 +120,7 @@ export interface RemotePage {
   pending: boolean;
   acknowledge?: () => Promise<void>;
   pollAfterMs?: number;
+  observedAt?: number;
   acquisition?: RemoteTaskAcquisition;
   warning?: { error: string; details: RemoteErrorDetails };
   sourceError?: string;
@@ -137,7 +134,8 @@ export class RemoteProviderService {
     private readonly redisService: RedisService,
     private readonly lockService: LockService,
     private readonly atcoderSessions: AtcoderSessionService,
-    private readonly codeforcesCredentials: CodeforcesCredentialsService
+    private readonly codeforcesCredentials: CodeforcesCredentialsService,
+    private readonly atcoderSubmissionState: AtcoderSubmissionStateService
   ) {}
 
   private atcoderCooldownKey(session: string): string {
@@ -402,25 +400,15 @@ export class RemoteProviderService {
   ): Promise<RemotePage> {
     if (account.platform === SubmissionMethod.Codeforces) return await this.codeforcesPage(account);
     const session = await this.requireAtcoderSession(account.id, context);
-    const live = liveTargets?.length
-      ? await this.atcoderLivePage(account, liveTargets, session, onPhase)
-      : {
-          submissions: [],
-          pending: false,
-          pollAfterMs: undefined,
-          acknowledge: undefined,
-          warning: undefined,
-          acquisition: undefined
-        };
+    const live = await this.atcoderLivePage(account, liveTargets || [], session, onPhase);
     return {
-      submissions: [...new Map(live.submissions.map(row => [row.id, row])).values()].sort(
-        (a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id)
-      ),
+      submissions: live.submissions.sort((a, b) => a.submittedAt - b.submittedAt || Number(a.id) - Number(b.id)),
       cursor: account.cursor,
       scan: null,
       more: false,
       pending: live.pending,
       pollAfterMs: live.pollAfterMs,
+      observedAt: live.observedAt,
       acknowledge: live.acknowledge,
       warning: live.warning,
       acquisition: live.acquisition
@@ -489,22 +477,29 @@ export class RemoteProviderService {
     targets: AtcoderLiveTarget[],
     session: string,
     onPhase?: (phase: RemoteTaskPhase) => void
-  ) {
+  ): Promise<
+    Pick<
+      RemotePage,
+      "submissions" | "pending" | "pollAfterMs" | "acknowledge" | "warning" | "observedAt" | "acquisition"
+    >
+  > {
     const redis = this.redisService.getSharedClient();
-    const ordered = [...targets].sort((a, b) => a.contestId.localeCompare(b.contestId));
+    const pendingKey = `remote-atcoder-pending:${account.id}`;
+    const legacyPending = new Set<string>(JSON.parse((await redis.get(pendingKey)) || "[]"));
+    const pendingContests = new Set([
+      ...(await this.atcoderSubmissionState.pendingContests(account.id)),
+      ...legacyPending
+    ]);
+    const ordered = [...new Set([...targets.map(target => target.contestId), ...pendingContests])].sort();
+    if (!ordered.length) return { submissions: [], pending: false };
     const rotationKey = `remote-atcoder-rotation:${account.id}`;
     const index = (Number(await redis.get(rotationKey)) || 0) % ordered.length;
-    const target = ordered[index];
+    const contestId = ordered[index];
     await redis.set(rotationKey, String(index + 1), "EX", 86400);
-    const key = `remote-atcoder-pages:${account.id}:${target.contestId}`;
+    const key = `remote-atcoder-pages:${account.id}:${contestId}`;
     const saved = await redis.get(key);
-    const scan: AtcoderLiveScan = saved ? JSON.parse(saved) : { page: 2, head: 0, boundary: 0, pendingIds: [] };
-    const known = new Map([...(scan.knownRows || []), ...(scan.pendingRows || [])].map(row => [row.id, row]));
-    const fetched = new Set(scan.detailsFetched || []);
-    const discoveries = new Map(Object.entries(scan.discoveries || {}));
-    for (const id of scan.pendingIds) if (!discoveries.has(id)) discoveries.set(id, {});
     const rows = new Map<string, RemoteSubmission>();
-    const statusUrl = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/me/status/json`;
+    const statusUrl = `https://atcoder.jp/contests/${encodeURIComponent(contestId)}/submissions/me/status/json`;
     let updates: AtcoderStatusUpdate[];
     onPhase?.("CheckingVerdicts");
     try {
@@ -516,56 +511,91 @@ export class RemoteProviderService {
       error.details = {
         ...details,
         ...(details.stage === "parse" ? { httpStatus: 200 } : {}),
-        contestId: target.contestId,
+        contestId,
         request: safeAtcoderRequest(statusUrl)
       };
       // Never fall back to a list. Authentication and network errors retain worker backoff.
       throw error;
     }
-    for (const update of updates) {
-      const previous = known.get(update.id);
-      if (previous) {
-        const row = { ...previous, ...update };
-        known.set(update.id, row);
-        rows.set(update.id, row);
-      }
-      if (
-        discoveries.has(update.id) ||
-        (previous && !fetched.has(update.id) && !previous.sourceAvailable) ||
-        (!previous && (Number(update.id) > scan.boundary || update.status === SubmissionStatus.Pending))
-      )
-        discoveries.set(update.id, { ...discoveries.get(update.id), update });
+    const observedAt = Date.now();
+    const scan: LegacyAtcoderLiveScan = saved ? JSON.parse(saved) : { pendingIds: [] };
+    const states = new Map<string, AtcoderSubmissionState>();
+    const legacyRows = new Map([...(scan.knownRows || []), ...(scan.pendingRows || [])].map(row => [row.id, row]));
+    const legacyFetched = new Set(scan.detailsFetched || []);
+    const legacyIds = [...new Set([...legacyRows.keys(), ...scan.pendingIds, ...Object.keys(scan.discoveries || {})])];
+    for (const id of legacyIds) {
+      const row = legacyRows.get(id);
+      states.set(id, {
+        row,
+        detailsFetched: legacyFetched.has(id) || !!row?.sourceAvailable,
+        ...scan.discoveries?.[id]
+      });
     }
+    const stored = await this.atcoderSubmissionState.load(account.id, contestId, [
+      ...legacyIds,
+      ...updates.map(update => update.id)
+    ]);
+    const previous = new Map(stored.map(item => [String(item.submissionId), item.state]));
+    for (const [id, state] of previous) states.set(id, state);
+    for (const update of updates) {
+      const original = states.get(update.id);
+      const state = { ...original, update, firstObservedAt: original?.firstObservedAt ?? observedAt };
+      if (state.row) {
+        state.row = { ...state.row, ...update };
+        rows.set(update.id, { ...state.row, firstObservedAt: observedAt });
+      }
+      states.set(update.id, state);
+    }
+    const outstanding = (item: AtcoderSubmissionState) =>
+      !item.detailsFetched || (item.update ?? item.row)?.status === SubmissionStatus.Pending;
+    const checkpoint = ([submissionId, state]: [string, AtcoderSubmissionState]) => ({
+      accountId: account.id,
+      contestId,
+      submissionId,
+      state,
+      pending: outstanding(state)
+    });
+    const changed = ([id, state]: [string, AtcoderSubmissionState]) => !isDeepStrictEqual(state, previous.get(id));
+    // Keep an ID even if its detail request or local write fails, and later JSON omits it.
+    const discoveries = [...states].filter(entry => !entry[1].row && changed(entry));
+    await this.atcoderSubmissionState.save(discoveries.map(checkpoint));
+    for (const [id, state] of discoveries) previous.set(id, state);
     let warning: RemotePage["warning"];
     // Bound upstream work per turn. Every pending ID is still polled through JSON together.
-    const due = [...discoveries.entries()]
+    const due = [...states.entries()]
       .filter(
-        ([, item]) => item.update && item.update.status !== SubmissionStatus.Pending && !(item.retryAt > Date.now())
+        ([, item]) =>
+          !item.detailsFetched &&
+          item.update &&
+          item.update.status !== SubmissionStatus.Pending &&
+          !(item.retryAt > observedAt)
       )
       .sort((a, b) => (a[1].failures || 0) - (b[1].failures || 0) || Number(a[0]) - Number(b[0]))
       .slice(0, 5);
     if (due.length) onPhase?.("FetchingDetails");
     for (const [id, item] of due) {
-      const url = `https://atcoder.jp/contests/${encodeURIComponent(target.contestId)}/submissions/${id}`;
+      const url = `https://atcoder.jp/contests/${encodeURIComponent(contestId)}/submissions/${id}`;
       try {
         const detail = parseAtcoderSubmissionDetail(
           // eslint-disable-next-line no-await-in-loop -- Keep this bounded batch under the shared limiter.
           await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session),
-          { id, contestId: target.contestId, handle: account.handle }
+          { id, contestId, handle: account.handle }
         );
-        const row: RemoteSubmission = { ...detail, ...item.update, resultSource: "OriginalSite" };
+        const row: RemoteSubmission = {
+          ...detail,
+          ...item.update,
+          resultSource: "OriginalSite",
+          firstObservedAt: item.firstObservedAt
+        };
         rows.set(id, row);
-        const { sourceCode, ...cached } = row;
-        known.set(id, { ...cached, ...(sourceCode !== undefined ? { sourceAvailable: true } : {}) });
-        fetched.add(id);
-        discoveries.delete(id);
-        scan.boundary = Math.max(scan.boundary, Number(id));
+        const { sourceCode, firstObservedAt, ...metadata } = row;
+        states.set(id, { row: metadata, detailsFetched: true, firstObservedAt });
       } catch (error) {
         const safe = safeRemoteErrorDetails(error.details);
         const details = {
           ...safe,
           ...(safe.stage === "parse" ? { httpStatus: 200 } : {}),
-          contestId: target.contestId,
+          contestId,
           submissionId: id,
           request: safeAtcoderRequest(url)
         };
@@ -581,7 +611,7 @@ export class RemoteProviderService {
         )
           throw error;
         const failures = Math.min((item.failures || 0) + 1, 30);
-        discoveries.set(id, {
+        states.set(id, {
           ...item,
           failures,
           retryAt: Date.now() + Math.min(3600000, 60000 * 2 ** Math.min(failures - 1, 6))
@@ -589,49 +619,45 @@ export class RemoteProviderService {
         warning = { error: /^REMOTE_[A-Z_]+$/.test(error.message) ? error.message : "REMOTE_PARSE_FAILED", details };
       }
     }
-    scan.discoveries = Object.fromEntries(discoveries);
-    scan.pendingRows = [...known.values()].filter(row => row.status === SubmissionStatus.Pending);
-    scan.pendingIds = [...new Set([...scan.pendingRows.map(row => row.id), ...discoveries.keys()])];
-    scan.knownRows = [...known.values()].sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 200);
-    scan.detailsFetched = scan.knownRows.filter(row => fetched.has(row.id)).map(row => row.id);
-    // Discard the obsolete list pagination and retry state on migration.
-    scan.page = 2;
-    scan.head = 0;
-    delete scan.nextDiscoveryAt;
-    delete scan.metadataRetryAt;
-    delete scan.statusRetryAt;
-    const pendingKey = `remote-atcoder-pending:${account.id}`;
-    const pendingContests = new Set<string>(JSON.parse((await redis.get(pendingKey)) || "[]"));
-    for (const contestId of pendingContests)
-      if (!ordered.some(item => item.contestId === contestId)) pendingContests.delete(contestId);
-    if (scan.pendingIds.length) pendingContests.add(target.contestId);
-    else pendingContests.delete(target.contestId);
-    const detailQueue = [...discoveries.values()].filter(
-      item => item.update && item.update.status !== SubmissionStatus.Pending
-    );
-    const observedAt = Date.now();
+    const pending = [...states.values()].filter(outstanding);
+    if (pending.length) pendingContests.add(contestId);
+    else pendingContests.delete(contestId);
+    const detailQueue = pending.filter(item => item.update && item.update.status !== SubmissionStatus.Pending);
+    const waitingForVerdict = pending.length > detailQueue.length;
+    const waitingForDetails = detailQueue.some(item => !(item.retryAt > observedAt));
+    const retryingDetails = detailQueue.some(item => item.retryAt > observedAt);
+    const onlyDelayedDetails =
+      pendingContests.size === 1 && detailQueue.length > 0 && !waitingForVerdict && !waitingForDetails;
+    const retryDelay = onlyDelayedDetails
+      ? detailQueue.reduce((delay, item) => Math.min(delay, item.retryAt - observedAt), 30000)
+      : 0;
     return {
       submissions: [...rows.values()],
       pending: pendingContests.size > 0,
-      pollAfterMs: pendingContests.size > 0 ? 5000 : undefined,
+      pollAfterMs: pendingContests.size > 0 ? Math.max(5000, retryDelay) : undefined,
       warning,
+      observedAt,
       acquisition: {
         fetchedCount: updates.length,
-        waitingForVerdict:
-          scan.pendingRows.length > 0 ||
-          [...discoveries.values()].some(item => item.update?.status === SubmissionStatus.Pending),
-        waitingForDetails: detailQueue.some(item => !(item.retryAt > observedAt)),
-        retryingDetails: detailQueue.some(item => item.retryAt > observedAt)
+        waitingForVerdict,
+        waitingForDetails,
+        retryingDetails
       },
-      // Persist only after imports succeed; never cache source code in Redis.
+      // Mark details complete only after local imports succeed. Checkpoints omit source code.
       acknowledge: async () => {
-        await redis.set(key, JSON.stringify(scan), "EX", 86400);
-        await redis.set(pendingKey, JSON.stringify([...pendingContests]), "EX", 86400);
+        await this.atcoderSubmissionState.save([...states].filter(changed).map(checkpoint));
+        if (saved) await redis.del(key);
+        if (legacyPending.delete(contestId))
+          await redis.set(pendingKey, JSON.stringify([...legacyPending]), "EX", 86400);
       }
     };
   }
 
-  private async codeforcesPage(account: RemoteAccountEntity): Promise<RemotePage> {
+  async getCodeforcesLivePage(account: RemoteAccountEntity, state: CodeforcesLiveSyncState): Promise<RemotePage> {
+    return await this.codeforcesPage({ ...account, cursor: state.cursor, scan: state.scan }, state.since);
+  }
+
+  private async codeforcesPage(account: RemoteAccountEntity, since?: number): Promise<RemotePage> {
     const scan = account.scan || { offset: 1, head: 0 };
     const { cursor } = account;
     const params = {
@@ -702,11 +728,13 @@ export class RemoteProviderService {
     }
     // Public result sync remains available when source authorization fails.
     rows ??= await this.codeforces<CodeforcesSubmissionRow>("user.status", params, undefined, account.id);
+    const observedAt = Date.now();
     const submissions: RemoteSubmission[] = rows
       .filter(
         row =>
           row.problem?.contestId &&
           row.problem?.index &&
+          (since === undefined || row.creationTimeSeconds >= since) &&
           row.author?.members?.some(member => member.handle.toLowerCase() === account.handle.toLowerCase())
       )
       .map(row => ({
@@ -714,6 +742,7 @@ export class RemoteProviderService {
         contestId: String(row.problem.contestId),
         taskId: row.problem.index,
         submittedAt: row.creationTimeSeconds,
+        observedAt,
         verdict: row.verdict || "SUBMITTED",
         status: remoteVerdict(account.platform, row.verdict),
         language: row.programmingLanguage,
@@ -746,13 +775,18 @@ export class RemoteProviderService {
     const head = Math.max(scan.head, ...rows.map(row => Number(row.id)), 0);
     const pendingIds = submissions.filter(row => row.status === SubmissionStatus.Pending).map(row => Number(row.id));
     const pendingMin = Math.min(scan.pendingMin || Infinity, ...pendingIds);
-    const more = rows.length === pageSize && Number(rows[rows.length - 1].id) > Number(cursor);
+    const last = rows.at(-1);
+    const more =
+      rows.length === pageSize &&
+      Number(last.id) > Number(cursor) &&
+      (since === undefined || last.creationTimeSeconds >= since);
     return {
       submissions,
       sourceError,
       sourceErrorDetails,
       sourceRetryAt,
       more,
+      observedAt,
       pending: Number.isFinite(pendingMin),
       acquisition: { fetchedCount: submissions.length, waitingForVerdict: Number.isFinite(pendingMin) },
       cursor: more ? cursor : String(Number.isFinite(pendingMin) ? Math.min(head, pendingMin - 1) : head),

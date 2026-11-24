@@ -20,7 +20,7 @@ import { UserService } from "@/user/user.service";
 import { RemoteAccountEntity } from "./remote-account.entity";
 import { RemoteProviderService } from "./remote-provider.service";
 import { RemoteSourceSync, SubmissionMethod } from "./remote-judge.types";
-import { scheduleAtcoderSource } from "./atcoder-policy";
+import { ATCODER_PENDING_WORK, scheduleAtcoderSource } from "./atcoder-policy";
 
 @Injectable()
 export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
@@ -123,7 +123,7 @@ export class AtcoderSourceService implements OnModuleInit, OnModuleDestroy {
           now: new Date()
         })
         .andWhere(
-          "(account.activeUntil > :now OR account.catchUpRequested = 1) AND account.atcoderSessionConfigured = 1"
+          `(account.activeUntil > :now OR account.catchUpRequested = 1 OR ${ATCODER_PENDING_WORK}) AND account.atcoderSessionConfigured = 1`
         )
         .getCount();
       if (dueResults) return;

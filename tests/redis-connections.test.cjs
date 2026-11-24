@@ -42,7 +42,7 @@ test("repeated provider requests, binding operations and worker turns do not all
   const lock = { lock: async (_, callback) => callback() };
   const provider = new RemoteProviderService(redis.service, lock, {
     get: async () => "test-session"
-  });
+  }, undefined, { pendingContests: async () => [], load: async () => [], save: async () => {} });
   const account = { id: 1, userId: 1, nextSyncAt: new Date(0), failures: 0, cursor: "0" };
   const judge = Object.create(RemoteJudgeService.prototype);
   judge.redisService = redis.service;
@@ -55,7 +55,7 @@ test("repeated provider requests, binding operations and worker turns do not all
   judge.users = { findUserById: async () => ({ id: 1, isActive: false }) };
   judge.accounts = {
     createQueryBuilder: () => {
-      const builder = { where: () => builder, orderBy: () => builder, getOne: async () => account };
+      const builder = { where: () => builder, orderBy: () => builder, limit: () => builder, getOne: async () => account };
       return builder;
     },
     findOneBy: async where => (where.id ? account : null),

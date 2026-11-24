@@ -1,7 +1,7 @@
-import { BadRequestException, Injectable, Inject, forwardRef } from "@nestjs/common";
+import { BadRequestException, Injectable, Inject, OnModuleDestroy, OnModuleInit, forwardRef } from "@nestjs/common";
 import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 
-import { Repository, DataSource, QueryBuilder, Brackets } from "typeorm";
+import { Repository, DataSource, EntityManager, LessThanOrEqual, QueryBuilder, Brackets } from "typeorm";
 import { ValidationError } from "class-validator";
 import { v4 as uuid } from "uuid";
 import moment from "moment-timezone";
@@ -50,6 +50,7 @@ import { SubmissionStatisticsService } from "./submission-statistics.service";
 import { ContestSubmissionPhase, SubmissionEntity } from "./submission.entity";
 import { SubmissionDetailEntity } from "./submission-detail.entity";
 import { SubmissionStatus } from "./submission-status.enum";
+import { RemoteSubmissionCompletionEntity } from "./remote-submission-completion.entity";
 
 import { FileUploadInfoDto, SignedFileUploadRequestDto } from "@/file/dto";
 
@@ -121,7 +122,13 @@ function makeSubmissionPriority(
 }
 
 @Injectable()
-export class SubmissionService implements JudgeTaskService<SubmissionProgress, SubmissionTaskExtraInfo> {
+export class SubmissionService
+  implements JudgeTaskService<SubmissionProgress, SubmissionTaskExtraInfo>, OnModuleInit, OnModuleDestroy
+{
+  private remoteCompletionTimer: ReturnType<typeof setInterval>;
+
+  private retryingRemoteCompletions = false;
+
   constructor(
     @InjectDataSource()
     private connection: DataSource,
@@ -165,6 +172,23 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     "syzoj_ng_submission_judge_time_seconds",
     this.metricsService.histogram.BUCKETS_TIME_10M_30
   );
+
+  onModuleInit(): void {
+    this.remoteCompletionTimer = setInterval(() => {
+      if (this.retryingRemoteCompletions) return;
+      this.retryingRemoteCompletions = true;
+      this.retryRemoteCompletions()
+        .catch(() => logger.warn("Remote submission completion retry failed"))
+        .finally(() => {
+          this.retryingRemoteCompletions = false;
+        });
+    }, 5000);
+    this.remoteCompletionTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    clearInterval(this.remoteCompletionTimer);
+  }
 
   async findSubmissionById(submissionId: number): Promise<SubmissionEntity> {
     return await this.submissionRepository.findOneBy({
@@ -501,29 +525,30 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     user: UserEntity,
     problem: ProblemEntity,
     incoming: RemoteSubmissionInfo & { sourceCode?: string },
-    contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase }
-  ): Promise<void> {
+    contest?: { id: number; problemIndex: number; phase: ContestSubmissionPhase },
+    rememberObservation = false
+  ): Promise<number | null> {
     const { sourceCode: providedSource, ...remote } = incoming;
     const sourceCode = validRemoteSource(providedSource) ? providedSource : undefined;
     const key = `${remote.platform}:${remote.id}:${problem.id}`;
-    await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
-      let submission = await this.submissionRepository.findOneBy({ remoteKey: key });
-      if (submission && submission.submitterId !== user.id) return;
+    return await this.lockService.lock(`RemoteSubmission_${key}`, async () => {
+      const existing = await this.submissionRepository.findOneBy({ remoteKey: key });
+      if (existing && existing.submitterId !== user.id) return null;
       // The historical index can lag behind an original-site result (including rejudges).
-      if (submission?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return;
+      if (existing?.remote?.resultSource === "OriginalSite" && remote.resultSource === "AtCoderProblems") return null;
       // Only the content endpoint may return code. Never put it in submission metadata or events.
-      remote.sourceAvailable = !!sourceCode || submission?.remote?.sourceAvailable || undefined;
+      remote.sourceAvailable = !!sourceCode || existing?.remote?.sourceAvailable || undefined;
       if (remote.platform === SubmissionMethod.AtCoder) {
-        const previous = submission?.remote?.sourceSync;
+        const previous = existing?.remote?.sourceSync;
         remote.sourceSync = remote.sourceAvailable
           ? previous?.status === "Available"
             ? previous
             : { status: "Available", failures: 0 }
           : scheduleAtcoderSource(previous, remote.status !== SubmissionStatus.Pending);
       }
-      if (!submission) {
-        submission = new SubmissionEntity();
-        Object.assign(submission, {
+      const submission =
+        existing ||
+        Object.assign(new SubmissionEntity(), {
           remoteKey: key,
           remote,
           taskId: null,
@@ -542,68 +567,167 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
           contestPhase: contest?.phase || null,
           submitterId: user.id
         });
-        await this.connection.transaction(async manager => {
-          await manager.save(submission);
-          await manager.save(
-            Object.assign(new SubmissionDetailEntity(), {
-              submissionId: submission.id,
-              content: makeRemoteSourceContent(remote.language, sourceCode || ""),
-              fileUuid: null,
-              result: null
-            })
-          );
-          await manager.increment(ProblemEntity, { id: problem.id }, "submissionCount", 1);
-          await manager.increment(UserEntity, { id: user.id }, "submissionCount", 1);
-        });
-      }
-      const resultUnchanged =
-        submission.status === remote.status &&
-        submission.remote?.verdict === remote.verdict &&
-        submission.remote?.points === remote.points &&
-        submission.remote?.resultSource === remote.resultSource &&
-        submission.remote?.time === remote.time &&
-        submission.remote?.memory === remote.memory;
+      const before = existing?.remote;
+      const stale = before && before.observedAt > 0 && !(remote.observedAt >= before.observedAt);
+      const preserveResult =
+        before &&
+        (stale || (submission.status !== SubmissionStatus.Pending && remote.status === SubmissionStatus.Pending));
       const nextRemote = {
-        ...remote,
-        passedTestCount: remote.passedTestCount ?? submission.remote?.passedTestCount,
-        testset: remote.testset ?? submission.remote?.testset,
-        historical: submission.remote?.historical ?? remote.historical
+        ...(preserveResult ? before : remote),
+        sourceAvailable: remote.sourceAvailable,
+        sourceSync: remote.sourceSync,
+        passedTestCount: preserveResult
+          ? before.passedTestCount ?? remote.passedTestCount
+          : remote.passedTestCount ?? before?.passedTestCount,
+        testset: preserveResult ? before.testset ?? remote.testset : remote.testset ?? before?.testset,
+        historical: before?.historical ?? remote.historical,
+        resultSavedAt: before?.resultSavedAt
       };
-      const needsSourceSave = !!sourceCode && !submission.remote?.sourceAvailable;
-      const metadataChanged = (Object.keys(nextRemote) as (keyof RemoteSubmissionInfo)[]).some(
-        field => nextRemote[field] !== submission.remote?.[field]
-      );
-      if (needsSourceSave || metadataChanged) {
-        await this.lockService.lock(`Submission_${submission.id}`, async () => {
-          await this.saveRemoteContent(submission, nextRemote, needsSourceSave ? sourceCode : undefined);
-        });
-      }
-      if (remote.status === SubmissionStatus.Pending || resultUnchanged) return;
-      submission.remote = nextRemote;
       const fullScore = problem.remoteProblem?.fullScore;
       const score =
-        remote.status === SubmissionStatus.Accepted
+        nextRemote.status === SubmissionStatus.Accepted
           ? 100
-          : fullScore && remote.points != null
-          ? Math.max(0, Math.min(99, Math.round((remote.points * 100) / fullScore)))
+          : fullScore && nextRemote.points != null
+          ? Math.max(0, Math.min(99, Math.round((nextRemote.points * 100) / fullScore)))
           : 0;
-      await this.lockService.lock(`Submission_${submission.id}`, async () => {
-        const progress: SubmissionProgress = {
-          progressType: SubmissionProgressType.Finished,
-          status: remote.status,
-          score,
-          totalOccupiedTime: 0
-        };
-        await this.onSubmissionFinished(submission, problem, progress);
-        // Historical results still update an already open detail page; their first-AC marker remains false.
-        await this.submissionProgressService.emitSubmissionEvent(submission.id, SubmissionEventType.Progress, progress);
-      });
+      const memoryUsed = nextRemote.memory == null ? null : Math.ceil(nextRemote.memory / 1024);
+      const finalized =
+        nextRemote.status !== SubmissionStatus.Pending &&
+        (!existing ||
+          submission.status !== nextRemote.status ||
+          submission.score !== score ||
+          submission.timeUsed !== nextRemote.time ||
+          submission.memoryUsed !== memoryUsed ||
+          before?.verdict !== nextRemote.verdict ||
+          before?.points !== nextRemote.points ||
+          before?.resultSource !== nextRemote.resultSource);
+      const needsSource = !!sourceCode && !before?.sourceAvailable;
+      const metadataChanged = (Object.keys(nextRemote) as (keyof RemoteSubmissionInfo)[]).some(
+        field => (field !== "observedAt" || rememberObservation) && nextRemote[field] !== before?.[field]
+      );
+      if (existing && !finalized && !metadataChanged && !needsSource) return null;
+      let savedAt: number | null = null;
+      const update = async () => {
+        const oldStatus = submission.status;
+        const progress: SubmissionProgress = finalized
+          ? {
+              progressType: SubmissionProgressType.Finished,
+              status: nextRemote.status,
+              score,
+              totalOccupiedTime: 0
+            }
+          : null;
+        const detail = existing
+          ? finalized || needsSource
+            ? await this.getSubmissionDetail(submission)
+            : null
+          : Object.assign(new SubmissionDetailEntity(), { fileUuid: null, result: null });
+        if ((finalized || needsSource) && !detail) throw new Error("REMOTE_SUBMISSION_MISSING_DETAIL");
+        if (detail && (!existing || needsSource))
+          detail.content = makeRemoteSourceContent(nextRemote.language, sourceCode || "", detail.content);
+        if (progress) {
+          detail.result = progress;
+          nextRemote.resultSavedAt = Date.now();
+          Object.assign(submission, { status: progress.status, score, timeUsed: nextRemote.time, memoryUsed });
+        }
+        submission.remote = nextRemote;
+        await this.connection.transaction("READ COMMITTED", async manager => {
+          await manager.save(submission);
+          if (detail) {
+            detail.submissionId = submission.id;
+            await manager.save(detail);
+          }
+          if (!existing) {
+            await manager.increment(ProblemEntity, { id: problem.id }, "submissionCount", 1);
+            await manager.increment(UserEntity, { id: user.id }, "submissionCount", 1);
+          }
+          if (!progress) return;
+          const firstAccepted = await this.updateAcceptedStatistics(oldStatus, submission, manager);
+          const completions = manager.getRepository(RemoteSubmissionCompletionEntity);
+          const previous = await completions.findOneBy({ submissionId: submission.id });
+          await completions.save({
+            submissionId: submission.id,
+            firstAccepted:
+              !nextRemote.historical &&
+              progress.status === SubmissionStatus.Accepted &&
+              (firstAccepted || !!previous?.firstAccepted),
+            failures: 0,
+            nextAttemptAt: new Date()
+          });
+        });
+        if (finalized) savedAt = Date.now();
+      };
+      const persist = async () => {
+        if (finalized && [submission.status, nextRemote.status].includes(SubmissionStatus.Accepted))
+          await this.lockService.lock(`finishAcceptedSubmission_${user.id}_${problem.id}`, () =>
+            this.lockService.lock(`updateUserAcceptedCount_${user.id}_${problem.id}`, update)
+          );
+        else await update();
+      };
+      if (existing)
+        await this.lockService.lock(`Submission_${submission.id}`, async () => {
+          const current = await this.findSubmissionById(submission.id);
+          if (!current || current.remoteKey !== key) return;
+          submission.isPublic = current.isPublic;
+          await persist();
+          if (finalized) await this.finishRemoteCompletion(submission);
+        });
+      else {
+        await persist();
+        if (finalized)
+          await this.lockService.lock(`Submission_${submission.id}`, () => this.finishRemoteCompletion(submission));
+      }
+      return savedAt;
     });
+  }
+
+  private async retryRemoteCompletions(): Promise<void> {
+    const overdue = await this.connection.getRepository(RemoteSubmissionCompletionEntity).find({
+      where: { nextAttemptAt: LessThanOrEqual(new Date()) },
+      order: { nextAttemptAt: "ASC", submissionId: "ASC" },
+      take: 10
+    });
+    for (const job of overdue) {
+      // eslint-disable-next-line no-await-in-loop -- Keep this database retry batch bounded.
+      await this.lockService.lock(`Submission_${job.submissionId}`, async () => {
+        const submission = await this.findSubmissionById(job.submissionId);
+        if (submission) await this.finishRemoteCompletion(submission);
+      });
+    }
+  }
+
+  /** Caller holds the submission lock. Cache invalidation and ranklist rebuild can be replayed. */
+  private async finishRemoteCompletion(submission: SubmissionEntity): Promise<void> {
+    const completions = this.connection.getRepository(RemoteSubmissionCompletionEntity);
+    const where = { submissionId: submission.id };
+    const job = await completions.findOneBy(where);
+    if (!job || +job.nextAttemptAt > Date.now()) return;
+    let progress: SubmissionProgress;
+    try {
+      await this.submissionStatisticsService.invalidateProblemStatistics(submission.problemId);
+      if (submission.contestId) await this.updateContestRanklist(null, submission);
+      progress = (await this.getSubmissionDetail(submission))?.result;
+      await completions.delete(where);
+    } catch {
+      const failures = Math.min(job.failures + 1, 30);
+      await completions.update(where, {
+        failures,
+        nextAttemptAt: new Date(Date.now() + Math.min(300000, 5000 * 2 ** failures))
+      });
+      logger.warn(`Remote submission ${submission.id} completion deferred (attempt ${failures})`);
+      return;
+    }
+    if (progress) {
+      progress.isFirstAccepted = job.firstAccepted;
+      await this.submissionProgressService
+        .emitSubmissionEvent(submission.id, SubmissionEventType.Progress, progress)
+        .catch(() => logger.warn(`Remote submission ${submission.id} progress notification failed`));
+    }
   }
 
   getRemoteMeta(submission: SubmissionEntity): RemoteSubmissionInfo {
     if (!submission.remote) return submission.remote;
-    const { sourceSync, ...remote } = submission.remote;
+    const { sourceSync, observedAt, resultSavedAt, ...remote } = submission.remote;
     if (remote.platform !== SubmissionMethod.AtCoder) return remote;
     return {
       ...remote,
@@ -898,7 +1022,7 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
       });
 
       await this.submissionStatisticsService.onSubmissionUpdated(submission, null);
-      await this.contestService.onSubmissionUpdated(submission, null);
+      await this.updateContestRanklist(submission, null);
       if (submission.status === SubmissionStatus.Accepted) {
         await this.problemService.updateProblemStatistics(submission.problemId, -1, -1);
         await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
@@ -917,22 +1041,44 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     const affectsContestRanklist = [oldSubmission, submission].some(
       item => item.contestId && ![SubmissionStatus.Pending, SubmissionStatus.Canceled].includes(item.status)
     );
-    if (affectsContestRanklist) await this.contestService.onSubmissionUpdated(oldSubmission, submission);
+    if (affectsContestRanklist) await this.updateContestRanklist(oldSubmission, submission);
 
-    const oldAccepted = oldSubmission.status === SubmissionStatus.Accepted;
+    return await this.updateAcceptedStatistics(oldSubmission.status, submission);
+  }
+
+  private async updateContestRanklist(oldSubmission: SubmissionEntity | null, submission: SubmissionEntity | null) {
+    const related = submission || oldSubmission;
+    if (!related?.contestId) return;
+    await this.lockService.lock(`ContestPlayer_${related.contestId}_${related.submitterId}`, () =>
+      this.contestService.onSubmissionUpdated(oldSubmission, submission)
+    );
+  }
+
+  private async updateAcceptedStatistics(
+    oldStatus: SubmissionStatus,
+    submission: SubmissionEntity,
+    transaction?: EntityManager
+  ): Promise<boolean> {
+    const oldAccepted = oldStatus === SubmissionStatus.Accepted;
     const newAccepted = submission.status === SubmissionStatus.Accepted;
     if (!oldAccepted && newAccepted) {
-      await this.problemService.updateProblemStatistics(submission.problemId, 0, 1);
+      await this.problemService.updateProblemStatistics(submission.problemId, 0, 1, transaction);
       const isFirstAccepted = await this.userService.updateUserAcceptedCount(
         submission.submitterId,
         submission.problemId,
-        "NON_AC_TO_AC"
+        "NON_AC_TO_AC",
+        transaction
       );
-      if (!submission.remote?.historical) await this.problemReviewService.onAcceptedSubmission(submission);
+      if (!submission.remote?.historical) await this.problemReviewService.onAcceptedSubmission(submission, transaction);
       return isFirstAccepted;
     } else if (oldAccepted && !newAccepted) {
-      await this.problemService.updateProblemStatistics(submission.problemId, 0, -1);
-      await this.userService.updateUserAcceptedCount(submission.submitterId, submission.problemId, "AC_TO_NON_AC");
+      await this.problemService.updateProblemStatistics(submission.problemId, 0, -1, transaction);
+      await this.userService.updateUserAcceptedCount(
+        submission.submitterId,
+        submission.problemId,
+        "AC_TO_NON_AC",
+        transaction
+      );
     }
 
     return false;
@@ -1099,8 +1245,13 @@ export class SubmissionService implements JudgeTaskService<SubmissionProgress, S
     );
   }
 
-  async getUserProblemAcceptedSubmissionCount(userId: number, problemId: number): Promise<number> {
-    return await this.submissionRepository.countBy({
+  async getUserProblemAcceptedSubmissionCount(
+    userId: number,
+    problemId: number,
+    transaction?: EntityManager
+  ): Promise<number> {
+    const repository = transaction ? transaction.getRepository(SubmissionEntity) : this.submissionRepository;
+    return await repository.countBy({
       submitterId: userId,
       problemId,
       status: SubmissionStatus.Accepted

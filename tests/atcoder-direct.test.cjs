@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 const account = { id: 1, platform: Method.AtCoder, handle: "coder", cursor: "1792510000" };
-const targets = [{ contestId: "abc480", since: 1792510000 }];
+const targets = [{ contestId: "abc480" }];
 function row({
   id = 80223806,
   contest = "abc480",
@@ -62,6 +62,7 @@ function fixture(handler, statusHandler) {
   personalSession = "test-dedicated-session";
   const values = new Map();
   const expirations = new Map();
+  const checkpoints = new Map();
   const calls = [];
   const provider = Object.create(RemoteProviderService.prototype);
   provider.atcoderSessions = {
@@ -70,6 +71,7 @@ function fixture(handler, statusHandler) {
   provider.redisService = {
     getSharedClient: () => ({
       get: async key => values.get(key) ?? null,
+      del: async key => values.delete(key),
       incr: async () => 1,
       pexpire: async () => 1,
       set: async (key, value, unit, ttl, nx) => {
@@ -82,6 +84,16 @@ function fixture(handler, statusHandler) {
         key.startsWith("remote-atcoder-cooldown:") ? Math.max(0, (expirations.get(key) || 0) - Date.now()) : 0
     })
   };
+  provider.atcoderSubmissionState = {
+    pendingContests: async accountId => [...new Set([...checkpoints.values()]
+      .filter(row => row.accountId === accountId && row.pending).map(row => row.contestId))],
+    load: async (accountId, contestId, ids) => [...checkpoints.values()]
+      .filter(row => row.accountId === accountId && row.contestId === contestId && (row.pending || ids.includes(row.submissionId)))
+      .map(row => structuredClone(row)),
+    save: async entries => {
+      for (const entry of entries) checkpoints.set(`${entry.accountId}:${entry.contestId}:${entry.submissionId}`, structuredClone(entry));
+    }
+  };
   provider.lockService = { lock: async (_, fn) => fn() };
   if (handler)
     provider.request = async (platform, address, authenticated) => {
@@ -91,7 +103,7 @@ function fixture(handler, statusHandler) {
       if (url.pathname.endsWith("/status/json")) return statusHandler ? statusHandler(url) : statusJson([]);
       return handler(url, authenticated);
     };
-  return { provider, values, calls, expirations };
+  return { provider, values, calls, expirations, checkpoints };
 }
 
 test("original HTML preserves JST timestamps, task IDs, verdicts, points and resource units", () => {
@@ -297,6 +309,7 @@ test("a queued request from a second backend sees the cooldown before making ano
   const second = Object.assign(Object.create(RemoteProviderService.prototype), {
     redisService: provider.redisService,
     atcoderSessions: provider.atcoderSessions,
+    atcoderSubmissionState: provider.atcoderSubmissionState,
     lockService: provider.lockService
   });
   let release;
@@ -459,7 +472,7 @@ test("detail parsing establishes ID, task, author, language and original JST tim
 test("pending JSON IDs request no HTML; the first final JSON result requests details in the same turn", async () => {
   let verdict = "WJ";
   const phases = [];
-  const { provider, calls, values } = fixture(
+  const { provider, calls, checkpoints } = fixture(
     () => detail(),
     () => statusJson(["321"], verdict)
   );
@@ -470,7 +483,7 @@ test("pending JSON IDs request no HTML; the first final JSON result requests det
   assert.equal(result.acquisition.waitingForVerdict, true);
   assert.equal(result.acquisition.fetchedCount, 1);
   assert.equal(detailCalls(calls).length, 0);
-  assert.equal(values.has("remote-atcoder-pages:1:abc480"), false);
+  assert.equal(checkpoints.get("1:abc480:321").pending, true);
   await result.acknowledge();
   verdict = "AC";
   phases.length = 0;
@@ -484,7 +497,7 @@ test("pending JSON IDs request no HTML; the first final JSON result requests det
   assert.equal(result.submissions[0].points, 100);
   assert.match(result.submissions[0].sourceCode, /private source/);
   await result.acknowledge();
-  assert.doesNotMatch(values.get("remote-atcoder-pages:1:abc480"), /private source|sourceCode|test-dedicated-session/);
+  assert.doesNotMatch(JSON.stringify([...checkpoints.values()]), /private source|sourceCode|test-dedicated-session/);
   const again = await provider.getPage(account, targets);
   assert.equal(again.submissions[0].sourceCode, undefined);
   assert.equal(detailCalls(calls).length, 1);
@@ -548,7 +561,7 @@ test("invalid JSON never falls back to a submission list", async () => {
 
 test("detail parse errors retain a sanitized reproduction command and retry without losing the final JSON grade", async () => {
   let body = "<html>private upstream body</html>";
-  const { provider, calls, values } = fixture(
+  const { provider, calls, checkpoints } = fixture(
     () => body,
     () => statusJson(["321"])
   );
@@ -556,6 +569,7 @@ test("detail parse errors retain a sanitized reproduction command and retry with
   assert.equal(result.submissions.length, 0);
   assert.equal(result.pending, true);
   assert.equal(result.warning.error, "REMOTE_PARSE_FAILED");
+  assert.equal(result.pollAfterMs, 30000);
   const diagnostics = safeRemoteErrorDetails(result.warning.details);
   assert.equal(diagnostics.submissionId, "321");
   assert.equal(diagnostics.request.url, "https://atcoder.jp/contests/abc480/submissions/321");
@@ -573,9 +587,7 @@ test("detail parse errors retain a sanitized reproduction command and retry with
   result = await provider.getPage(account, targets);
   assert.equal(detailCalls(calls).length, 1);
   await result.acknowledge();
-  const state = JSON.parse(values.get("remote-atcoder-pages:1:abc480"));
-  state.discoveries["321"].retryAt = 0;
-  values.set("remote-atcoder-pages:1:abc480", JSON.stringify(state));
+  checkpoints.get("1:abc480:321").state.retryAt = 0;
   body = detail();
   // Even if the next JSON snapshot omits the ID, its saved final result remains retryable.
   const original = provider.request;
@@ -591,7 +603,7 @@ test("detail parse errors retain a sanitized reproduction command and retry with
 
 test("a bounded detail batch eventually imports all finals, retains same-second IDs and does not refetch evicted metadata", async () => {
   const ids = Array.from({ length: 205 }, (_, i) => String(i + 1));
-  const { provider, calls, values } = fixture(
+  const { provider, calls, checkpoints } = fixture(
     url => detail({ id: url.pathname.split("/").at(-1) }),
     () => statusJson(ids)
   );
@@ -611,14 +623,14 @@ test("a bounded detail batch eventually imports all finals, retains same-second 
   assert.equal(done, true);
   assert.equal(new Set(received).size, 205);
   assert.equal(detailCalls(calls).length, 205);
-  assert.equal(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).knownRows.length, 200);
+  assert.equal(checkpoints.size, 205);
   await provider.getPage(account, targets);
   assert.equal(detailCalls(calls).length, 205);
   noLists(calls);
 });
 
 test("legacy unresolved IDs below the old boundary still fetch details when JSON confirms they are final", async () => {
-  const { provider, calls, values } = fixture(
+  const { provider, calls, values, checkpoints } = fixture(
     () => detail({ id: "38" }),
     () => statusJson(["38"])
   );
@@ -627,7 +639,8 @@ test("legacy unresolved IDs below the old boundary still fetch details when JSON
   assert.equal(result.submissions[0].id, "38");
   assert.equal(result.pending, false);
   await result.acknowledge();
-  assert.deepEqual(JSON.parse(values.get("remote-atcoder-pages:1:abc480")).pendingIds, []);
+  assert.equal(checkpoints.get("1:abc480:38").pending, false);
+  assert.equal(values.has("remote-atcoder-pages:1:abc480"), false);
   noLists(calls);
 });
 
@@ -677,17 +690,19 @@ test("missing source does not discard verified grades and source is not retried 
   assert.equal(detailCalls(calls).length, 1);
 });
 
-test("a failed import leaves the detail unacknowledged so it can be retried without exposing source in Redis", async () => {
-  const { provider, values, calls } = fixture(
+test("a failed import keeps the discovered ID even if the next status response omits it", async () => {
+  let visible = true;
+  const { provider, checkpoints, calls } = fixture(
     () => detail(),
-    () => statusJson(["321"])
+    () => statusJson(visible ? ["321"] : [])
   );
   await provider.getPage(account, targets);
-  assert.equal(values.has("remote-atcoder-pages:1:abc480"), false);
-  const next = await provider.getPage(account, targets);
+  assert.equal(checkpoints.get("1:abc480:321").pending, true);
+  visible = false;
+  const next = await provider.getPage(account, []);
   assert.equal(detailCalls(calls).length, 2);
   await next.acknowledge();
-  assert.doesNotMatch(JSON.stringify([...values]), /private source|sourceCode/);
+  assert.doesNotMatch(JSON.stringify([...checkpoints]), /private source|sourceCode/);
 });
 
 test("shared personal cooldown blocks other accounts and source fetches until the session is replaced", async () => {
@@ -737,10 +752,10 @@ test("one turn reuses its personal credential for JSON and detail requests and r
   assert.ok(cookies.every(cookie => cookie === "REVEL_SESSION=personal-session"));
 });
 
-test("a failed lower ID remains retryable after a higher ID advances the completed boundary", async () => {
+test("a failed lower ID remains retryable after a higher ID has completed and the watch expires", async () => {
   let failed = true;
   let ids = ["321", "322"];
-  const { provider, values } = fixture(
+  const { provider, values, checkpoints } = fixture(
     url => {
       const id = url.pathname.split("/").at(-1);
       return failed && id === "321" ? "<html>unexpected</html>" : detail({ id });
@@ -755,13 +770,12 @@ test("a failed lower ID remains retryable after a higher ID advances the complet
     ["322"]
   );
   await first.acknowledge();
-  const scan = JSON.parse(values.get("remote-atcoder-pages:1:abc480"));
-  assert.equal(scan.boundary, 322);
-  scan.discoveries["321"].retryAt = 0;
-  values.set("remote-atcoder-pages:1:abc480", JSON.stringify(scan));
+  assert.equal(checkpoints.get("1:abc480:322").pending, false);
+  checkpoints.get("1:abc480:321").state.retryAt = 0;
+  values.clear();
   failed = false;
   ids = [];
-  const next = await provider.getPage(account, targets);
+  const next = await provider.getPage(account, []);
   assert.equal(next.submissions[0].id, "321");
   assert.equal(next.pending, false);
   assert.equal(next.acquisition.retryingDetails, false);
@@ -790,7 +804,7 @@ test("detail challenges pause the personal session and retain diagnostics withou
 });
 
 test("a detail-only access denial backs off that ID without blocking other final submissions", async () => {
-  const { provider, values } = fixture(
+  const { provider, checkpoints } = fixture(
     url => {
       const id = url.pathname.split("/").at(-1);
       if (id === "321") throw new Error("REMOTE_ACCESS_DENIED");
@@ -805,7 +819,20 @@ test("a detail-only access denial backs off that ID without blocking other final
     ["322"]
   );
   await result.acknowledge();
-  const scan = JSON.parse(values.get("remote-atcoder-pages:1:abc480"));
-  assert.ok(scan.discoveries["321"].retryAt > Date.now());
-  assert.equal(scan.discoveries["322"], undefined);
+  assert.ok(checkpoints.get("1:abc480:321").state.retryAt > Date.now());
+  assert.equal(checkpoints.get("1:abc480:322").state.retryAt, undefined);
+});
+
+test("a lower ID first seen as final is discovered after a higher ID was saved", async () => {
+  let id = "322";
+  const { provider, calls } = fixture(url => detail({ id: url.pathname.split("/").at(-1) }), () => statusJson([id]));
+  const first = await provider.getPage(account, targets);
+  assert.equal(first.submissions[0].id, "322");
+  await first.acknowledge();
+  id = "321";
+  const second = await provider.getPage(account, targets);
+  assert.equal(second.submissions[0].id, "321");
+  await second.acknowledge();
+  await provider.getPage(account, targets);
+  assert.equal(detailCalls(calls).length, 2);
 });
