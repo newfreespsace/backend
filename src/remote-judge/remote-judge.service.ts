@@ -930,21 +930,21 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
             codeforcesSourceRetryAt: page.sourceRetryAt || null
           };
           if (live) {
-            const now = Date.now();
+            const completedAt = Date.now();
             const tracking =
-              account.codeforcesSyncState?.submissionUntil > now ||
+              account.codeforcesSyncState?.submissionUntil > completedAt ||
               (!!account.codeforcesSyncState?.submissionUntil && page.pending);
             const keep =
               page.more ||
               page.pending ||
               tracking ||
-              (+account.activeUntil > now && (account.scan || account.cursor === "0"));
+              (+account.activeUntil > completedAt && (account.scan || account.cursor === "0"));
             await this.accounts.update(
               { id: account.id },
               {
                 codeforcesLiveAt: keep
                   ? new Date(
-                      now +
+                      completedAt +
                         (tracking || page.pending || page.more
                           ? CODEFORCES_SUBMIT_POLL_INTERVAL_MS
                           : this.settings.intervalSeconds * 1000)
@@ -954,7 +954,7 @@ export class RemoteJudgeService implements OnModuleInit, OnModuleDestroy {
                   ? { since: live.since, cursor: page.cursor, scan: page.scan, pending: page.pending }
                   : null,
                 ...(page.acquisition ? { resultAcquisition: page.acquisition } : {}),
-                lastSyncedAt: new Date(now),
+                lastSyncedAt: new Date(completedAt),
                 ...sourceStatus
               }
             );

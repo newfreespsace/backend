@@ -727,7 +727,9 @@ export class SubmissionService
 
   getRemoteMeta(submission: SubmissionEntity): RemoteSubmissionInfo {
     if (!submission.remote) return submission.remote;
-    const { sourceSync, observedAt, resultSavedAt, ...remote } = submission.remote;
+    const { sourceSync, ...remote } = submission.remote;
+    delete remote.observedAt;
+    delete remote.resultSavedAt;
     if (remote.platform !== SubmissionMethod.AtCoder) return remote;
     return {
       ...remote,

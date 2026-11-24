@@ -576,20 +576,18 @@ export class RemoteProviderService {
     for (const [id, item] of due) {
       const url = `https://atcoder.jp/contests/${encodeURIComponent(contestId)}/submissions/${id}`;
       try {
-        const detail = parseAtcoderSubmissionDetail(
+        const { sourceCode, ...detail } = parseAtcoderSubmissionDetail(
           // eslint-disable-next-line no-await-in-loop -- Keep this bounded batch under the shared limiter.
           await this.request(SubmissionMethod.AtCoder, url, true, undefined, account.id, session),
           { id, contestId, handle: account.handle }
         );
-        const row: RemoteSubmission = {
+        const metadata = {
           ...detail,
           ...item.update,
-          resultSource: "OriginalSite",
-          firstObservedAt: item.firstObservedAt
+          resultSource: "OriginalSite" as const
         };
-        rows.set(id, row);
-        const { sourceCode, firstObservedAt, ...metadata } = row;
-        states.set(id, { row: metadata, detailsFetched: true, firstObservedAt });
+        rows.set(id, { ...metadata, sourceCode, firstObservedAt: item.firstObservedAt });
+        states.set(id, { row: metadata, detailsFetched: true, firstObservedAt: item.firstObservedAt });
       } catch (error) {
         const safe = safeRemoteErrorDetails(error.details);
         const details = {
@@ -629,7 +627,7 @@ export class RemoteProviderService {
     const onlyDelayedDetails =
       pendingContests.size === 1 && detailQueue.length > 0 && !waitingForVerdict && !waitingForDetails;
     const retryDelay = onlyDelayedDetails
-      ? detailQueue.reduce((delay, item) => Math.min(delay, item.retryAt - observedAt), 30000)
+      ? detailQueue.reduce((shortestDelay, item) => Math.min(shortestDelay, item.retryAt - observedAt), 30000)
       : 0;
     return {
       submissions: [...rows.values()],
