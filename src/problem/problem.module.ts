@@ -22,6 +22,7 @@ import { ProblemSampleEntity } from "./problem-sample.entity";
 import { ProblemJudgeInfoEntity } from "./problem-judge-info.entity";
 import { ProblemEntity } from "./problem.entity";
 import { ProblemDifficultyRatingEntity } from "./problem-difficulty-rating.entity";
+import { TestdataQuotaService } from "./testdata-quota.service";
 
 @Module({
   imports: [
@@ -44,8 +45,8 @@ import { ProblemDifficultyRatingEntity } from "./problem-difficulty-rating.entit
     forwardRef(() => DiscussionModule),
     forwardRef(() => ContestModule)
   ],
-  providers: [ProblemService],
+  providers: [ProblemService, TestdataQuotaService],
   controllers: [ProblemController],
-  exports: [ProblemService]
+  exports: [ProblemService, TestdataQuotaService]
 })
 export class ProblemModule {}

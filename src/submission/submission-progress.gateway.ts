@@ -25,6 +25,7 @@ export enum SubmissionProgressSubscriptionType {
 
 export interface SubmissionProgressSubscription {
   type: SubmissionProgressSubscriptionType;
+  viewerId: number;
   submissionIds: number[];
   hideResultSubmissionIds?: number[];
   hideTestcaseDetailsSubmissionIds?: number[];
@@ -73,6 +74,8 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
 
   private clientHiddenTestcaseDetailsSubmissionIds: Map<string, Set<number>> = new Map();
 
+  private clients = new Map<string, { socket: Socket; viewerId: number }>();
+
   constructor(
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => SubmissionService))
@@ -96,18 +99,16 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     "syzoj_ng_submission_progress_total_message_delivered"
   );
 
-  // A subscription key is send to the client to let it connect to the WebSocket gateway to subscribe some
-  // submission's progress. The authorization is done before the key is encoded, and when a client connect
-  // to the WebSocket, we don't require its user id or session key, only the key is verified.
+  // A signed viewer ID lets each event recheck current permissions, including loss of the last valid AC.
   encodeSubscription(subscription: SubmissionProgressSubscription): string {
-    return jwt.sign(subscription, this.secret);
+    return jwt.sign(subscription, this.secret, { expiresIn: "5m" });
   }
 
   decodeSubscription(subscriptionKey: string): SubmissionProgressSubscription {
     try {
       return jwt.verify(subscriptionKey, this.secret) as SubmissionProgressSubscription;
     } catch {
-      logger.log(`Invalid subscription key: ${subscriptionKey}`);
+      logger.log("Invalid submission progress subscription");
       return null;
     }
   }
@@ -154,10 +155,8 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
     if (!roomClients) return;
     for (const client of roomClients) {
       const joinedRooms = this.clientJoinedRooms.get(client);
-      joinedRooms.delete(room);
-      if (joinedRooms.size === 0 && this.server.sockets[client]) {
-        this.server.sockets[client].disconnect();
-      }
+      joinedRooms?.delete(room);
+      if (joinedRooms?.size === 0) this.clients.get(client)?.socket.disconnect();
     }
     this.rooms.delete(room);
   }
@@ -267,8 +266,6 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
       }
     };
 
-    logger.log(`Sending to ${typeof to === "string" ? to : (to as Socket).id}: ${JSON.stringify(message)}`);
-
     if (typeof to === "object") sendTo(to.id);
     else for (const client of this.rooms.get(to) || []) sendTo(client);
   }
@@ -279,27 +276,27 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
       this.metricCurrentClientCount.dec();
       this.clientJoinedRooms.delete(client.id);
       for (const room of rooms) {
-        this.rooms.get(room).delete(client.id);
+        this.rooms.get(room)?.delete(client.id);
       }
     }
     this.clientLastMessages.delete(client.id);
     this.clientHiddenResultSubmissionIds.delete(client.id);
     this.clientHiddenTestcaseDetailsSubmissionIds.delete(client.id);
+    this.clients.delete(client.id);
   }
 
   async handleConnection(client: Socket): Promise<void> {
     const subscription = this.decodeSubscription(client.handshake.query.subscriptionKey as string);
-    if (!subscription) {
+    if (!subscription?.viewerId) {
       client.disconnect(true);
       return;
     }
-
-    logger.log(`Subscription: ${JSON.stringify(subscription)}`);
 
     this.metricCurrentClientCount.inc();
     this.metricTotalClientConnected.inc();
 
     this.clientJoinedRooms.set(client.id, new Set());
+    this.clients.set(client.id, { socket: client, viewerId: subscription.viewerId });
     this.clientLastMessages.set(client.id, new Map());
     this.clientHiddenResultSubmissionIds.set(client.id, new Set(subscription.hideResultSubmissionIds || []));
     this.clientHiddenTestcaseDetailsSubmissionIds.set(
@@ -318,7 +315,7 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
         const submission = await this.submissionService.findSubmissionById(submissionId);
 
         // Submission deleted?
-        if (!submission) {
+        if (!submission || !(await this.submissionService.canReadProgress(subscription.viewerId, submission))) {
           this.leaveRoom(client, this.getRoom(subscription.type, submissionId));
           return;
         }
@@ -378,8 +375,25 @@ export class SubmissionProgressGateway implements OnGatewayConnection, OnGateway
 
     if (!isDeleted) {
       // If the progressType is "Finished", it's called after database updated
-      const submission = isFinished ? await this.submissionService.findSubmissionById(submissionId) : undefined;
-      const basicMeta = submission ? await this.submissionService.getSubmissionBasicMeta(submission) : undefined;
+      const metaRoom = this.getRoom(SubmissionProgressSubscriptionType.Meta, submissionId);
+      const detailRoom = this.getRoom(SubmissionProgressSubscriptionType.Detail, submissionId);
+      if (!this.rooms.has(metaRoom) && !this.rooms.has(detailRoom)) return;
+      const submission = await this.submissionService.findSubmissionById(submissionId);
+      await Promise.all(
+        [metaRoom, detailRoom].flatMap(room =>
+          [...(this.rooms.get(room) ?? [])].map(async id => {
+            const client = this.clients.get(id);
+            if (
+              client &&
+              (!submission || !(await this.submissionService.canReadProgress(client.viewerId, submission)))
+            ) {
+              this.leaveRoom(client.socket, room);
+            }
+          })
+        )
+      );
+      const basicMeta =
+        submission && isFinished ? await this.submissionService.getSubmissionBasicMeta(submission) : undefined;
 
       this.sendMessage(this.getRoom(SubmissionProgressSubscriptionType.Meta, submissionId), submissionId, {
         progressMeta: {

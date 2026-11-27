@@ -102,6 +102,7 @@ resourceLimit:
   problemTestdataFiles: 40
   problemTestdataSize: 134217728
   problemTestdataDailyDownloadFiles: 20
+  hackConcurrentTasks: 1
   problemAdditionalFileFiles: 40
   problemAdditionalFileSize: 134217728
   problemSamplesToRun: 10

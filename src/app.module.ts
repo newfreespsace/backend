@@ -42,6 +42,7 @@ import { ContestAccessGuard } from "./contest/contest-access.guard";
 import { WhiteboardModule } from "./whiteboard/whiteboard.module";
 import { ProblemReviewModule } from "./problem-review/problem-review.module";
 import { UsacoGuideModule } from "./usaco-guide/usaco-guide.module";
+import { HackModule } from "./hack/hack.module";
 
 @Module({
   imports: [
@@ -72,7 +73,8 @@ import { UsacoGuideModule } from "./usaco-guide/usaco-guide.module";
     RemoteJudgeModule,
     UsacoGuideModule,
     TrainingModule,
-    NotificationModule
+    NotificationModule,
+    HackModule
   ],
   controllers: [AppController],
   providers: [

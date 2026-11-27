@@ -108,7 +108,7 @@ export class EventReportService {
           requestBody =
             typeof request.body === "string"
               ? "[Request body omitted]"
-              : JSON.stringify(redactRequestBody(request.body), null, 2);
+              : JSON.stringify(redactRequestBody(request.body, request.path), null, 2);
         }
       }
 

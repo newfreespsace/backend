@@ -3,8 +3,9 @@ function isSensitiveField(key: string): boolean {
 }
 
 /** Make a logging-only copy. Never mutate credentials used by the controller. */
-export function redactRequestBody(body: unknown): unknown {
-  if (Array.isArray(body)) return body.map(redactRequestBody);
+export function redactRequestBody(body: unknown, path?: string): unknown {
+  if (/^\/api\/hack\/(?:create|saveProfile|revoke)\/?$/.test(path ?? "")) return "[REDACTED]";
+  if (Array.isArray(body)) return body.map(value => redactRequestBody(value));
   if (!body || typeof body !== "object") return body;
   return Object.fromEntries(
     Object.entries(body).map(([key, value]) => [key, isSensitiveField(key) ? "[REDACTED]" : redactRequestBody(value)])

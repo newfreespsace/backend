@@ -21,6 +21,7 @@ import { ConfigService } from "@/config/config.service";
 import { EventReportService, EventReportType } from "@/event-report/event-report.service";
 import { RedisService } from "@/redis/redis.service";
 import { LockService } from "@/redis/lock.service";
+import type { HackReport, HackTask } from "@/hack/hack.types";
 
 import { JudgeClientService } from "./judge-client.service";
 import { JudgeClientEntity } from "./judge-client.entity";
@@ -100,7 +101,9 @@ export class JudgeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private async checkConnection(client: Socket): Promise<boolean> {
     if (!client.connected) return false;
 
-    const { judgeClient } = this.mapSessionIdToJudgeClient.get(client.id);
+    const state = this.mapSessionIdToJudgeClient.get(client.id);
+    if (!state) return false;
+    const { judgeClient } = state;
     if (!(await this.judgeClientService.checkJudgeClientSession(judgeClient, client.id))) {
       client.disconnect(true);
       return false;
@@ -141,7 +144,7 @@ export class JudgeGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     // Now we are ready for consuming task
-    client.emit("ready", judgeClient.name, this.configService.config.judge);
+    client.emit("ready", judgeClient.name, this.configService.config.judge, { hack: 1 });
 
     const message = `Judge client ${client.id} (${judgeClient.name}) connected from ${proxyAddr(
       client.request,
@@ -293,5 +296,26 @@ export class JudgeGateway implements OnGatewayConnection, OnGatewayDisconnect {
       logger.log(`Emitting cancel event for task ${message.taskMeta.taskId}`);
       client.emit("cancel", message.taskMeta.taskId);
     }
+  }
+
+  @SubscribeMessage("claimHack")
+  async claimHack(@ConnectedSocket() client: Socket, @MessageBody() version: number): Promise<HackTask | false> {
+    if (version !== 1 || !(await this.checkConnection(client))) return false;
+    return (await this.judgeQueueService.hackDispatcher?.claim(client.id)) ?? false;
+  }
+
+  @SubscribeMessage("heartbeatHack")
+  async heartbeatHack(@ConnectedSocket() client: Socket, @MessageBody() taskId: string): Promise<boolean> {
+    if (typeof taskId !== "string" || !(await this.checkConnection(client))) return false;
+    return (await this.judgeQueueService.hackDispatcher?.heartbeat(client.id, taskId)) ?? false;
+  }
+
+  @SubscribeMessage("finishHack")
+  async finishHack(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() result: { taskId: string; report: HackReport }
+  ): Promise<boolean> {
+    if (typeof result?.taskId !== "string" || !(await this.checkConnection(client))) return false;
+    return (await this.judgeQueueService.hackDispatcher?.finish(client.id, result.taskId, result.report)) ?? false;
   }
 }

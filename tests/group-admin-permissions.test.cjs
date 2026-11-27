@@ -85,7 +85,7 @@ function groupFixture() {
   return { service, memberships, queries, source };
 }
 
-function fixture({ pending = false, contest = runningContest, threshold = 400 } = {}) {
+function fixture({ pending = false, contest = runningContest, sameProblemAC = 0 } = {}) {
   const group = groupFixture();
   const contestService = create(ContestService, {
     groupService: group.service,
@@ -101,9 +101,9 @@ function fixture({ pending = false, contest = runningContest, threshold = 400 } 
   let subscription;
   const submissionService = create(SubmissionService, {
     contestService,
-    siteSettingService: {
-      getPreference: async () => ({ security: { otherSubmissionCodeMinAcceptedProblems: threshold } })
-    },
+    userService: { findUserById: async id => users.find(user => user.id === id) },
+    getUserProblemAcceptedSubmissionCount: async (id, problemId) =>
+      id === outsider.id && problemId === problem.id ? sameProblemAC : 0,
     groupService: group.service,
     problemService: { userHasPermission: async () => false, findProblemById: async () => problem },
     userPrivilegeService: { userHasPrivilege: async user => !!user?.isAdmin },
@@ -266,36 +266,31 @@ test("ordinary assessment lists stay scoped to self and reject other submitter f
 
 const endedContest = { ...runningContest, endTime: new Date(Date.now() - 1000) };
 
-test("configured solved-problem threshold includes the boundary and applies only to readable submissions", async () => {
-  for (const threshold of [0, 400, 600]) {
-    const { submissionService: service } = fixture({ threshold, contest: endedContest });
+test("ordinary submission access requires an effective AC on exactly the target problem", async () => {
+  for (const count of [0, 1, 2]) {
+    const { submissionService: service } = fixture({ sameProblemAC: count, contest: endedContest });
     service.contestService.userHasPermission = async () => true;
     service.problemService.userHasPermission = async () => true;
-    for (const count of [Math.max(0, threshold - 1), threshold, threshold + 1]) {
-      const user = { ...outsider, acceptedProblemCount: count };
-      const expected = count >= threshold;
-      assert.equal(await service.userHasPermission(user, submission, "View"), expected);
-      assert.equal(
-        await service.userHasPermission(user, { ...submission, contestId: null, isPublic: true }, "View"),
-        expected
-      );
-      assert.equal(
-        await service.userHasPermission(user, { ...submission, contestId: null, isPublic: false }, "View"),
-        false
-      );
-      for (const type of ["Cancel", "Rejudge", "ManagePublicness", "Delete"]) {
-        service.problemService.userHasPermission = async () => false;
-        assert.equal(await service.userHasPermission(user, submission, type), false);
-        service.problemService.userHasPermission = async () => true;
-      }
-    }
+    const user = { ...outsider, acceptedProblemCount: 800 };
+    assert.equal(await service.userHasPermission(user, submission, "View"), count > 0);
+    assert.equal(await service.userHasPermission(user, { ...submission, problemId: 21 }, "View"), false);
+    assert.equal(
+      await service.userHasPermission(user, { ...submission, contestId: null, isPublic: true }, "View"),
+      count > 0
+    );
+    assert.equal(
+      await service.userHasPermission(user, { ...submission, contestId: null, isPublic: false }, "View"),
+      false
+    );
+    service.userService.findUserById = async () => ({ ...member, isAdmin: true });
+    assert.equal(await service.userHasPermission(user, submission, "View"), false);
   }
 });
 
 test("qualified users can read and download official and post-contest submissions after the contest ends", async () => {
   const user = { ...outsider, acceptedProblemCount: 400 };
   for (const contestPhase of ["official", "post_contest"]) {
-    const f = fixture({ contest: endedContest });
+    const f = fixture({ contest: endedContest, sameProblemAC: 1 });
     Object.assign(f.record, { contestPhase });
     f.contestService.userHasPermission = async () => true;
     const result = await f.controller.getSubmissionDetail(user, { submissionId: submission.id, locale: "zh-CN" });
@@ -353,15 +348,13 @@ test("global qualified lists include public practice submissions and only access
   assert.deepEqual(f.queryArgs[12], [endedContest.id]);
 });
 
-test("changing the saved threshold immediately changes viewing permissions", async () => {
-  const { submissionService: service } = fixture({ contest: endedContest });
-  const preference = { security: { otherSubmissionCodeMinAcceptedProblems: 400 } };
-  service.siteSettingService.getPreference = async () => preference;
+test("losing the last effective AC revokes detail and existing progress permissions", async () => {
+  const { submissionService: service } = fixture({ contest: endedContest, sameProblemAC: 1 });
   service.contestService.userHasPermission = async () => true;
-  const user = { ...outsider, acceptedProblemCount: 400 };
-  assert.equal(await service.userHasPermission(user, submission, "View"), true);
-  preference.security.otherSubmissionCodeMinAcceptedProblems = 401;
-  assert.equal(await service.userHasPermission(user, submission, "View"), false);
+  assert.equal(await service.canReadProgress(outsider.id, submission), true);
+  service.getUserProblemAcceptedSubmissionCount = async () => 0;
+  assert.equal(await service.canReadProgress(outsider.id, submission), false);
+  assert.equal(await service.userHasPermission(outsider, submission, "View"), false);
 });
 
 test("site settings persist the threshold, preserve other settings and reject invalid values", async () => {
@@ -418,13 +411,15 @@ test("qualified SQL scope keeps contest restrictions grouped with public practic
       20,
       false,
       [outsider.id],
-      contestIds
+      contestIds,
+      outsider.id
     );
     assert.match(
-      queries[0],
-      /WHERE \(submitterId IN .* OR \(contestId IS NULL AND isPublic = true\).*\) AND contestId = :contestId/
+      queries[0].replace(/\s+/g, " "),
+      /WHERE \(submitterId IN .* OR .*contestId IS NULL AND isPublic = true.*\) AND contestId = :contestId/
     );
     assert.deepEqual(builder.getParameters().allowedSubmitterIds, [outsider.id]);
+    assert.match(queries[0], /EXISTS \(SELECT 1 FROM submission own WHERE own.submitterId = :viewerId/);
     if (contestIds.length) {
       assert.match(queries[0], /OR contestId IN \(:\.\.\.otherSubmissionContestIds\)/);
       assert.deepEqual(builder.getParameters().otherSubmissionContestIds, contestIds);

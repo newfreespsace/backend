@@ -1,7 +1,7 @@
 import { Injectable, Inject, forwardRef } from "@nestjs/common";
 import { InjectDataSource } from "@nestjs/typeorm";
 
-import { DataSource } from "typeorm";
+import { Brackets, DataSource } from "typeorm";
 
 import { logger } from "@/logger";
 import { RedisService } from "@/redis/redis.service";
@@ -162,6 +162,64 @@ export class SubmissionStatisticsService {
     return result;
   }
 
+  async queryVisibleStatistics(
+    problemId: number,
+    statisticsType: SubmissionStatisticsType,
+    skip: number,
+    take: number,
+    permittedAuthors: number[],
+    canViewOthers: boolean,
+    visibleContests: number[]
+  ): Promise<[SubmissionEntity[], number]> {
+    const { field, sort } = submissionStatisticsFields[statisticsType];
+    const ranked = this.connection
+      .getRepository(SubmissionEntity)
+      .createQueryBuilder("candidate")
+      .select("candidate.id", "id")
+      .addSelect(`candidate.${field}`, "fieldValue")
+      .addSelect(
+        `ROW_NUMBER() OVER (PARTITION BY candidate.submitterId ORDER BY candidate.${field} ${sort}, candidate.id ASC)`,
+        "position"
+      )
+      .where("candidate.problemId = :problemId AND candidate.status = :status", {
+        problemId,
+        status: SubmissionStatus.Accepted
+      })
+      .andWhere(`candidate.${field} IS NOT NULL`)
+      .andWhere(
+        new Brackets(scope => {
+          scope.where("candidate.submitterId IN (:...permittedAuthors)", { permittedAuthors });
+          if (!canViewOthers) return;
+          scope.orWhere(
+            new Brackets(other => {
+              other.where("candidate.submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
+              other.andWhere(
+                new Brackets(resources => {
+                  resources.where("(candidate.contestId IS NULL AND candidate.isPublic = true)");
+                  if (visibleContests.length)
+                    resources.orWhere("candidate.contestId IN (:...visibleContests)", { visibleContests });
+                })
+              );
+            })
+          );
+        })
+      );
+    const rows = await this.connection
+      .createQueryBuilder()
+      .select("ranked.id", "id")
+      .from(`(${ranked.getQuery()})`, "ranked")
+      .setParameters(ranked.getParameters())
+      .where("ranked.position = 1")
+      .orderBy("ranked.fieldValue", sort)
+      .addOrderBy("ranked.id", "ASC")
+      .limit(SUBMISSION_STATISTICS_TOP_COUNT)
+      .getRawMany<{ id: number }>();
+    const submissions = await this.submissionService.findSubmissionsByExistingIds(
+      rows.slice(skip, skip + take).map(row => Number(row.id))
+    );
+    return [submissions.filter(Boolean), rows.length];
+  }
+
   /**
    * This function is called after a submission's updated, to determine which caches of statistics should be purged.
    *
@@ -224,6 +282,15 @@ export class SubmissionStatisticsService {
         }
       })
     );
+  }
+
+  async invalidateForProblem(problemId: number): Promise<void> {
+    await Promise.all([
+      this.redisService.cacheDelete(REDIS_KEY_SUBMISSION_SCORE_STATISTICS.format(problemId)),
+      ...Object.values(SubmissionStatisticsType).map(type =>
+        this.redisService.cacheDelete(REDIS_KEY_SUBMISSION_STATISTICS.format(problemId, type))
+      )
+    ]);
   }
 
   async onProblemDeleted(problemId: number): Promise<void> {

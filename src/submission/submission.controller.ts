@@ -310,7 +310,12 @@ export class SubmissionController {
     }
 
     const managedMemberIds = await this.groupService.getManagedMemberIds(currentUser.id);
-    const canViewOtherSubmissions = await this.submissionService.canViewOtherSubmissions(currentUser, filterContest);
+    const problemIdForPermission = filterProblem?.id ?? filterContest?.problemIds?.[request.contestProblemIndex - 1];
+    const canViewOtherSubmissions = await this.submissionService.canViewOtherSubmissions(
+      currentUser,
+      filterContest,
+      problemIdForPermission
+    );
     const allowedSubmitterIds = currentUser.isAdmin ? null : Array.from(new Set([currentUser.id, ...managedMemberIds]));
     if (
       !canViewOtherSubmissions &&
@@ -394,7 +399,9 @@ export class SubmissionController {
         : request.takeCount,
       excludeAdminSubmitters,
       allowedSubmitterIds,
-      otherSubmissionContestIds
+      otherSubmissionContestIds,
+      currentUser.id,
+      !filterProblem || !!hasViewProblemPermission
     );
 
     const submissionMetas: SubmissionMetaDto[] = new Array(queryResult.result.length);
@@ -452,6 +459,7 @@ export class SubmissionController {
           ? null
           : this.submissionProgressGateway.encodeSubscription({
               type: SubmissionProgressSubscriptionType.Meta,
+              viewerId: currentUser.id,
               submissionIds: pendingSubmissionIds
             }),
       hasSmallerId: queryResult.hasSmallerId,
@@ -597,6 +605,7 @@ export class SubmissionController {
           ? null
           : this.submissionProgressGateway.encodeSubscription({
               type: SubmissionProgressSubscriptionType.Detail,
+              viewerId: currentUser.id,
               submissionIds: [submission.id],
               hideTestcaseDetailsSubmissionIds: hideTestcaseDetails ? [submission.id] : []
             }),
@@ -684,13 +693,33 @@ export class SubmissionController {
 
     const titleLocale = problem.locales.includes(request.locale) ? request.locale : problem.locales[0];
 
+    const canViewOtherStats = await this.submissionService.canViewOtherSubmissions(currentUser, undefined, problem.id);
+    const visibleContests =
+      currentUser && !currentUser.isAdmin && canViewOtherStats
+        ? (await this.contestService.queryContests(currentUser, 0, Number.MAX_SAFE_INTEGER, false))[0]
+            .filter(contest => contest.problemIds.includes(problem.id) && this.contestService.isEnded(contest))
+            .map(contest => contest.id)
+        : [];
+    const statistics = currentUser?.isAdmin
+      ? this.submissionStatisticsService.querySubmissionStatisticsAndCount(
+          problem,
+          request.statisticsType,
+          request.skipCount,
+          request.takeCount
+        )
+      : currentUser
+      ? this.submissionStatisticsService.queryVisibleStatistics(
+          problem.id,
+          request.statisticsType,
+          request.skipCount,
+          request.takeCount,
+          [currentUser.id, ...(await this.groupService.getManagedMemberIds(currentUser.id))],
+          canViewOtherStats,
+          visibleContests
+        )
+      : Promise.resolve<[SubmissionEntity[], number]>([[], 0]);
     const [[submissions, count], scores, problemTitle] = await Promise.all([
-      this.submissionStatisticsService.querySubmissionStatisticsAndCount(
-        problem,
-        request.statisticsType,
-        request.skipCount,
-        request.takeCount
-      ),
+      statistics,
       this.submissionStatisticsService.querySubmissionScoreStatistics(problem),
       this.problemService.getProblemLocalizedTitle(problem, titleLocale)
     ]);

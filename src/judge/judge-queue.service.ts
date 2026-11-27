@@ -5,6 +5,7 @@ import { Redis } from "ioredis";
 import { logger } from "@/logger";
 import { RedisService } from "@/redis/redis.service";
 import { MetricsService } from "@/metrics/metrics.service";
+import type { HackDispatcher } from "@/hack/hack.types";
 
 import { JudgeTaskService } from "./judge-task-service.interface";
 import { JudgeTaskProgress } from "./judge-task-progress.interface";
@@ -59,6 +60,8 @@ const REDIS_CONSUME_TIMEOUT = 10;
 
 @Injectable()
 export class JudgeQueueService {
+  hackDispatcher?: HackDispatcher;
+
   private readonly redisForPush: Redis;
 
   private readonly redisForConsume: Redis;

@@ -11,7 +11,7 @@ export class RequestLogMiddleware implements NestMiddleware {
       method: req.method,
       url: redactRequestUrl(req.originalUrl),
       query: redactRequestBody(req.query),
-      body: redactRequestBody(req.body)
+      body: redactRequestBody(req.body, req.path)
     });
 
     next();

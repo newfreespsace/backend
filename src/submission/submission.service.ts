@@ -1,7 +1,15 @@
-import { BadRequestException, Injectable, Inject, OnModuleDestroy, OnModuleInit, forwardRef } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Inject,
+  OnModuleDestroy,
+  OnModuleInit,
+  forwardRef
+} from "@nestjs/common";
 import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 
-import { Repository, DataSource, EntityManager, LessThanOrEqual, QueryBuilder, Brackets } from "typeorm";
+import { Repository, DataSource, EntityManager, LessThanOrEqual, QueryBuilder, Brackets, IsNull } from "typeorm";
 import { ValidationError } from "class-validator";
 import { v4 as uuid } from "uuid";
 import moment from "moment-timezone";
@@ -37,11 +45,11 @@ import { FileEntity } from "@/file/file.entity";
 import { UserPrivilegeService, UserPrivilegeType } from "@/user/user-privilege.service";
 import { ContestService, ContestPermissionType } from "@/contest/contest.service";
 import { ContestEntity } from "@/contest/contest.entity";
-import { SiteSettingService } from "@/site-setting/site-setting.service";
 import { GroupService } from "@/group/group.service";
 
 import { MetricsService } from "@/metrics/metrics.service";
 import { ProblemReviewService } from "@/problem-review/problem-review.service";
+import { HackAttemptEntity, HackState } from "@/hack/hack.entity";
 
 import { SubmissionProgress, SubmissionProgressType } from "./submission-progress.interface";
 import { SubmissionContent } from "./submission-content.interface";
@@ -149,7 +157,6 @@ export class SubmissionService
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly configService: ConfigService,
-    private readonly siteSettingService: SiteSettingService,
     @Inject(forwardRef(() => UserPrivilegeService))
     private readonly userPrivilegeService: UserPrivilegeService,
     @Inject(forwardRef(() => ContestService))
@@ -210,15 +217,32 @@ export class SubmissionService
     return submissionIds.map(submissionId => map[submissionId]);
   }
 
-  async canViewOtherSubmissions(user: UserEntity, contest?: ContestEntity): Promise<boolean> {
+  async canViewOtherSubmissions(user: UserEntity, contest?: ContestEntity, problemId?: number): Promise<boolean> {
     if (!user) return false;
-    const preference = await this.siteSettingService.getPreference();
-    if (!(user.acceptedProblemCount >= preference.security.otherSubmissionCodeMinAcceptedProblems)) return false;
+    if (!user.isAdmin) {
+      const accepted = problemId
+        ? await this.getUserProblemAcceptedSubmissionCount(user.id, problemId)
+        : user.acceptedProblemCount;
+      if (!accepted) return false;
+    }
     return (
       !contest ||
       (this.contestService.isEnded(contest) &&
         (await this.contestService.userHasPermission(user, contest, ContestPermissionType.View)))
     );
+  }
+
+  async canReadProgress(viewerId: number, submission: SubmissionEntity): Promise<boolean> {
+    const viewer = await this.userService.findUserById(viewerId);
+    if (!viewer) return false;
+    const locked = await this.contestService.getContestAccessRestriction(viewer);
+    if (
+      locked.length &&
+      (submission.submitterId !== viewer.id || !locked.some(contest => contest.id === submission.contestId))
+    ) {
+      return false;
+    }
+    return await this.userHasPermission(viewer, submission, SubmissionPermissionType.View);
   }
 
   async userHasPermission(
@@ -234,12 +258,15 @@ export class SubmissionService
         if (!user) return false;
         if (user.id === submission.submitterId) return true;
         if (await this.groupService.isGroupAdminOfUser(user.id, submission.submitterId)) return true;
-        if (!user.isAdmin && (await this.canViewOtherSubmissions(user))) {
+        if (!user.isAdmin) {
+          const author = await this.userService.findUserById(submission.submitterId);
+          if (!author || author.isAdmin) return false;
           if (submission.contestId) {
             const contest = await this.contestService.findContestById(submission.contestId);
-            return !!contest && (await this.canViewOtherSubmissions(user, contest));
+            return !!contest && (await this.canViewOtherSubmissions(user, contest, submission.problemId));
           }
           return (
+            (await this.canViewOtherSubmissions(user, undefined, submission.problemId)) &&
             submission.isPublic &&
             (await this.problemService.userHasPermission(
               user,
@@ -248,7 +275,6 @@ export class SubmissionService
             ))
           );
         }
-        if (!user.isAdmin) return false;
         if (submission.isPublic) return true;
         return await this.problemService.userHasPermission(
           user,
@@ -308,7 +334,9 @@ export class SubmissionService
     takeCount: number,
     excludeAdminSubmitters: boolean,
     allowedSubmitterIds?: number[],
-    otherSubmissionContestIds?: number[]
+    otherSubmissionContestIds?: number[],
+    viewerId?: number,
+    allowOtherPractice = true
   ): Promise<{ result: SubmissionEntity[]; hasSmallerId: boolean; hasLargerId: boolean }> {
     const queryBuilder = this.submissionRepository.createQueryBuilder();
 
@@ -318,11 +346,33 @@ export class SubmissionService
         queryBuilder.andWhere(
           new Brackets(scope => {
             scope.where("submitterId IN (:...allowedSubmitterIds)", { allowedSubmitterIds });
-            if (otherSubmissionContestIds) {
-              scope.orWhere("(contestId IS NULL AND isPublic = true)");
-              if (otherSubmissionContestIds.length > 0)
-                scope.orWhere("contestId IN (:...otherSubmissionContestIds)", { otherSubmissionContestIds });
-            }
+            if (!otherSubmissionContestIds || (!allowOtherPractice && !otherSubmissionContestIds.length)) return;
+            scope.orWhere(
+              new Brackets(others => {
+                others.where(
+                  new Brackets(resources => {
+                    if (allowOtherPractice) {
+                      resources.where(
+                        problemId
+                          ? "(contestId IS NULL AND isPublic = true)"
+                          : "(contestId IS NULL AND isPublic = true AND problemId IN (SELECT id FROM problem WHERE isPublic = true))"
+                      );
+                    }
+                    if (otherSubmissionContestIds.length) {
+                      resources.orWhere("contestId IN (:...otherSubmissionContestIds)", { otherSubmissionContestIds });
+                    }
+                  })
+                );
+                others.andWhere("submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
+                if (viewerId) {
+                  others.andWhere(
+                    `EXISTS (SELECT 1 FROM submission own WHERE own.submitterId = :viewerId
+                  AND own.problemId = ${queryBuilder.alias}.problemId AND own.status = :acceptedStatus)`,
+                    { viewerId, acceptedStatus: SubmissionStatus.Accepted }
+                  );
+                }
+              })
+            );
           })
         );
     }
@@ -952,6 +1002,13 @@ export class SubmissionService
     // eslint-disable-next-line @typescript-eslint/no-shadow
     await this.lockSubmission(submission, true, async submission => {
       if (!submission) return;
+      if (
+        await this.connection
+          .getRepository(HackAttemptEntity)
+          .countBy({ targetSubmissionId: submission.id, replay: true })
+      ) {
+        throw new ConflictException("HACK_RECHECK_PENDING");
+      }
 
       await this.judgeSubmission(submission, true);
 
@@ -1059,7 +1116,8 @@ export class SubmissionService
   private async updateAcceptedStatistics(
     oldStatus: SubmissionStatus,
     submission: SubmissionEntity,
-    transaction?: EntityManager
+    transaction?: EntityManager,
+    advanceReview = true
   ): Promise<boolean> {
     const oldAccepted = oldStatus === SubmissionStatus.Accepted;
     const newAccepted = submission.status === SubmissionStatus.Accepted;
@@ -1071,7 +1129,8 @@ export class SubmissionService
         "NON_AC_TO_AC",
         transaction
       );
-      if (!submission.remote?.historical) await this.problemReviewService.onAcceptedSubmission(submission, transaction);
+      if (advanceReview && !submission.remote?.historical)
+        await this.problemReviewService.onAcceptedSubmission(submission, transaction);
       return isFirstAccepted;
     } else if (oldAccepted && !newAccepted) {
       await this.problemService.updateProblemStatistics(submission.problemId, 0, -1, transaction);
@@ -1086,6 +1145,47 @@ export class SubmissionService
     return false;
   }
 
+  // The caller serializes both the target and the user's accepted count, and writes the Hack record in this transaction.
+  async storeHackResult(
+    manager: EntityManager,
+    submission: SubmissionEntity,
+    result: SubmissionProgress,
+    updateResources = false
+  ): Promise<void> {
+    const oldStatus = submission.status;
+    const detail = await manager.findOneByOrFail(SubmissionDetailEntity, { submissionId: submission.id });
+    detail.result = result;
+    submission.taskId = null;
+    submission.judgeResultRevision = uuid();
+    submission.status = result.status;
+    submission.score = result.score;
+    if (updateResources) {
+      const problem = await manager.findOneByOrFail(ProblemEntity, { id: submission.problemId });
+      const resource = this.problemTypeFactoryService
+        .type(problem.type)
+        .getTimeAndMemoryUsedFromFinishedSubmissionProgress(result);
+      submission.timeUsed = resource.timeUsed;
+      submission.memoryUsed = resource.memoryUsed;
+    }
+    await manager.save(submission);
+    await manager.save(detail);
+    await this.updateAcceptedStatistics(oldStatus, submission, manager, false);
+  }
+
+  async refreshHackResult(id: number) {
+    const submission = await this.findSubmissionById(id);
+    if (!submission) return;
+    await this.submissionStatisticsService.invalidateForProblem(submission.problemId);
+    await this.updateContestRanklist(null, submission);
+    if (submission.status === SubmissionStatus.Pending) return;
+    const detail = await this.getSubmissionDetail(submission);
+    await this.submissionProgressService.emitSubmissionEvent(id, SubmissionEventType.Progress, {
+      ...detail.result,
+      progressType: SubmissionProgressType.Finished,
+      isFirstAccepted: false
+    });
+  }
+
   /**
    * This function updates related info, the problem must be locked for Read first, then the submission must be locked.
    */
@@ -1093,7 +1193,7 @@ export class SubmissionService
     submission: SubmissionEntity,
     problem: ProblemEntity,
     progress: SubmissionProgress
-  ): Promise<void> {
+  ): Promise<boolean> {
     const finishSubmission = async () => {
       const oldSubmission = { ...submission };
 
@@ -1101,6 +1201,44 @@ export class SubmissionService
       submissionDetail.result = progress;
 
       submission.taskId = null;
+      submission.judgeResultRevision = uuid();
+      const challenge = await this.connection.getRepository(HackAttemptEntity).findOne({
+        where: { targetSubmissionId: submission.id, state: HackState.Succeeded, revokedAt: IsNull() },
+        select: ["id", "verdict", "regularResult"],
+        order: { id: "DESC" }
+      });
+      if (challenge && progress.status === SubmissionStatus.Accepted) {
+        await this.connection.transaction(async manager => {
+          await manager.save(submission);
+          await manager.save(submissionDetail);
+          await manager.update(HackAttemptEntity, challenge.id, {
+            state: HackState.Queued,
+            replay: true,
+            targetRevision: submission.judgeResultRevision,
+            taskId: null,
+            worker: null,
+            leaseUntil: null,
+            runs: 0
+          });
+        });
+        return false;
+      }
+      const recheckError =
+        challenge &&
+        [
+          SubmissionStatus.CompilationError,
+          SubmissionStatus.ConfigurationError,
+          SubmissionStatus.JudgementFailed,
+          SubmissionStatus.SystemError
+        ].includes(progress.status);
+      if (recheckError) {
+        Object.assign(progress, challenge.regularResult, {
+          status: challenge.verdict,
+          score: 0,
+          isFirstAccepted: false
+        });
+      }
+
       submission.status = progress.status;
       submission.score = progress.score;
       submission.totalOccupiedTime = progress.totalOccupiedTime;
@@ -1122,24 +1260,31 @@ export class SubmissionService
       await this.connection.transaction(async transactionalEntityManager => {
         await transactionalEntityManager.save(submission);
         await transactionalEntityManager.save(submissionDetail);
+        if (challenge) {
+          await transactionalEntityManager.update(
+            HackAttemptEntity,
+            challenge.id,
+            recheckError ? { recheckFailed: true } : { regularResult: progress, recheckFailed: false }
+          );
+        }
       });
 
       logger.log(`Submission ${submission.id} finished with status ${submission.status}`);
 
       const firstAccepted = await this.onSubmissionUpdated(oldSubmission, submission);
       progress.isFirstAccepted = !submission.remote?.historical && firstAccepted;
+      return true;
     };
 
     // Two pending submissions for the same user/problem may finish together. Serialize
     // their Accepted transition so the existing accepted-problem counter identifies one first AC.
     if (progress.status === SubmissionStatus.Accepted) {
-      await this.lockService.lock(
+      return await this.lockService.lock(
         `finishAcceptedSubmission_${submission.submitterId}_${submission.problemId}`,
         finishSubmission
       );
-    } else {
-      await finishSubmission();
     }
+    return await finishSubmission();
   }
 
   /**
@@ -1156,20 +1301,20 @@ export class SubmissionService
 
     // Don't lock the problem if not finished since we don't modify the database.
     // eslint-disable-next-line @typescript-eslint/no-shadow
-    await this.lockSubmission(submission, finished, async (submission, problem?) => {
+    return await this.lockSubmission(submission, finished, async (submission, problem?) => {
       if (!submission || submission.taskId !== taskId) {
         logger.warn(`Invalid task Id ${taskId} of task progress, maybe there's a too-early rejudge?`);
+        return false;
       }
 
       // First update database, then report progress
       if (finished) {
-        await this.onSubmissionFinished(submission, problem, progress);
+        if (!(await this.onSubmissionFinished(submission, problem, progress))) return true;
       }
 
       await this.submissionProgressService.emitSubmissionEvent(submission.id, SubmissionEventType.Progress, progress);
+      return true;
     });
-
-    return true;
   }
 
   async getTaskToBeSentToJudgeByTaskId(taskId: string, priotity: number): Promise<JudgeTask<SubmissionTaskExtraInfo>> {

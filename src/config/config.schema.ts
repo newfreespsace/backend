@@ -453,6 +453,10 @@ class ResourceLimitConfig {
   readonly problemTestdataDailyDownloadFiles: number;
 
   @IsInt()
+  @Min(1)
+  readonly hackConcurrentTasks = 1;
+
+  @IsInt()
   @Min(0)
   readonly problemAdditionalFileFiles: number;
 

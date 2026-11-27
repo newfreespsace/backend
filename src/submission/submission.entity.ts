@@ -41,6 +41,9 @@ export class SubmissionEntity {
   @Index()
   taskId: string;
 
+  @Column({ type: "varchar", length: 36, nullable: true })
+  judgeResultRevision: string;
+
   // By default it equals to the problem's isPublic
   @Column({ type: "boolean" })
   @Index()

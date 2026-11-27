@@ -3,13 +3,12 @@ import { ApiOperation, ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Recaptcha } from "@nestlab/google-recaptcha";
 import { Request } from "express";
-import { Redis } from "ioredis";
 
 import { ConfigService } from "@/config/config.service";
 import { UserService } from "@/user/user.service";
 import { GroupService } from "@/group/group.service";
 import { FileService } from "@/file/file.service";
-import { RedisService } from "@/redis/redis.service";
+
 import { CurrentUser } from "@/common/user.decorator";
 import { UserEntity } from "@/user/user.entity";
 import { GroupEntity } from "@/group/group.entity";
@@ -24,6 +23,8 @@ import { ContestPermissionType, ContestService } from "@/contest/contest.service
 import { ProblemFileType } from "./problem-file.entity";
 import { ProblemEntity } from "./problem.entity";
 import { ProblemService, ProblemPermissionType, ProblemPermissionLevel } from "./problem.service";
+
+import { TestdataQuotaService } from "./testdata-quota.service";
 
 import {
   CreateProblemRequestDto,
@@ -91,26 +92,9 @@ import {
   ProblemDifficultyRatingError
 } from "./dto";
 
-const REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD = "problem-testdata-daily-download:%s:%s";
-
-function getLocalDateKey(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}${month}${day}`;
-}
-
-function getSecondsUntilTomorrow(date = new Date()): number {
-  const tomorrow = new Date(date);
-  tomorrow.setHours(24, 0, 0, 0);
-  return Math.max(1, Math.ceil((+tomorrow - +date) / 1000));
-}
-
 @ApiTags("Problem")
 @Controller("problem")
 export class ProblemController {
-  private readonly redis: Redis;
-
   constructor(
     private readonly configService: ConfigService,
     private readonly problemService: ProblemService,
@@ -121,44 +105,10 @@ export class ProblemController {
     private readonly submissionService: SubmissionService,
     private readonly auditService: AuditService,
     private readonly discussionService: DiscussionService,
-    private readonly redisService: RedisService,
+    private readonly testdataQuota: TestdataQuotaService,
     @Inject(forwardRef(() => ContestService))
     private readonly contestService: ContestService
-  ) {
-    this.redis = this.redisService.getClient();
-  }
-
-  private async consumeProblemTestdataDailyDownloadQuota(
-    quotaIdentifier: string,
-    downloadCount: number
-  ): Promise<{ allowed: boolean; remaining: number }> {
-    const limit = this.configService.config.resourceLimit.problemTestdataDailyDownloadFiles;
-    if (downloadCount <= 0) {
-      const key = REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD.format(quotaIdentifier, getLocalDateKey());
-      const used = Number((await this.redis.get(key)) || 0);
-      return {
-        allowed: true,
-        remaining: Math.max(0, limit - used)
-      };
-    }
-
-    const key = REDIS_KEY_PROBLEM_TESTDATA_DAILY_DOWNLOAD.format(quotaIdentifier, getLocalDateKey());
-    const used = await this.redis.incrby(key, downloadCount);
-    if (used === downloadCount) await this.redis.expire(key, getSecondsUntilTomorrow());
-
-    if (used > limit) {
-      await this.redis.decrby(key, downloadCount);
-      return {
-        allowed: false,
-        remaining: Math.max(0, limit - (used - downloadCount))
-      };
-    }
-
-    return {
-      allowed: true,
-      remaining: Math.max(0, limit - used)
-    };
-  }
+  ) {}
 
   @Post("queryProblemSet")
   @ApiBearerAuth()
@@ -936,7 +886,7 @@ export class ProblemController {
       const quotaIdentifier = currentUser
         ? `user:${currentUser.id}`
         : `ip:${httpRequest.ip || httpRequest.socket.remoteAddress || "unknown"}`;
-      const quota = await this.consumeProblemTestdataDailyDownloadQuota(quotaIdentifier, downloadList.length);
+      const quota = await this.testdataQuota.consume(quotaIdentifier, downloadList.length);
       remainingTestdataDownloads = quota.remaining;
       if (!quota.allowed)
         return {
