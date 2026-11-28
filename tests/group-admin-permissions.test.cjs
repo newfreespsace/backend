@@ -18,7 +18,8 @@ const { SiteSettingController } = require("../dist/site-setting/site-setting.con
 const teacher = { id: 1, username: "teacher", isAdmin: false };
 const member = { id: 2, username: "member", isAdmin: false };
 const outsider = { id: 3, username: "outsider", isAdmin: false };
-const users = [teacher, member, outsider];
+const admin = { id: 4, username: "admin", isAdmin: true };
+const users = [teacher, member, outsider, admin];
 const problem = { id: 20, locales: ["zh-CN"] };
 const runningContest = {
   id: 30,
@@ -236,8 +237,7 @@ test("ordinary contestants remain restricted and cannot read or download other u
 test("assessment lists are scoped to self and managed members, including private contest grades", async () => {
   const f = fixture();
   const result = await f.controller.querySubmission(teacher, { locale: "zh-CN", takeCount: 20 });
-  assert.deepEqual(f.queryArgs[11], [teacher.id, member.id]);
-  assert.equal(f.queryArgs[8], false, "private submissions are included inside the authorized scope");
+  assert.deepEqual(f.queryArgs[9], [teacher.id, member.id]);
   assert.equal(result.submissions[0].score, 65);
   assert.equal(result.submissions[0].status, "PartiallyCorrect");
   await f.controller.querySubmission(teacher, {
@@ -258,7 +258,7 @@ test("ordinary assessment lists stay scoped to self and reject other submitter f
   const f = fixture();
   f.contestService.getActiveGroupContestsForUser = async () => [];
   await f.controller.querySubmission(outsider, { locale: "zh-CN", takeCount: 20 });
-  assert.deepEqual(f.queryArgs[11], [outsider.id]);
+  assert.deepEqual(f.queryArgs[9], [outsider.id]);
   assert.deepEqual(await f.controller.querySubmission(outsider, { submitter: member.username }), {
     error: "PERMISSION_DENIED"
   });
@@ -266,25 +266,44 @@ test("ordinary assessment lists stay scoped to self and reject other submitter f
 
 const endedContest = { ...runningContest, endTime: new Date(Date.now() - 1000) };
 
-test("ordinary submission access requires an effective AC on exactly the target problem", async () => {
+test("ordinary users unlock admin and nonpublic submissions with an effective AC on the same accessible problem", async () => {
   for (const count of [0, 1, 2]) {
     const { submissionService: service } = fixture({ sameProblemAC: count, contest: endedContest });
     service.contestService.userHasPermission = async () => true;
     service.problemService.userHasPermission = async () => true;
     const user = { ...outsider, acceptedProblemCount: 800 };
-    assert.equal(await service.userHasPermission(user, submission, "View"), count > 0);
+    const adminSubmission = { ...submission, submitterId: admin.id };
+    assert.equal(await service.userHasPermission(user, adminSubmission, "View"), count > 0);
     assert.equal(await service.userHasPermission(user, { ...submission, problemId: 21 }, "View"), false);
     assert.equal(
       await service.userHasPermission(user, { ...submission, contestId: null, isPublic: true }, "View"),
       count > 0
     );
     assert.equal(
-      await service.userHasPermission(user, { ...submission, contestId: null, isPublic: false }, "View"),
-      false
+      await service.userHasPermission(user, { ...adminSubmission, contestId: null, isPublic: false }, "View"),
+      count > 0
     );
-    service.userService.findUserById = async () => ({ ...member, isAdmin: true });
-    assert.equal(await service.userHasPermission(user, submission, "View"), false);
+    service.problemService.userHasPermission = async () => false;
+    assert.equal(await service.userHasPermission(user, { ...adminSubmission, contestId: null }, "View"), false);
   }
+});
+
+test("site admins can list, read, download and subscribe to nonpublic submissions during a contest without an AC", async () => {
+  const f = fixture({ pending: true });
+  const list = await f.controller.querySubmission(admin, {
+    contestId: runningContest.id,
+    locale: "zh-CN",
+    takeCount: 20
+  });
+  assert.equal(list.permissionViewOthers, true);
+  assert.equal(f.queryArgs[9], null);
+  const detail = await f.controller.getSubmissionDetail(admin, { submissionId: submission.id, locale: "zh-CN" });
+  assert.deepEqual(detail.content, f.detail.content);
+  assert.equal(detail.permissionSetPublic, false);
+  assert.deepEqual(await f.controller.downloadSubmissionFile(admin, { submissionId: submission.id }), {
+    url: "signed-answer-url"
+  });
+  assert.equal(await f.submissionService.canReadProgress(admin.id, f.record), true);
 });
 
 test("qualified users can read and download official and post-contest submissions after the contest ends", async () => {
@@ -311,9 +330,7 @@ test("qualified users can read and download official and post-contest submission
     assert.equal(list.error, undefined);
     assert.equal(list.permissionViewOthers, true);
     assert.equal(f.queryArgs[3], member.id);
-    assert.equal(f.queryArgs[8], false);
-    assert.equal(f.queryArgs[10], false);
-    assert.deepEqual(f.queryArgs[12], [endedContest.id]);
+    assert.deepEqual(f.queryArgs[10], [endedContest.id]);
   }
 });
 
@@ -336,7 +353,7 @@ test("qualification does not bypass running, upcoming, inaccessible or missing c
   assert.equal(await f.submissionService.userHasPermission(user, submission, "View"), false);
 });
 
-test("global qualified lists include public practice submissions and only accessible ended contests", async () => {
+test("global qualified lists include practice submissions on public problems and only accessible ended contests", async () => {
   const f = fixture({ contest: endedContest });
   f.contestService.queryContests = async () => [[endedContest, { ...runningContest, id: 31 }], 2];
   const result = await f.controller.querySubmission(
@@ -344,8 +361,8 @@ test("global qualified lists include public practice submissions and only access
     { locale: "zh-CN", takeCount: 20 }
   );
   assert.equal(result.permissionViewOthers, true);
-  assert.deepEqual(f.queryArgs[11], [outsider.id]);
-  assert.deepEqual(f.queryArgs[12], [endedContest.id]);
+  assert.deepEqual(f.queryArgs[9], [outsider.id]);
+  assert.deepEqual(f.queryArgs[10], [endedContest.id]);
 });
 
 test("losing the last effective AC revokes detail and existing progress permissions", async () => {
@@ -388,7 +405,7 @@ test("site settings persist the threshold, preserve other settings and reject in
   }
 });
 
-test("qualified SQL scope keeps contest restrictions grouped with public practice and owned submissions", async () => {
+test("qualified SQL scope keeps contest restrictions grouped with practice and owned submissions", async () => {
   const { source } = groupFixture();
   for (const contestIds of [[], [endedContest.id]]) {
     const builder = source.createQueryBuilder().from("submission", "submission");
@@ -407,17 +424,16 @@ test("qualified SQL scope keeps contest restrictions grouped with public practic
       null,
       null,
       null,
-      false,
       20,
-      false,
       [outsider.id],
       contestIds,
       outsider.id
     );
     assert.match(
       queries[0].replace(/\s+/g, " "),
-      /WHERE \(submitterId IN .* OR .*contestId IS NULL AND isPublic = true.*\) AND contestId = :contestId/
+      /WHERE \(submitterId IN .* OR .*contestId IS NULL AND problemId IN \(SELECT id FROM problem WHERE isPublic = true\).*\) AND contestId = :contestId/
     );
+    assert.doesNotMatch(queries[0], /isAdmin/);
     assert.deepEqual(builder.getParameters().allowedSubmitterIds, [outsider.id]);
     assert.match(queries[0], /EXISTS \(SELECT 1 FROM submission own WHERE own.submitterId = :viewerId/);
     if (contestIds.length) {
@@ -453,10 +469,7 @@ test("submission scope applies before pagination and is retained in pagination e
     return clone;
   };
   const service = create(SubmissionService, { submissionRepository: { createQueryBuilder: () => builder } });
-  await service.querySubmissions(null, null, null, null, null, null, null, null, false, 20, false, [
-    teacher.id,
-    member.id
-  ]);
+  await service.querySubmissions(null, null, null, null, null, null, null, null, 20, [teacher.id, member.id]);
   assert.equal(sql.length, 3);
   sql.forEach(query => assert.match(query, /submitterId IN \(:\.\.\.allowedSubmitterIds\)/));
   assert.deepEqual(builder.getParameters().allowedSubmitterIds, [teacher.id, member.id]);

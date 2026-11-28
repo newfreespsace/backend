@@ -212,14 +212,15 @@ test(
         return target;
       };
       const target = await newSubmission(author, "official");
-      const hidden = await newSubmission(manager, "official");
-      const privateTarget = await newSubmission(privateAuthor, "official");
-      await submissionRepo.update(privateTarget.id, {
+      const adminTarget = await newSubmission(manager, "official", { isPublic: false });
+      const privatePractice = {
         contestId: null,
         contestProblemIndex: null,
         contestPhase: null,
         isPublic: false
-      });
+      };
+      const privateTarget = await newSubmission(privateAuthor, null, privatePractice);
+      const failedTarget = await newSubmission(manager, null, { ...privatePractice, status: "WrongAnswer", score: 0 });
       const program = {
         language: "python",
         code: "import sys\nsys.exit(0)",
@@ -238,39 +239,93 @@ test(
       );
       assert.equal(setting, 201, JSON.stringify(feedback));
 
-      const [targetStatus, targets] = await post("hack/targets", { problemId: problem.id, contestId: contest.id });
+      const contestScope = { problemId: problem.id, contestId: contest.id };
+      const statsQuery = {
+        problemId: problem.id,
+        locale: "zh_CN",
+        statisticsType: "Earliest",
+        skipCount: 0,
+        takeCount: 10
+      };
+      const detailQuery = id => ({ submissionId: String(id), locale: "zh_CN" });
+      const targetQuery = { id: target.id, contestId: contest.id };
+      assert.deepEqual(await post("hack/targets", contestScope), [
+        201,
+        { enabled: true, inputLimit: 1048576, targets: [] }
+      ]);
+      assert.deepEqual(await post("hack/target", targetQuery), [201, { target: null }]);
+      assert.equal((await post("hack/target", targetQuery, ""))[0], 401);
+      assert.equal((await post("hack/create", { id: target.id, input: "4\n" }))[0], 404);
+      assert.equal((await post("hack/history", { id: target.id }))[0], 404);
+      assert.equal(
+        (await post("submission/getSubmissionDetail", detailQuery(adminTarget.id)))[1].error,
+        "PERMISSION_DENIED"
+      );
+      const [unqualifiedStatsStatus, unqualifiedStats] = await post("submission/querySubmissionStatistics", statsQuery);
+      assert.equal(unqualifiedStatsStatus, 201);
+      assert.equal(unqualifiedStats.error, undefined);
+      assert.deepEqual(unqualifiedStats.submissions, []);
+
+      const [adminStatus, adminHack] = await post("hack/create", { id: privateTarget.id, input: "4\n" }, managerToken);
+      assert.equal(adminStatus, 201, JSON.stringify(adminHack));
+      assert.equal((await post("hack/cancel", { id: adminHack.id }, managerToken))[0], 201);
+      assert.equal((await post("hack/target", { id: failedTarget.id }, managerToken))[1].target, null);
+      assert.equal(
+        (await post("hack/create", { id: failedTarget.id, input: "4\n" }, managerToken))[1].message,
+        "HACK_TARGET_NOT_ACCEPTED"
+      );
+
+      const qualifyingAC = await newSubmission(challenger, null, { ...privatePractice, isPublic: true });
+      const [targetStatus, targets] = await post("hack/targets", contestScope);
       assert.equal(targetStatus, 201);
       assert.deepEqual(
         targets.targets.map(row => row.id),
-        [target.id]
+        [adminTarget.id, target.id]
       );
       assert.deepEqual(Object.keys(targets.targets[0]).sort(), ["id", "language", "time"]);
-      const detail = await post("submission/getSubmissionDetail", { submissionId: String(target.id), locale: "zh_CN" });
-      assert.equal(detail[1].error, "PERMISSION_DENIED");
-      assert.deepEqual(await post("hack/target", { id: target.id, contestId: contest.id }), [
+      const list = (
+        await post("submission/querySubmission", { problemId: problem.id, takeCount: 20, locale: "zh_CN" })
+      )[1];
+      assert.equal(list.permissionViewOthers, true);
+      assert.deepEqual(
+        list.submissions.map(row => row.id),
+        [qualifyingAC.id, failedTarget.id, privateTarget.id, adminTarget.id, target.id]
+      );
+      const stats = (await post("submission/querySubmissionStatistics", statsQuery))[1];
+      assert.ok(stats.submissions.some(row => row.id === adminTarget.id));
+      assert.ok(stats.submissions.some(row => row.id === privateTarget.id));
+      for (const id of [adminTarget.id, privateTarget.id, failedTarget.id]) {
+        const detail = (await post("submission/getSubmissionDetail", detailQuery(id)))[1];
+        assert.equal(detail.content.code, "int main() {}");
+      }
+      assert.deepEqual(await post("hack/target", { id: adminTarget.id, contestId: contest.id }), [
         201,
         { target: { ...targets.targets[0], inputLimit: 1048576 } }
       ]);
+      const [challengeStatus, ordinaryHack] = await post("hack/create", { id: adminTarget.id, input: "4\n" });
+      assert.equal(challengeStatus, 201, JSON.stringify(ordinaryHack));
+      assert.equal((await post("hack/cancel", { id: ordinaryHack.id }))[0], 201);
       assert.deepEqual(await post("hack/target", { id: target.id }), [201, { target: null }]);
       assert.deepEqual(await post("hack/target", { id: target.id, contestId: contest.id + 1 }), [
         201,
         { target: null }
       ]);
-      assert.deepEqual(await post("hack/target", { id: hidden.id, contestId: contest.id }), [201, { target: null }]);
-      assert.deepEqual(await post("hack/target", { id: privateTarget.id }), [201, { target: null }]);
+      assert.equal((await post("hack/target", { id: privateTarget.id }))[1].target.id, privateTarget.id);
       assert.equal(
         (await post("hack/target", { id: privateTarget.id }, privateAuthorToken))[1].target.id,
         privateTarget.id
       );
-      assert.equal((await post("hack/target", { id: target.id, contestId: contest.id }, ""))[0], 401);
-      assert.equal((await post("hack/create", { id: hidden.id, input: "4\n" }))[0], 404);
-      assert.equal((await post("hack/history", { id: target.id }))[0], 404);
 
       const preservedInput = "\n  4  \n\n";
       const [createdStatus, created] = await post("hack/create", { id: target.id, input: preservedInput });
       assert.equal(createdStatus, 201, JSON.stringify(created));
       assert.equal((await post("hack/create", { id: target.id, input: preservedInput }))[1].id, created.id);
       assert.equal((await post("hack/create", { id: target.id, input: "5\n" }))[1].message, "HACK_ALREADY_PENDING");
+      await submissionRepo.update(qualifyingAC.id, { status: "WrongAnswer" });
+      assert.deepEqual(await post("hack/target", targetQuery), [201, { target: null }]);
+      assert.equal((await post("hack/create", { id: adminTarget.id, input: "5\n" }))[0], 404);
+      assert.equal((await post("hack/create", { id: target.id, input: preservedInput }))[1].id, created.id);
+      await submissionRepo.update(qualifyingAC.id, { status: "Accepted" });
       assert.equal(await successfulHackCount(), 0, "a newly queued Hack does not count");
 
       const key = require("node:crypto").randomBytes(20).toString("hex");
@@ -309,7 +364,11 @@ test(
       };
       assert.equal(await rpc("finishHack", report), true);
       assert.equal(await rpc("finishHack", report), true);
-      assert.equal(await successfulHackCount(), 1, "another user can see the success and the duplicate report counts once");
+      assert.equal(
+        await successfulHackCount(),
+        1,
+        "another user can see the success and the duplicate report counts once"
+      );
       const final = await submissionRepo.findOneByOrFail({ id: target.id });
       assert.equal(final.status, "WrongAnswer");
       assert.equal(final.score, 0);
@@ -464,10 +523,7 @@ test(
       });
       let failedReplay = await waitFor(() => rpc("claimHack", 1));
       for (let run = 0; run < 3; run++) {
-        assert.equal(
-          await rpc("finishHack", { taskId: failedReplay.taskId, report: { outcome: "JudgeError" } }),
-          true
-        );
+        assert.equal(await rpc("finishHack", { taskId: failedReplay.taskId, report: { outcome: "JudgeError" } }), true);
         if (run < 2) failedReplay = await waitFor(() => rpc("claimHack", 1));
       }
       changed = await submissionRepo.findOneByOrFail({ id: practice.id });

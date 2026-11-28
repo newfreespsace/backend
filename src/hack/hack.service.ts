@@ -150,19 +150,13 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     return this.localTraditional(problem) && (await this.profiles.findOneBy({ problemId: problem.id, enabled: true }));
   }
 
-  private async canChallengeTarget(user: UserEntity, target: SubmissionEntity, problem: ProblemEntity) {
-    if (
-      !user ||
-      !target ||
-      target.remote ||
-      target.remoteKey ||
-      (!target.contestId && !target.isPublic && target.submitterId !== user.id) ||
-      !(await this.checkContext(user, problem, target.contestId, target.contestProblemIndex ?? 0))
-    ) {
-      return false;
-    }
-    const author = await this.db.getRepository(UserEntity).findOneBy({ id: target.submitterId });
-    return !author?.isAdmin;
+  private async isLocalTargetInContext(user: UserEntity, target: SubmissionEntity, problem: ProblemEntity) {
+    return (
+      !!target &&
+      !target.remote &&
+      !target.remoteKey &&
+      (await this.checkContext(user, problem, target.contestId, target.contestProblemIndex ?? 0))
+    );
   }
 
   private async canManage(user: UserEntity, target: SubmissionEntity, problem: ProblemEntity) {
@@ -203,24 +197,22 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     if (!(await this.checkContext(user, problem, contestId))) throw new ForbiddenException();
     const profile = await this.enabledProfile(problem);
     if (!profile) return { enabled: false, targets: [] };
+    if (!(await this.submissions.canViewOtherSubmissions(user, undefined, problemId))) {
+      return { enabled: true, inputLimit: profile.inputLimit, targets: [] };
+    }
 
     const candidates = this.db
       .getRepository(SubmissionEntity)
       .createQueryBuilder("submission")
-      .innerJoin(UserEntity, "author", "author.id = submission.submitterId AND author.isAdmin = false")
-      .where("submission.problemId = :problemId AND submission.status = :status AND submission.remoteKey IS NULL", {
+      .where("submission.problemId = :problemId AND submission.status = :status", {
         problemId,
         status: SubmissionStatus.Accepted
       })
-      .andWhere("submission.taskId IS NULL")
+      .andWhere("submission.remoteKey IS NULL AND submission.remote IS NULL AND submission.taskId IS NULL")
       .orderBy("submission.id", "DESC")
       .take(30);
     if (contestId) candidates.andWhere("submission.contestId = :contestId", { contestId });
-    else
-      candidates.andWhere(
-        "submission.contestId IS NULL AND (submission.isPublic = true OR submission.submitterId = :userId)",
-        { userId: user.id }
-      );
+    else candidates.andWhere("submission.contestId IS NULL");
     if (before) candidates.andWhere("submission.id < :before", { before });
     const rows = await candidates.getMany();
     return {
@@ -242,7 +234,8 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
       return null;
     }
     const problem = await this.problems.findProblemById(target.problemId);
-    if (!(await this.canChallengeTarget(user, target, problem))) return null;
+    if (!(await this.isLocalTargetInContext(user, target, problem))) return null;
+    if (!(await this.submissions.canViewOtherSubmissions(user, undefined, problem.id))) return null;
     const profile = await this.enabledProfile(problem);
     return profile
       ? { id: target.id, language: target.codeLanguage, time: target.submitTime, inputLimit: profile.inputLimit }
@@ -304,19 +297,21 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     if (!initial) throw new NotFoundException();
     return await this.locks.lock(`HackUser_${user.id}`, () =>
       this.submissions.lockSubmission(initial, true, async (target, problem) => {
-        if (!(await this.canChallengeTarget(user, target, problem))) throw new NotFoundException();
-        const profile = await this.enabledProfile(problem);
-        if (!profile) throw new ConflictException("HACK_DISABLED");
+        if (!(await this.isLocalTargetInContext(user, target, problem))) throw new NotFoundException();
+        const canChallenge = await this.submissions.canViewOtherSubmissions(user, undefined, problem.id);
         const input = Buffer.from(text, "utf8");
-        if (input.toString("utf8") !== text || input.length > profile.inputLimit)
-          throw new BadRequestException("HACK_INPUT_INVALID");
         const inputHash = hash(input);
         const base = { challengerId: user.id, targetSubmissionId: target.id, inputHash };
-        if (target.status !== SubmissionStatus.Accepted || target.taskId) {
+        if (!canChallenge || target.status !== SubmissionStatus.Accepted || target.taskId) {
           const existing = await this.attempts.findOne({ where: base, order: { id: "DESC" } });
           if (existing) return this.metadata(existing, user, false);
+          if (!canChallenge) throw new NotFoundException();
           throw new ConflictException("HACK_TARGET_NOT_ACCEPTED");
         }
+        const profile = await this.enabledProfile(problem);
+        if (!profile) throw new ConflictException("HACK_DISABLED");
+        if (input.toString("utf8") !== text || input.length > profile.inputLimit)
+          throw new BadRequestException("HACK_INPUT_INVALID");
         const snapshot = await this.snapshot(problem, profile, target.codeLanguage);
         const quotaDay = localDateKey();
         const unique = {

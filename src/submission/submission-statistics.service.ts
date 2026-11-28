@@ -191,15 +191,10 @@ export class SubmissionStatisticsService {
           scope.where("candidate.submitterId IN (:...permittedAuthors)", { permittedAuthors });
           if (!canViewOthers) return;
           scope.orWhere(
-            new Brackets(other => {
-              other.where("candidate.submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
-              other.andWhere(
-                new Brackets(resources => {
-                  resources.where("(candidate.contestId IS NULL AND candidate.isPublic = true)");
-                  if (visibleContests.length)
-                    resources.orWhere("candidate.contestId IN (:...visibleContests)", { visibleContests });
-                })
-              );
+            new Brackets(resources => {
+              resources.where("candidate.contestId IS NULL");
+              if (visibleContests.length)
+                resources.orWhere("candidate.contestId IN (:...visibleContests)", { visibleContests });
             })
           );
         })

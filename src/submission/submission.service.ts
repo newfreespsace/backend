@@ -219,12 +219,11 @@ export class SubmissionService
 
   async canViewOtherSubmissions(user: UserEntity, contest?: ContestEntity, problemId?: number): Promise<boolean> {
     if (!user) return false;
-    if (!user.isAdmin) {
-      const accepted = problemId
-        ? await this.getUserProblemAcceptedSubmissionCount(user.id, problemId)
-        : user.acceptedProblemCount;
-      if (!accepted) return false;
-    }
+    if (user.isAdmin) return true;
+    const accepted = problemId
+      ? await this.getUserProblemAcceptedSubmissionCount(user.id, problemId)
+      : user.acceptedProblemCount;
+    if (!accepted) return false;
     return (
       !contest ||
       (this.contestService.isEnded(contest) &&
@@ -256,31 +255,19 @@ export class SubmissionService
       // Group admins can read submissions by members of their managed groups.
       case SubmissionPermissionType.View:
         if (!user) return false;
-        if (user.id === submission.submitterId) return true;
+        if (user.isAdmin || user.id === submission.submitterId) return true;
         if (await this.groupService.isGroupAdminOfUser(user.id, submission.submitterId)) return true;
-        if (!user.isAdmin) {
-          const author = await this.userService.findUserById(submission.submitterId);
-          if (!author || author.isAdmin) return false;
-          if (submission.contestId) {
-            const contest = await this.contestService.findContestById(submission.contestId);
-            return !!contest && (await this.canViewOtherSubmissions(user, contest, submission.problemId));
-          }
-          return (
-            (await this.canViewOtherSubmissions(user, undefined, submission.problemId)) &&
-            submission.isPublic &&
-            (await this.problemService.userHasPermission(
-              user,
-              problem ?? (await this.problemService.findProblemById(submission.problemId)),
-              ProblemPermissionType.View
-            ))
-          );
+        if (submission.contestId) {
+          const contest = await this.contestService.findContestById(submission.contestId);
+          return !!contest && (await this.canViewOtherSubmissions(user, contest, submission.problemId));
         }
-        if (submission.isPublic) return true;
-        return await this.problemService.userHasPermission(
-          user,
-          problem ?? (await this.problemService.findProblemById(submission.problemId)),
-          ProblemPermissionType.Modify,
-          hasPrivilege
+        return (
+          (await this.canViewOtherSubmissions(user, undefined, submission.problemId)) &&
+          (await this.problemService.userHasPermission(
+            user,
+            problem ?? (await this.problemService.findProblemById(submission.problemId)),
+            ProblemPermissionType.View
+          ))
         );
 
       // Submitter and those who has the Modify permission of the submission's problem can Cancel a submission
@@ -330,9 +317,7 @@ export class SubmissionService
     status: SubmissionStatus,
     minId: number,
     maxId: number,
-    publicOnly: boolean,
     takeCount: number,
-    excludeAdminSubmitters: boolean,
     allowedSubmitterIds?: number[],
     otherSubmissionContestIds?: number[],
     viewerId?: number,
@@ -354,8 +339,8 @@ export class SubmissionService
                     if (allowOtherPractice) {
                       resources.where(
                         problemId
-                          ? "(contestId IS NULL AND isPublic = true)"
-                          : "(contestId IS NULL AND isPublic = true AND problemId IN (SELECT id FROM problem WHERE isPublic = true))"
+                          ? "contestId IS NULL"
+                          : "(contestId IS NULL AND problemId IN (SELECT id FROM problem WHERE isPublic = true))"
                       );
                     }
                     if (otherSubmissionContestIds.length) {
@@ -363,7 +348,6 @@ export class SubmissionService
                     }
                   })
                 );
-                others.andWhere("submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
                 if (viewerId) {
                   others.andWhere(
                     `EXISTS (SELECT 1 FROM submission own WHERE own.submitterId = :viewerId
@@ -375,12 +359,6 @@ export class SubmissionService
             );
           })
         );
-    }
-
-    if (publicOnly) {
-      queryBuilder.andWhere("isPublic = :isPublic", {
-        isPublic: true
-      });
     }
 
     if (problemId) {
@@ -417,10 +395,6 @@ export class SubmissionService
       queryBuilder.andWhere("status = :status", {
         status
       });
-    }
-
-    if (excludeAdminSubmitters) {
-      queryBuilder.andWhere("submitterId NOT IN (SELECT id FROM `user` WHERE isAdmin = true)");
     }
 
     const queryBuilderWithoutPagination = queryBuilder.clone();
