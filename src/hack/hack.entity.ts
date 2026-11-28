@@ -38,6 +38,7 @@ export enum HackState {
 @Index(["challengerId", "quotaDay", "charged"])
 @Index(["state", "leaseUntil", "id"])
 @Index(["targetSubmissionId", "id"])
+@Index(["contestId", "state", "createdAt"])
 @Index(["challengerId", "targetSubmissionId", "targetRevision", "snapshotHash", "inputHash"], { unique: true })
 export class HackAttemptEntity {
   @PrimaryGeneratedColumn()
@@ -121,6 +122,9 @@ export class HackAttemptEntity {
 
   @Column({ type: "json", nullable: true, select: false })
   regularResult: SubmissionProgress;
+
+  @Column({ type: "integer", nullable: true })
+  effectiveScore: number;
 
   @Column({ default: false })
   @Index()

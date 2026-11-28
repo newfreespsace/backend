@@ -515,7 +515,7 @@ test("live contest ranklists do not expose outsiders' grades to group admins", a
   const { contestService } = fixture();
   Object.assign(contestService, {
     contestPlayerRepository: {
-      findBy: async () =>
+      find: async () =>
         [member, outsider].map(user => ({
           userId: user.id,
           score: 65,

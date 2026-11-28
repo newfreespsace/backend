@@ -6,6 +6,7 @@ import { In, Not, Repository } from "typeorm";
 import { Locale } from "@/common/locale.type";
 import { removeProblemTitlePrefix } from "@/common/problem-title";
 import { GroupService } from "@/group/group.service";
+import { HackAttemptEntity, HackState } from "@/hack/hack.entity";
 import { ProblemEntity } from "@/problem/problem.entity";
 import { ProblemPermissionType, ProblemService } from "@/problem/problem.service";
 import { ContestSubmissionPhase, SubmissionEntity } from "@/submission/submission.entity";
@@ -24,6 +25,7 @@ import {
   ContestMetaDto,
   ContestProblemDto,
   ContestRanklistRowDto,
+  OfficialRanklistStatus,
   QueryContestsByProblemIdDto,
   QueryContestsByProblemIdResponseDto,
   SaveContestRequestDto
@@ -38,6 +40,8 @@ export enum ContestPermissionType {
 }
 
 export const POST_CONTEST_SUBMISSION_DELAY_MS = 10 * 60 * 1000;
+export const OFFICIAL_RANKLIST_REVIEW_SECONDS = 2 * 60 * 60;
+const NON_RANKED_STATUSES = [SubmissionStatus.Pending, SubmissionStatus.Canceled];
 
 @Injectable()
 export class ContestService {
@@ -251,6 +255,106 @@ export class ContestService {
     return new Date(contest.endTime.getTime() + POST_CONTEST_SUBMISSION_DELAY_MS);
   }
 
+  getOfficialRanklistReviewEnd(contest: ContestEntity): Date {
+    return new Date(contest.endTime.getTime() + OFFICIAL_RANKLIST_REVIEW_SECONDS * 1000);
+  }
+
+  getOfficialRanklistStatus(contest: ContestEntity, now = new Date()): OfficialRanklistStatus | undefined {
+    if (contest.officialRanklist) return OfficialRanklistStatus.Finalized;
+    if (!this.isEnded(contest, now)) return undefined;
+    return now < this.getOfficialRanklistReviewEnd(contest)
+      ? OfficialRanklistStatus.Review
+      : OfficialRanklistStatus.Settling;
+  }
+
+  getOfficialRanklistContest(contest: ContestEntity): ContestEntity {
+    const snapshot = contest.officialRanklist;
+    if (!snapshot) return contest;
+    return {
+      ...contest,
+      startTime: new Date(snapshot.startTime),
+      endTime: new Date(snapshot.endTime),
+      type: snapshot.type,
+      problemIds: snapshot.problemIds,
+      rankingParams: snapshot.rankingParams
+    };
+  }
+
+  private dueOfficialRanklists(repository: Repository<ContestEntity>, now: Date) {
+    const contests = repository.createQueryBuilder("contest");
+    const pendingHack = contests
+      .subQuery()
+      .select("1")
+      .from(HackAttemptEntity, "hack")
+      .innerJoin(SubmissionEntity, "target", "target.id = hack.targetSubmissionId")
+      .where("hack.contestId = contest.id")
+      .andWhere("hack.state IN (:...pendingHackStates)")
+      .andWhere("(target.contestPhase IS NULL OR target.contestPhase = :officialPhase)")
+      .andWhere("hack.createdAt < TIMESTAMPADD(SECOND, :reviewSeconds, contest.endTime)");
+    return contests
+      .where("contest.officialRanklist IS NULL")
+      .andWhere("contest.endTime <= :latestEndTime")
+      .andWhere(`NOT EXISTS ${pendingHack.getQuery()}`)
+      .setParameters({
+        latestEndTime: new Date(+now - OFFICIAL_RANKLIST_REVIEW_SECONDS * 1000),
+        reviewSeconds: OFFICIAL_RANKLIST_REVIEW_SECONDS,
+        pendingHackStates: [HackState.Queued, HackState.Running],
+        officialPhase: ContestSubmissionPhase.Official
+      });
+  }
+
+  async finalizeDueOfficialRanklists(now = new Date()): Promise<void> {
+    const due = await this.dueOfficialRanklists(this.contestRepository, now)
+      .orderBy("contest.endTime", "ASC")
+      .take(10)
+      .getMany();
+    await Promise.all(due.map(contest => this.finalizeOfficialRanklist(contest, now)));
+  }
+
+  async finalizeOfficialRanklist(contest: ContestEntity, now = new Date()): Promise<ContestEntity> {
+    if (contest.officialRanklist || now < this.getOfficialRanklistReviewEnd(contest)) return contest;
+    return await this.contestRepository.manager.transaction("REPEATABLE READ", async manager => {
+      const contests = manager.getRepository(ContestEntity);
+      const current = await contests.findOne({ where: { id: contest.id }, lock: { mode: "pessimistic_write" } });
+      if (!current || current.officialRanklist) return current ?? contest;
+      const ready = await this.dueOfficialRanklists(contests, now)
+        .andWhere("contest.id = :id", { id: current.id })
+        .getCount();
+      if (!ready) return current;
+
+      const scope = ContestRanklistScope.Official;
+      const submissions = await manager.getRepository(SubmissionEntity).findBy({
+        contestId: current.id,
+        status: Not(In(NON_RANKED_STATUSES))
+      });
+      const players = new Map<number, ContestPlayerEntity>();
+      for (const submission of submissions) {
+        if (!this.isRankedSubmission(current, submission, scope)) continue;
+        let player = players.get(submission.submitterId);
+        if (!player) {
+          player = this.newRanklistPlayer(current.id, submission.submitterId, scope);
+          players.set(submission.submitterId, player);
+        }
+        this.applySubmissionToPlayer(current, player, submission, scope);
+      }
+      for (const player of players.values()) this.recalculatePlayerSummary(current, player);
+
+      const playerRepository = manager.getRepository(ContestPlayerEntity);
+      await playerRepository.delete({ contestId: current.id, ranklistScope: scope });
+      await playerRepository.save([...players.values()], { chunk: 100 });
+      current.officialRanklist = {
+        finalizedAt: now.toISOString(),
+        startTime: current.startTime.toISOString(),
+        endTime: current.endTime.toISOString(),
+        type: current.type,
+        problemIds: current.problemIds,
+        rankingParams: current.rankingParams
+      };
+      await contests.update(current.id, { officialRanklist: current.officialRanklist });
+      return current;
+    });
+  }
+
   getSubmissionState(contest: ContestEntity, now = new Date()): ContestSubmissionState {
     if (now < contest.startTime) return ContestSubmissionState.NotStarted;
     if (this.isRunning(contest, now)) return ContestSubmissionState.Official;
@@ -330,6 +434,8 @@ export class ContestService {
         .filter(([problemId, multiplier]) => Number(problemId) && Number.isFinite(multiplier as number))
     );
 
+    // A concurrent finalizer owns this field. Contest edits persist only the editable settings.
+    contest.officialRanklist = undefined;
     return await this.contestRepository.save(contest);
   }
 
@@ -410,7 +516,8 @@ export class ContestService {
       statistics.attempt++;
       if (
         (contest.type === ContestType.ACM && detail.accepted) ||
-        (contest.type !== ContestType.ACM && detail.score === 100)
+        (contest.type !== ContestType.ACM &&
+          (detail.status ? detail.status === SubmissionStatus.Accepted : detail.score === 100))
       )
         statistics.accepted++;
       if (contest.type !== ContestType.ACM && detail.score > 0) statistics.partially++;
@@ -424,7 +531,12 @@ export class ContestService {
     currentUser: UserEntity,
     ranklistScope = ContestRanklistScope.Official
   ): Promise<ContestRanklistRowDto[]> {
-    const players = await this.contestPlayerRepository.findBy({ contestId: contest.id, ranklistScope });
+    const settled = ranklistScope === ContestRanklistScope.Official && contest.officialRanklist;
+    const rankedContest = settled ? this.getOfficialRanklistContest(contest) : contest;
+    const players = await this.contestPlayerRepository.find({
+      where: { contestId: contest.id, ranklistScope },
+      order: { id: "ASC" }
+    });
     const managedMemberIds =
       !this.isEnded(contest) &&
       contest.type !== ContestType.ACM &&
@@ -442,14 +554,16 @@ export class ContestService {
 
           let { score, timeSpent } = player;
 
-          if (contest.type !== ContestType.ACM) {
+          if (rankedContest.type !== ContestType.ACM) {
             score = 0;
             let latest = 0;
             for (const [problemId, detail] of Object.entries(scoreDetails)) {
-              const weightedScore = Math.round((detail.score || 0) * this.getRankingMultiplier(contest, problemId));
+              const weightedScore = Math.round(
+                (detail.score || 0) * this.getRankingMultiplier(rankedContest, problemId)
+              );
               detail.weightedScore = weightedScore;
               score += weightedScore;
-              const time = this.getElapsedSeconds(contest, detail.submissions?.[detail.submissionId]?.time);
+              const time = this.getElapsedSeconds(rankedContest, detail.submissions?.[detail.submissionId]?.time);
               latest = Math.max(latest, time);
             }
             timeSpent = latest;
@@ -487,62 +601,80 @@ export class ContestService {
     const affectsOfficial = [oldSubmission, submission].some(
       item => item && (!item.contestPhase || item.contestPhase === ContestSubmissionPhase.Official)
     );
-    const scopes = affectsOfficial
-      ? [ContestRanklistScope.Official, ContestRanklistScope.Combined]
-      : [ContestRanklistScope.Combined];
-    await Promise.all(scopes.map(scope => this.rebuildPlayerScore(contest, relatedSubmission.submitterId, scope)));
+    const userId = relatedSubmission.submitterId;
+    await Promise.all([
+      this.rebuildPlayerScore(contest, userId, ContestRanklistScope.Combined),
+      affectsOfficial && !contest.officialRanklist
+        ? this.contestRepository.manager.transaction(async manager => {
+            const current = await manager.findOne(ContestEntity, {
+              where: { id: contest.id },
+              lock: { mode: "pessimistic_read" }
+            });
+            if (!current || current.officialRanklist) return;
+            await this.rebuildPlayerScore(
+              current,
+              userId,
+              ContestRanklistScope.Official,
+              manager.getRepository(SubmissionEntity),
+              manager.getRepository(ContestPlayerEntity)
+            );
+          })
+        : undefined
+    ]);
   }
 
   private async rebuildPlayerScore(
     contest: ContestEntity,
     userId: number,
-    ranklistScope: ContestRanklistScope
+    ranklistScope: ContestRanklistScope,
+    submissionRepository = this.submissionRepository,
+    playerRepository = this.contestPlayerRepository
   ): Promise<void> {
-    const submissions = await this.submissionRepository.find({
+    const submissions = await submissionRepository.find({
       where: {
         contestId: contest.id,
         submitterId: userId,
-        status: Not(In([SubmissionStatus.Pending, SubmissionStatus.Canceled]))
+        status: Not(In(NON_RANKED_STATUSES))
       },
       order: {
         submitTime: "ASC",
         id: "ASC"
       }
     });
-    const validSubmissions = submissions.filter(
-      submission =>
-        contest.problemIds[submission.contestProblemIndex - 1] === submission.problemId &&
-        this.isSubmissionInRanklistScope(submission, ranklistScope)
+    const validSubmissions = submissions.filter(submission =>
+      this.isRankedSubmission(contest, submission, ranklistScope)
     );
 
-    let player = await this.contestPlayerRepository.findOneBy({
+    const existing = await playerRepository.findOneBy({
       contestId: contest.id,
       userId,
       ranklistScope
     });
 
     if (validSubmissions.length === 0) {
-      if (player) await this.contestPlayerRepository.remove(player);
+      if (existing) await playerRepository.remove(existing);
       return;
     }
 
-    if (!player) {
-      player = new ContestPlayerEntity();
-      player.contestId = contest.id;
-      player.userId = userId;
-      player.ranklistScope = ranklistScope;
-    }
-
-    player.score = 0;
-    player.timeSpent = 0;
-    player.scoreDetails = {};
+    const player = this.newRanklistPlayer(contest.id, userId, ranklistScope);
 
     for (const submission of validSubmissions) {
       this.applySubmissionToPlayer(contest, player, submission, ranklistScope);
     }
 
     this.recalculatePlayerSummary(contest, player);
-    await this.contestPlayerRepository.upsert(player, ["contestId", "userId", "ranklistScope"]);
+    await playerRepository.upsert(player, ["contestId", "userId", "ranklistScope"]);
+  }
+
+  private newRanklistPlayer(contestId: number, userId: number, ranklistScope: ContestRanklistScope) {
+    return Object.assign(new ContestPlayerEntity(), {
+      contestId,
+      userId,
+      ranklistScope,
+      score: 0,
+      timeSpent: 0,
+      scoreDetails: {}
+    });
   }
 
   async ensureCombinedRanklist(contest: ContestEntity): Promise<void> {
@@ -571,11 +703,16 @@ export class ContestService {
     );
   }
 
-  private isSubmissionInRanklistScope(submission: SubmissionEntity, ranklistScope: ContestRanklistScope): boolean {
+  private isRankedSubmission(
+    contest: ContestEntity,
+    submission: SubmissionEntity,
+    ranklistScope: ContestRanklistScope
+  ): boolean {
     return (
-      ranklistScope === ContestRanklistScope.Combined ||
-      !submission.contestPhase ||
-      submission.contestPhase === ContestSubmissionPhase.Official
+      contest.problemIds[submission.contestProblemIndex - 1] === submission.problemId &&
+      (ranklistScope === ContestRanklistScope.Combined ||
+        !submission.contestPhase ||
+        submission.contestPhase === ContestSubmissionPhase.Official)
     );
   }
 

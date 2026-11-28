@@ -1204,7 +1204,7 @@ export class SubmissionService
       submission.judgeResultRevision = uuid();
       const challenge = await this.connection.getRepository(HackAttemptEntity).findOne({
         where: { targetSubmissionId: submission.id, state: HackState.Succeeded, revokedAt: IsNull() },
-        select: ["id", "verdict", "regularResult"],
+        select: ["id", "verdict", "regularResult", "effectiveScore"],
         order: { id: "DESC" }
       });
       if (challenge && progress.status === SubmissionStatus.Accepted) {
@@ -1234,7 +1234,7 @@ export class SubmissionService
       if (recheckError) {
         Object.assign(progress, challenge.regularResult, {
           status: challenge.verdict,
-          score: 0,
+          score: challenge.effectiveScore ?? 0,
           isFirstAccepted: false
         });
       }
@@ -1264,7 +1264,9 @@ export class SubmissionService
           await transactionalEntityManager.update(
             HackAttemptEntity,
             challenge.id,
-            recheckError ? { recheckFailed: true } : { regularResult: progress, recheckFailed: false }
+            recheckError
+              ? { recheckFailed: true }
+              : { regularResult: progress, effectiveScore: progress.score, recheckFailed: false }
           );
         }
       });

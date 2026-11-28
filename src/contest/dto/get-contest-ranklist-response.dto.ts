@@ -11,6 +11,12 @@ export enum GetContestRanklistResponseError {
   PERMISSION_DENIED = "PERMISSION_DENIED"
 }
 
+export enum OfficialRanklistStatus {
+  Review = "review",
+  Settling = "settling",
+  Finalized = "finalized"
+}
+
 export class GetContestRanklistResponseDto {
   @ApiProperty({ enum: GetContestRanklistResponseError })
   error?: GetContestRanklistResponseError;
@@ -26,4 +32,10 @@ export class GetContestRanklistResponseDto {
 
   @ApiProperty({ enum: ContestRanklistScope })
   ranklistScope?: ContestRanklistScope;
+
+  @ApiProperty({ enum: OfficialRanklistStatus, required: false })
+  officialRanklistStatus?: OfficialRanklistStatus;
+
+  @ApiProperty({ required: false })
+  officialRanklistReviewEndsAt?: Date;
 }

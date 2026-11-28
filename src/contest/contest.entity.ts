@@ -9,6 +9,15 @@ export enum ContestType {
   ACM = "acm"
 }
 
+export interface OfficialRanklistSnapshot {
+  finalizedAt: string;
+  startTime: string;
+  endTime: string;
+  type: ContestType;
+  problemIds: number[];
+  rankingParams: Record<string, number>;
+}
+
 @Entity("contest")
 export class ContestEntity {
   @PrimaryGeneratedColumn()
@@ -67,4 +76,7 @@ export class ContestEntity {
 
   @Column({ type: "json", nullable: true })
   rankingParams: Record<string, number>;
+
+  @Column({ type: "json", nullable: true })
+  officialRanklist: OfficialRanklistSnapshot;
 }

@@ -37,8 +37,10 @@ test(
     const { ContestPlayerEntity } = require("../dist/contest/contest-player.entity");
     const { FileEntity } = require("../dist/file/file.entity");
     const { FileService } = require("../dist/file/file.service");
+    const { HackAttemptEntity } = require("../dist/hack/hack.entity");
     const { JudgeClientEntity } = require("../dist/judge/judge-client.entity");
     const { JudgeGateway } = require("../dist/judge/judge.gateway");
+    const { LocalizedContentEntity } = require("../dist/localized-content/localized-content.entity");
     const { ProblemEntity } = require("../dist/problem/problem.entity");
     const { ProblemJudgeInfoEntity } = require("../dist/problem/problem-judge-info.entity");
     const { ProblemFileEntity } = require("../dist/problem/problem-file.entity");
@@ -138,11 +140,17 @@ test(
           ownerId: manager.id,
           type: "Traditional",
           isPublic: true,
-          locales: ["zh-CN"],
+          locales: ["zh_CN"],
           submissionCount: 2,
           acceptedSubmissionCount: 2
         })
       );
+      await db.getRepository(LocalizedContentEntity).save({
+        objectId: problem.id,
+        type: "ProblemTitle",
+        locale: "zh_CN",
+        data: "Hack fixture"
+      });
       await db.getRepository(ProblemJudgeInfoEntity).save({
         problemId: problem.id,
         submittable: true,
@@ -178,7 +186,7 @@ test(
         })
       );
       const submissionRepo = db.getRepository(SubmissionEntity);
-      const newSubmission = async (user, phase) => {
+      const newSubmission = async (user, phase, overrides = {}) => {
         const target = await submissionRepo.save(
           submissionRepo.create({
             problemId: problem.id,
@@ -192,12 +200,13 @@ test(
             memoryUsed: 256,
             submitterId: user.id,
             codeLanguage: "cpp",
-            submitTime: new Date(now - 90000)
+            submitTime: new Date(now - 90000),
+            ...overrides
           })
         );
         await db.getRepository(SubmissionDetailEntity).save({
           submissionId: target.id,
-          result: { progressType: "Finished", status: "Accepted", score: 100 },
+          result: { progressType: "Finished", status: target.status, score: target.score },
           content: { language: "cpp", code: "int main() {}", compileAndRunOptions: {} }
         });
         return target;
@@ -388,6 +397,144 @@ test(
       assert.equal(overQuotaStatus, 409);
       assert.equal(overQuota.message, "HACK_DAILY_LIMIT");
       assert.equal(await successfulHackCount(), 0, "invalid inputs add no successes");
+
+      const board = async (id, ranklistScope = "official") => {
+        const [status, response] = await post("contest/getContestRanklist", {
+          contestId: id,
+          ranklistScope,
+          locale: "zh_CN"
+        });
+        assert.equal(status, 201, JSON.stringify(response));
+        assert.equal(response.error, undefined);
+        return response;
+      };
+      const startHack = async (submission, token = managerToken) => {
+        const [status, response] = await post("hack/create", { id: submission.id, input: "16\n" }, token);
+        assert.equal(status, 201, JSON.stringify(response));
+        return response;
+      };
+      const finishHack = async work => {
+        assert.ok(work?.taskId);
+        assert.equal(await rpc("finishHack", { ...report, taskId: work.taskId }), true);
+      };
+      const newContest = async (type, rankingParams = null) =>
+        await contests.save(
+          contests.create({
+            title: `${seed}-${type}`,
+            subtitle: "",
+            information: "",
+            type,
+            isPublic: true,
+            hideStatistics: false,
+            holderId: manager.id,
+            problemIds: [problem.id],
+            adminIds: [],
+            startTime: new Date(now - 4 * 60 * 60 * 1000),
+            endTime: new Date(now - 30000),
+            rankingParams
+          })
+        );
+      const waitFor = async check => {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const result = await check();
+          if (result) return result;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        assert.fail("ranklist did not reflect the result");
+      };
+
+      const practice = await newSubmission(author, null, { contestId: null, contestProblemIndex: null });
+      await startHack(practice);
+      await finishHack(await rpc("claimHack", 1));
+      let changed = await submissionRepo.findOneByOrFail({ id: practice.id });
+      assert.deepEqual([changed.status, changed.score], ["WrongAnswer", 100]);
+
+      const practiceRejudge = new Promise(resolve => {
+        socket.once("task", (_thread, task, ack) => {
+          ack();
+          resolve(task);
+        });
+        socket.emit("consumeTask", 0);
+      });
+      assert.equal((await post("submission/rejudgeSubmission", { submissionId: practice.id }, managerToken))[0], 201);
+      const practiceTask = await practiceRejudge;
+      socket.emit("progress", {
+        taskMeta: { taskId: practiceTask.taskId, type: practiceTask.type },
+        progress: { progressType: "Finished", status: "Accepted", score: 100, totalOccupiedTime: 0.1 }
+      });
+      let failedReplay = await waitFor(() => rpc("claimHack", 1));
+      for (let run = 0; run < 3; run++) {
+        assert.equal(
+          await rpc("finishHack", { taskId: failedReplay.taskId, report: { outcome: "JudgeError" } }),
+          true
+        );
+        if (run < 2) failedReplay = await waitFor(() => rpc("claimHack", 1));
+      }
+      changed = await submissionRepo.findOneByOrFail({ id: practice.id });
+      assert.deepEqual([changed.status, changed.score], ["WrongAnswer", 100]);
+
+      for (const type of ["ioi", "noi"]) {
+        const scoredContest = await newContest(type, { [problem.id]: 1.5 });
+        const scored = await newSubmission(author, "official", { contestId: scoredContest.id });
+        await startHack(scored);
+        await finishHack(await rpc("claimHack", 1));
+        changed = await submissionRepo.findOneByOrFail({ id: scored.id });
+        assert.deepEqual([changed.status, changed.score], ["WrongAnswer", 100]);
+        const rows = await waitFor(async () => {
+          const result = await board(scoredContest.id);
+          assert.equal(result.officialRanklistStatus, "review");
+          return result.rows.length && result.rows;
+        });
+        assert.equal(rows[0].score, 150);
+        assert.equal(rows[0].scoreDetails[problem.id].status, "WrongAnswer");
+        await contests.update(scoredContest.id, { endTime: new Date(now - 2 * 60 * 60 * 1000 - 30000) });
+        if (type === "noi") {
+          await waitFor(async () => (await contests.findOneByOrFail({ id: scoredContest.id })).officialRanklist);
+        }
+        const scoredSnapshot = await board(scoredContest.id);
+        assert.equal(scoredSnapshot.officialRanklistStatus, "finalized");
+        await contests.update(scoredContest.id, { rankingParams: { [problem.id]: 2 } });
+        assert.deepEqual((await board(scoredContest.id)).rows, scoredSnapshot.rows);
+        assert.equal((await board(scoredContest.id, "combined")).rows[0].score, 200);
+      }
+
+      const sealing = await newContest("acm");
+      const first = await newSubmission(author, "official", {
+        contestId: sealing.id,
+        submitTime: new Date(+sealing.startTime + 12 * 60 * 1000)
+      });
+      const second = await newSubmission(author, null, {
+        contestId: sealing.id,
+        submitTime: new Date(+sealing.startTime + 30 * 60 * 1000)
+      });
+      const early = await startHack(first);
+      const cutoff = new Date(now - 10000);
+      const attempts = db.getRepository(HackAttemptEntity);
+      await attempts.update(early.id, { createdAt: new Date(+cutoff - 1000) });
+      await contests.update(sealing.id, { endTime: new Date(+cutoff - 2 * 60 * 60 * 1000) });
+      const late = await startHack(second, privateAuthorToken);
+      await attempts.update(late.id, { createdAt: cutoff });
+      const settling = await board(sealing.id);
+      assert.equal(settling.officialRanklistStatus, "settling");
+      assert.equal(settling.officialRanklistReviewEndsAt, cutoff.toISOString());
+
+      await finishHack(await rpc("claimHack", 1));
+      assert.equal((await attempts.findOneByOrFail({ id: late.id })).state, "Queued");
+      const finalized = await board(sealing.id);
+      assert.equal(finalized.officialRanklistStatus, "finalized");
+      assert.equal(finalized.rows[0].score, 1);
+      assert.equal(finalized.rows[0].timeSpent, 50 * 60);
+      assert.equal(finalized.rows[0].scoreDetails[problem.id].unacceptedCount, 1);
+      assert.equal(finalized.rows[0].scoreDetails[problem.id].submissionId, second.id);
+
+      await finishHack(await rpc("claimHack", 1));
+      changed = await submissionRepo.findOneByOrFail({ id: second.id });
+      assert.deepEqual([changed.status, changed.score], ["WrongAnswer", 0]);
+      await waitFor(async () => (await board(sealing.id, "combined")).rows[0]?.score === 0);
+      assert.deepEqual((await board(sealing.id)).rows, finalized.rows);
+      assert.equal((await post("hack/revoke", { id: early.id, reason: "Fixture verification" }, managerToken))[0], 201);
+      await waitFor(async () => (await board(sealing.id, "combined")).rows[0]?.score === 1);
+      assert.deepEqual((await board(sealing.id)).rows, finalized.rows);
     } finally {
       try {
         if (socket?.connected) {

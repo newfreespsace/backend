@@ -187,19 +187,28 @@ export class ContestController {
     const ranklistScope = request.ranklistScope || ContestRanklistScope.Official;
     if (ranklistScope === ContestRanklistScope.Combined && !this.contestService.isEnded(contest))
       return { error: GetContestRanklistResponseError.PERMISSION_DENIED };
-    if (ranklistScope === ContestRanklistScope.Combined) await this.contestService.ensureCombinedRanklist(contest);
+    const official = ranklistScope === ContestRanklistScope.Official;
+    const now = new Date();
+    const settled = official ? await this.contestService.finalizeOfficialRanklist(contest, now) : contest;
+    if (!official) await this.contestService.ensureCombinedRanklist(settled);
+    const rankedContest = official ? this.contestService.getOfficialRanklistContest(settled) : settled;
+    const officialRanklistStatus = official ? this.contestService.getOfficialRanklistStatus(settled, now) : undefined;
 
     return {
-      meta: this.contestService.getContestMeta(contest),
+      meta: { ...this.contestService.getContestMeta(rankedContest), problemIds: settled.problemIds },
       problems: await this.contestService.getContestProblems(
-        contest,
+        rankedContest,
         request.locale,
         currentUser,
         false,
         ranklistScope
       ),
-      rows: await this.contestService.getRanklistRows(contest, currentUser, ranklistScope),
-      ranklistScope
+      rows: await this.contestService.getRanklistRows(settled, currentUser, ranklistScope),
+      ranklistScope,
+      officialRanklistStatus,
+      officialRanklistReviewEndsAt: officialRanklistStatus
+        ? this.contestService.getOfficialRanklistReviewEnd(rankedContest)
+        : undefined
     };
   }
 

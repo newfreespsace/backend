@@ -15,7 +15,8 @@ import { DataSource, EntityManager, In, IsNull, LessThan, LessThanOrEqual, MoreT
 
 import { CodeLanguageService } from "@/code-language/code-language.service";
 import { ConfigService } from "@/config/config.service";
-import { ContestPermissionType, ContestService } from "@/contest/contest.service";
+import { ContestEntity, ContestType } from "@/contest/contest.entity";
+import { ContestPermissionType, ContestService, OFFICIAL_RANKLIST_REVIEW_SECONDS } from "@/contest/contest.service";
 import { FileService } from "@/file/file.service";
 import { JudgeQueueService } from "@/judge/judge-queue.service";
 import { logger } from "@/logger";
@@ -30,7 +31,7 @@ import { SubmissionMethod } from "@/remote-judge/remote-judge.types";
 import { SubmissionDetailEntity } from "@/submission/submission-detail.entity";
 import { SubmissionProgressType } from "@/submission/submission-progress.interface";
 import { SubmissionStatus } from "@/submission/submission-status.enum";
-import { SubmissionEntity } from "@/submission/submission.entity";
+import { ContestSubmissionPhase, SubmissionEntity } from "@/submission/submission.entity";
 import { SubmissionPermissionType, SubmissionService } from "@/submission/submission.service";
 import { UserEntity } from "@/user/user.entity";
 
@@ -61,6 +62,14 @@ const KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
 
 const hash = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
+
+function isOfficialContestSubmission(submission: SubmissionEntity) {
+  return submission.contestId && submission.contestPhase !== ContestSubmissionPhase.PostContest;
+}
+
+function scoreAfterHack(regularScore: number, contestType?: ContestType): number {
+  return contestType === ContestType.ACM ? 0 : regularScore;
+}
 
 @Injectable()
 export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatcher {
@@ -327,6 +336,13 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
           if ((await repository.countBy({ challengerId: user.id, quotaDay, charged: true })) >= HACK_DAILY_LIMIT) {
             throw new ConflictException("HACK_DAILY_LIMIT");
           }
+          // Seal only after every admission that took its timestamp before the cutoff has committed.
+          if (isOfficialContestSubmission(target)) {
+            await manager.findOne(ContestEntity, {
+              where: { id: target.contestId },
+              lock: { mode: "pessimistic_read" }
+            });
+          }
           return await repository.save(
             repository.create({
               ...unique,
@@ -359,12 +375,25 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
       const running = await this.attempts.countBy({ state: HackState.Running, leaseUntil: MoreThan(now) });
       if (running >= this.config.config.resourceLimit.hackConcurrentTasks) return null;
       const claim = await this.db.transaction(async manager => {
-        const row = await this.loadTaskRow(manager)
+        const candidates = this.loadTaskRow(manager);
+        const waitingForOfficialRanklist = candidates
+          .subQuery()
+          .select("1")
+          .from(ContestEntity, "contest")
+          .innerJoin(SubmissionEntity, "target", "target.id = hack.targetSubmissionId")
+          .where("contest.id = hack.contestId AND contest.officialRanklist IS NULL")
+          .andWhere("(target.contestPhase IS NULL OR target.contestPhase = :officialPhase)")
+          .andWhere("hack.createdAt >= TIMESTAMPADD(SECOND, :reviewSeconds, contest.endTime)");
+        const row = await candidates
           .where("(hack.state = :queued OR (hack.state = :running AND hack.leaseUntil <= :now)) AND hack.runs < :max", {
             queued: HackState.Queued,
             running: HackState.Running,
             now,
             max: MAX_RUNS
+          })
+          .andWhere(`NOT EXISTS ${waitingForOfficialRanklist.getQuery()}`, {
+            officialPhase: ContestSubmissionPhase.Official,
+            reviewSeconds: OFFICIAL_RANKLIST_REVIEW_SECONDS
           })
           .orderBy("hack.id", "ASC")
           .setLock("pessimistic_write")
@@ -453,8 +482,23 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
           if (!row) return false;
           if (row.state !== HackState.Running) return true;
           if (+row.leaseUntil <= Date.now() !== expired) return false;
+          const contest = current.contestId && (await manager.findOneBy(ContestEntity, { id: current.contestId }));
           if (!this.matches(row, current)) {
             row.state = HackState.Obsolete;
+          } else if (
+            contest &&
+            !contest.officialRanklist &&
+            isOfficialContestSubmission(current) &&
+            row.createdAt >= this.contests.getOfficialRanklistReviewEnd(contest)
+          ) {
+            // A task leased before this rule was deployed may still report after the cutoff.
+            row.state = HackState.Queued;
+            row.taskId = null;
+            row.worker = null;
+            row.leaseUntil = null;
+            row.runs--;
+            await manager.save(row);
+            return true;
           } else if (report.outcome === "JudgeError" && row.runs < MAX_RUNS) {
             row.state = HackState.Queued;
             row.taskId = null;
@@ -463,7 +507,7 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
             await manager.save(row);
             return true;
           } else if (row.replay) {
-            await this.completeReplay(manager, row, current, report);
+            await this.completeReplay(manager, row, current, report, contest ? contest.type : undefined);
           } else {
             row.state = HackState[report.outcome];
             row.verdict = report.verdict ?? null;
@@ -471,11 +515,12 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
             if (row.state === HackState.Succeeded) {
               const detail = await manager.findOneBy(SubmissionDetailEntity, { submissionId: current.id });
               row.regularResult = detail.result;
+              row.effectiveScore = scoreAfterHack(current.score, contest ? contest.type : undefined);
               await this.submissions.storeHackResult(manager, current, {
                 ...detail.result,
                 progressType: SubmissionProgressType.Finished,
                 status: row.verdict,
-                score: 0
+                score: row.effectiveScore
               });
               row.needsRefresh = true;
               row.refreshRevision = current.judgeResultRevision;
@@ -494,13 +539,17 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     manager: EntityManager,
     row: HackAttemptEntity,
     target: SubmissionEntity,
-    report: HackReport
+    report: HackReport,
+    contestType?: ContestType
   ) {
     const detail = await manager.findOneBy(SubmissionDetailEntity, { submissionId: target.id });
     const regular = detail.result;
     const verdict = report.outcome === "Succeeded" ? report.verdict : row.verdict;
     const retainOld = report.outcome === "JudgeError" || report.outcome === "InvalidInput";
-    if (!retainOld) row.regularResult = regular;
+    if (!retainOld) {
+      row.regularResult = regular;
+      row.effectiveScore = report.outcome === "Failed" ? regular.score : scoreAfterHack(regular.score, contestType);
+    }
     const result =
       report.outcome === "Failed"
         ? regular
@@ -508,7 +557,8 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
             ...(retainOld ? row.regularResult ?? regular : regular),
             progressType: SubmissionProgressType.Finished,
             status: verdict,
-            score: 0
+            // Older successful Hacks used zero, so a failed replay keeps that result too.
+            score: row.effectiveScore ?? 0
           };
     await this.submissions.storeHackResult(manager, target, result, !retainOld && report.outcome === "Failed");
     row.state = HackState.Succeeded;
@@ -673,6 +723,7 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
         })
       )
     );
+    await this.contests.finalizeDueOfficialRanklists();
     if (+now < this.nextCleanupAt) return;
     this.nextCleanupAt = +now + 5 * 60 * 1000;
     await this.locks.lock("HackMaterialCleanup", () => this.cleanMaterials(now));
