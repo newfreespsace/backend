@@ -52,6 +52,13 @@ class TargetsDto {
   before?: number;
 }
 
+class TargetDto extends IdDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  contestId?: number;
+}
+
 class CreateDto extends IdDto {
   @IsString()
   @MaxLength(HACK_INPUT_MAX)
@@ -129,6 +136,11 @@ export class HackController {
   @Post("targets")
   async targets(@CurrentUser() user: UserEntity, @Body() request: TargetsDto) {
     return await this.hack.targets(user, request.problemId, request.contestId, request.before);
+  }
+
+  @Post("target")
+  async target(@CurrentUser() user: UserEntity, @Body() request: TargetDto) {
+    return { target: await this.hack.target(user, request.id, request.contestId) };
   }
 
   @Post("create")

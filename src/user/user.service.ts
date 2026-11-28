@@ -6,6 +6,7 @@ import { InjectRepository, InjectDataSource } from "@nestjs/typeorm";
 import { Repository, DataSource, Like, MoreThan, EntityManager, IsNull } from "typeorm";
 
 import { escapeLike } from "@/database/database.utils";
+import { HackAttemptEntity, HackState } from "@/hack/hack.entity";
 import { LockService } from "@/redis/lock.service";
 import { SubmissionService } from "@/submission/submission.service";
 import { SubmissionEntity } from "@/submission/submission.entity";
@@ -279,6 +280,27 @@ export class UserService {
       skip: skipCount,
       take: takeCount
     });
+  }
+
+  async getSuccessfulHackCounts(userIds: number[]): Promise<Map<number, number>> {
+    if (!userIds.length) return new Map();
+
+    const rows = await this.connection
+      .getRepository(HackAttemptEntity)
+      .createQueryBuilder("hack")
+      .select("hack.challengerId", "userId")
+      .addSelect("COUNT(*)", "count")
+      .where("hack.challengerId IN (:...userIds)", { userIds })
+      .andWhere("hack.revokedAt IS NULL")
+      // A queued or running recheck still represents the original successful Hack.
+      .andWhere("(hack.state = :succeeded OR (hack.replay = true AND hack.state IN (:...replayStates)))", {
+        succeeded: HackState.Succeeded,
+        replayStates: [HackState.Queued, HackState.Running]
+      })
+      .groupBy("hack.challengerId")
+      .getRawMany<{ userId: number; count: string | number }>();
+
+    return new Map(rows.map(row => [row.userId, Number(row.count)]));
   }
 
   async getInactiveUserList(skipCount: number, takeCount: number): Promise<[users: UserEntity[], count: number]> {

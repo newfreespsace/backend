@@ -321,9 +321,13 @@ export class UserController {
       };
 
     const [users, count] = await this.userService.getUserList(request.sortBy, request.skipCount, request.takeCount);
+    const [userMetas, hackCounts] = await Promise.all([
+      Promise.all(users.map(user => this.userService.getUserMeta(user, currentUser))),
+      this.userService.getSuccessfulHackCounts(users.map(user => user.id))
+    ]);
 
     return {
-      userMetas: await Promise.all(users.map(user => this.userService.getUserMeta(user, currentUser))),
+      userMetas: userMetas.map(meta => ({ ...meta, successfulHackCount: hackCounts.get(meta.id) ?? 0 })),
       count
     };
   }

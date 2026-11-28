@@ -110,7 +110,12 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     if (this.queue.hackDispatcher === this) this.queue.hackDispatcher = undefined;
   }
 
-  private async checkContext(user: UserEntity, problem: ProblemEntity, contestId?: number) {
+  private async checkContext(
+    user: UserEntity,
+    problem: ProblemEntity,
+    contestId?: number,
+    contestProblemIndex?: number
+  ) {
     if (!user || !problem) return false;
     if ((await this.contests.getContestAccessRestriction(user)).length) return false;
     if (!contestId) return await this.problems.userHasPermission(user, problem, ProblemPermissionType.View);
@@ -118,7 +123,9 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     return (
       !!contest &&
       this.contests.isEnded(contest) &&
-      contest.problemIds.includes(problem.id) &&
+      (contestProblemIndex === undefined
+        ? contest.problemIds.includes(problem.id)
+        : contest.problemIds[contestProblemIndex - 1] === problem.id) &&
       (await this.contests.userHasPermission(user, contest, ContestPermissionType.View))
     );
   }
@@ -128,6 +135,25 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
       problem?.type === ProblemType.Traditional &&
       (!problem.submissionMethod || problem.submissionMethod === SubmissionMethod.Local)
     );
+  }
+
+  private async enabledProfile(problem: ProblemEntity) {
+    return this.localTraditional(problem) && (await this.profiles.findOneBy({ problemId: problem.id, enabled: true }));
+  }
+
+  private async canChallengeTarget(user: UserEntity, target: SubmissionEntity, problem: ProblemEntity) {
+    if (
+      !user ||
+      !target ||
+      target.remote ||
+      target.remoteKey ||
+      (!target.contestId && !target.isPublic && target.submitterId !== user.id) ||
+      !(await this.checkContext(user, problem, target.contestId, target.contestProblemIndex ?? 0))
+    ) {
+      return false;
+    }
+    const author = await this.db.getRepository(UserEntity).findOneBy({ id: target.submitterId });
+    return !author?.isAdmin;
   }
 
   private async canManage(user: UserEntity, target: SubmissionEntity, problem: ProblemEntity) {
@@ -166,7 +192,7 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
   async targets(user: UserEntity, problemId: number, contestId?: number, before?: number) {
     const problem = await this.problems.findProblemById(problemId);
     if (!(await this.checkContext(user, problem, contestId))) throw new ForbiddenException();
-    const profile = this.localTraditional(problem) && (await this.profiles.findOneBy({ problemId, enabled: true }));
+    const profile = await this.enabledProfile(problem);
     if (!profile) return { enabled: false, targets: [] };
 
     const candidates = this.db
@@ -193,6 +219,25 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
       inputLimit: profile.inputLimit,
       targets: rows.map(row => ({ id: row.id, language: row.codeLanguage, time: row.submitTime }))
     };
+  }
+
+  async target(user: UserEntity, id: number, contestId?: number) {
+    if (!user) return null;
+    const target = await this.submissions.findSubmissionById(id);
+    if (
+      !target ||
+      (target.contestId ?? null) !== (contestId ?? null) ||
+      target.status !== SubmissionStatus.Accepted ||
+      target.taskId
+    ) {
+      return null;
+    }
+    const problem = await this.problems.findProblemById(target.problemId);
+    if (!(await this.canChallengeTarget(user, target, problem))) return null;
+    const profile = await this.enabledProfile(problem);
+    return profile
+      ? { id: target.id, language: target.codeLanguage, time: target.submitTime, inputLimit: profile.inputLimit }
+      : null;
   }
 
   private async snapshot(
@@ -250,22 +295,8 @@ export class HackService implements OnModuleInit, OnModuleDestroy, HackDispatche
     if (!initial) throw new NotFoundException();
     return await this.locks.lock(`HackUser_${user.id}`, () =>
       this.submissions.lockSubmission(initial, true, async (target, problem) => {
-        if (!target || !(await this.checkContext(user, problem, target.contestId))) throw new NotFoundException();
-        const author = await this.db.getRepository(UserEntity).findOneBy({ id: target.submitterId });
-        if (
-          author?.isAdmin ||
-          target.remote ||
-          target.remoteKey ||
-          (!target.contestId && !target.isPublic && target.submitterId !== user.id)
-        ) {
-          throw new NotFoundException();
-        }
-        if (target.contestId) {
-          const contest = await this.contests.findContestById(target.contestId);
-          if (contest?.problemIds[target.contestProblemIndex - 1] !== problem.id) throw new NotFoundException();
-        }
-        const profile =
-          this.localTraditional(problem) && (await this.profiles.findOneBy({ problemId: problem.id, enabled: true }));
+        if (!(await this.canChallengeTarget(user, target, problem))) throw new NotFoundException();
+        const profile = await this.enabledProfile(problem);
         if (!profile) throw new ConflictException("HACK_DISABLED");
         const input = Buffer.from(text, "utf8");
         if (input.toString("utf8") !== text || input.length > profile.inputLimit)

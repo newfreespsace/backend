@@ -20,7 +20,7 @@ test("Hack writes keep inputs, solutions and review notes out of request reports
 test(
   "HTTP Hack admission, judge RPC, effective results and download quota",
   { skip: !configPath, timeout: 90000 },
-  async () => {
+  async t => {
     const isolatedConfig = yaml.load(fs.readFileSync(configPath, "utf8"));
     assert.equal(isolatedConfig.services.database.database, "hack_fixture");
     assert.equal(isolatedConfig.services.database.host, "127.0.0.1");
@@ -38,6 +38,7 @@ test(
     const { FileEntity } = require("../dist/file/file.entity");
     const { FileService } = require("../dist/file/file.service");
     const { JudgeClientEntity } = require("../dist/judge/judge-client.entity");
+    const { JudgeGateway } = require("../dist/judge/judge.gateway");
     const { ProblemEntity } = require("../dist/problem/problem.entity");
     const { ProblemJudgeInfoEntity } = require("../dist/problem/problem-judge-info.entity");
     const { ProblemFileEntity } = require("../dist/problem/problem-file.entity");
@@ -66,20 +67,30 @@ test(
     }
     let app;
     let socket;
+    let judgeDisconnected;
     try {
       app = await NestFactory.create(AppModule, { logger: ["error", "warn"], abortOnError: false });
       app.setGlobalPrefix("api");
       app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+      const judgeGateway = app.get(JudgeGateway);
+      const handleDisconnect = judgeGateway.handleDisconnect.bind(judgeGateway);
+      judgeDisconnected = new Promise(resolve => {
+        judgeGateway.handleDisconnect = client => {
+          const result = handleDisconnect(client);
+          resolve(result);
+          return result;
+        };
+      });
       await app.listen(0, "127.0.0.1");
       const endpoint = await app.getUrl();
       const db = app.get(DataSource);
       const seed = Date.now().toString(36);
       const users = db.getRepository(UserEntity);
-      const givenUser = (suffix, isAdmin = false, acceptedProblemCount = 0) =>
+      const givenUser = (suffix, isAdmin = false, acceptedProblemCount = 0, rating = 0) =>
         users.save(
           users.create({
             username: seed + suffix,
-            rating: 0,
+            rating,
             email: `${seed}${suffix}@example.test`,
             nickname: seed + suffix,
             isAdmin,
@@ -93,10 +104,14 @@ test(
         );
       const manager = await givenUser("m", true);
       const author = await givenUser("a", false, 1);
-      const challenger = await givenUser("c");
+      const challenger = await givenUser("c", false, 0, Math.floor(Date.now() / 1000));
+      const privateAuthor = await givenUser("p");
       const authorToken = await app.get(AuthSessionService).newSession(author, "127.0.0.1", "hack-fixture");
       const challengeToken = await app.get(AuthSessionService).newSession(challenger, "127.0.0.1", "hack-fixture");
       const managerToken = await app.get(AuthSessionService).newSession(manager, "127.0.0.1", "hack-fixture");
+      const privateAuthorToken = await app
+        .get(AuthSessionService)
+        .newSession(privateAuthor, "127.0.0.1", "hack-fixture");
       const post = async (route, body, token = challengeToken) => {
         const response = await fetch(endpoint + "/api/" + route, {
           method: "POST",
@@ -104,6 +119,17 @@ test(
           body: JSON.stringify(body)
         });
         return [response.status, await response.json()];
+      };
+      const successfulHackCount = async () => {
+        const [status, result] = await post(
+          "user/getUserList",
+          { sortBy: "rating", skipCount: 0, takeCount: 10 },
+          privateAuthorToken
+        );
+        assert.equal(status, 201, JSON.stringify(result));
+        const row = result.userMetas.find(user => user.id === challenger.id);
+        assert.ok(row, "the public list includes the challenger");
+        return row.successfulHackCount;
       };
 
       const problems = db.getRepository(ProblemEntity);
@@ -178,6 +204,13 @@ test(
       };
       const target = await newSubmission(author, "official");
       const hidden = await newSubmission(manager, "official");
+      const privateTarget = await newSubmission(privateAuthor, "official");
+      await submissionRepo.update(privateTarget.id, {
+        contestId: null,
+        contestProblemIndex: null,
+        contestPhase: null,
+        isPublic: false
+      });
       const program = {
         language: "python",
         code: "import sys\nsys.exit(0)",
@@ -203,13 +236,33 @@ test(
         [target.id]
       );
       assert.deepEqual(Object.keys(targets.targets[0]).sort(), ["id", "language", "time"]);
+      const detail = await post("submission/getSubmissionDetail", { submissionId: String(target.id), locale: "zh_CN" });
+      assert.equal(detail[1].error, "PERMISSION_DENIED");
+      assert.deepEqual(await post("hack/target", { id: target.id, contestId: contest.id }), [
+        201,
+        { target: { ...targets.targets[0], inputLimit: 1048576 } }
+      ]);
+      assert.deepEqual(await post("hack/target", { id: target.id }), [201, { target: null }]);
+      assert.deepEqual(await post("hack/target", { id: target.id, contestId: contest.id + 1 }), [
+        201,
+        { target: null }
+      ]);
+      assert.deepEqual(await post("hack/target", { id: hidden.id, contestId: contest.id }), [201, { target: null }]);
+      assert.deepEqual(await post("hack/target", { id: privateTarget.id }), [201, { target: null }]);
+      assert.equal(
+        (await post("hack/target", { id: privateTarget.id }, privateAuthorToken))[1].target.id,
+        privateTarget.id
+      );
+      assert.equal((await post("hack/target", { id: target.id, contestId: contest.id }, ""))[0], 401);
       assert.equal((await post("hack/create", { id: hidden.id, input: "4\n" }))[0], 404);
       assert.equal((await post("hack/history", { id: target.id }))[0], 404);
 
-      const [createdStatus, created] = await post("hack/create", { id: target.id, input: "4\n" });
+      const preservedInput = "\n  4  \n\n";
+      const [createdStatus, created] = await post("hack/create", { id: target.id, input: preservedInput });
       assert.equal(createdStatus, 201, JSON.stringify(created));
-      assert.equal((await post("hack/create", { id: target.id, input: "4\n" }))[1].id, created.id);
+      assert.equal((await post("hack/create", { id: target.id, input: preservedInput }))[1].id, created.id);
       assert.equal((await post("hack/create", { id: target.id, input: "5\n" }))[1].message, "HACK_ALREADY_PENDING");
+      assert.equal(await successfulHackCount(), 0, "a newly queued Hack does not count");
 
       const key = require("node:crypto").randomBytes(20).toString("hex");
       await db.getRepository(JudgeClientEntity).save({ name: seed, key, allowedHosts: [] });
@@ -237,7 +290,7 @@ test(
         });
       assert.equal(await rpc("claimHack", 0), false);
       const task = await rpc("claimHack", 1);
-      assert.equal(Buffer.from(task.input).toString(), "4\n");
+      assert.equal(Buffer.from(task.input).toString(), preservedInput);
       const compilerArtifact = task.snapshot.testData["basic.in"];
       assert.deepEqual(Buffer.from(task.snapshot.artifacts[compilerArtifact], "base64"), Buffer.from("1\n"));
       assert.equal(await rpc("heartbeatHack", task.taskId), true);
@@ -247,9 +300,11 @@ test(
       };
       assert.equal(await rpc("finishHack", report), true);
       assert.equal(await rpc("finishHack", report), true);
+      assert.equal(await successfulHackCount(), 1, "another user can see the success and the duplicate report counts once");
       const final = await submissionRepo.findOneByOrFail({ id: target.id });
       assert.equal(final.status, "WrongAnswer");
       assert.equal(final.score, 0);
+      assert.deepEqual(await post("hack/target", { id: target.id, contestId: contest.id }), [201, { target: null }]);
       assert.equal(+final.submitTime, +target.submitTime);
       assert.equal((await users.findOneByOrFail({ id: author.id })).acceptedProblemCount, 0);
       assert.equal((await post("hack/download", { id: created.id, input: true, output: true }))[0], 404);
@@ -276,7 +331,7 @@ test(
       assert.equal(downloadStatus, 201, JSON.stringify(download));
       assert.deepEqual(
         download.files.map(file => Buffer.from(file.data, "base64").toString()),
-        ["4\n", "16\n"]
+        [preservedInput, "16\n"]
       );
       assert.equal(download.remaining, isolatedConfig.resourceLimit.problemTestdataDailyDownloadFiles - 3);
       assert.equal((await post("hack/history", { id: target.id }, authorToken))[1][0].challengerId, undefined);
@@ -311,7 +366,9 @@ test(
       }
       assert.ok(replay, "ordinary rejudge queued a new Hack verification");
       assert.equal(Buffer.from(replay.referenceOutput).toString(), "16\n");
+      assert.equal(await successfulHackCount(), 1, "an in-flight recheck retains the successful Hack");
       assert.equal(await rpc("finishHack", { ...report, taskId: replay.taskId }), true);
+      assert.equal(await successfulHackCount(), 1, "reconfirming the same Hack adds no success");
       assert.equal((await submissionRepo.findOneByOrFail({ id: target.id })).status, "WrongAnswer");
       assert.equal(
         (await post("hack/revoke", { id: created.id, reason: "Fixture verification" }, managerToken))[0],
@@ -319,6 +376,7 @@ test(
       );
       assert.equal((await submissionRepo.findOneByOrFail({ id: target.id })).status, "Accepted");
       assert.equal((await users.findOneByOrFail({ id: author.id })).acceptedProblemCount, 1);
+      assert.equal(await successfulHackCount(), 0, "revocation removes the success from the public list");
 
       for (let attempt = 2; attempt <= 10; attempt++) {
         const [status] = await post("hack/create", { id: target.id, input: `invalid-${attempt}` });
@@ -329,14 +387,29 @@ test(
       const [overQuotaStatus, overQuota] = await post("hack/create", { id: target.id, input: "invalid-11" });
       assert.equal(overQuotaStatus, 409);
       assert.equal(overQuota.message, "HACK_DAILY_LIMIT");
+      assert.equal(await successfulHackCount(), 0, "invalid inputs add no successes");
     } finally {
-      socket?.disconnect();
       try {
-        await app?.close();
+        if (socket?.connected) {
+          // Await the Redis cleanup and discard the delayed offline warning before closing Redis.
+          t.mock.timers.enable({ apis: ["setTimeout"] });
+          try {
+            socket.disconnect();
+            await judgeDisconnected;
+          } finally {
+            t.mock.timers.reset();
+          }
+        } else {
+          socket?.disconnect();
+        }
       } finally {
-        for (const client of clients) client.disconnect();
-        RedisService.prototype.getClient = getClient;
-        RedisService.prototype.getSharedClient = getSharedClient;
+        try {
+          await app?.close();
+        } finally {
+          for (const client of clients) client.disconnect();
+          RedisService.prototype.getClient = getClient;
+          RedisService.prototype.getSharedClient = getSharedClient;
+        }
       }
     }
   }
